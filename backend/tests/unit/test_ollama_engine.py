@@ -38,6 +38,7 @@ def test_ollama_translation_retries_invalid_json_then_succeeds() -> None:
     assert result.warnings == []
     assert len(calls) == 3
     assert all(call["format"] == "json" for call in calls)
+    assert all(call["options"]["num_predict"] == 1024 for call in calls)
 
 
 def test_ollama_translation_fails_after_bounded_retries() -> None:
@@ -124,16 +125,25 @@ def test_ordinary_english_without_cjk_is_rejected() -> None:
 
 
 def test_mixed_translation_must_preserve_protected_tokens() -> None:
+    calls: list[dict[str, Any]] = []
     responses = iter(
         [
             {"message": {"content": '{"1":"请访问网站查看详情。"}'}},
-            {"message": {"content": '{"1":"请访问 https://example.com 查看 2026 年详情。"}'}},
+            {
+                "message": {
+                    "content": ('{"1":"请访问 LVT_TOKEN_0001 查看 LVT_TOKEN_0002 年详情。"}')
+                }
+            },
         ]
     )
 
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        calls.append(payload)
+        return next(responses)
+
     engine = OllamaTranslationEngine(
         max_attempts=2,
-        request_fn=lambda _url, _payload, _timeout: next(responses),
+        request_fn=request,
     )
     result = engine.translate(
         {1: "Visit https://example.com for 2026 details."},
@@ -141,6 +151,102 @@ def test_mixed_translation_must_preserve_protected_tokens() -> None:
     )
 
     assert result.texts == {1: "请访问 https://example.com 查看 2026 年详情。"}
+    prompt = calls[0]["messages"][0]["content"]
+    assert "LVT_TOKEN_0001" in prompt
+    assert "LVT_TOKEN_0002" in prompt
+    assert "Protected Placeholders" in prompt
+
+
+def test_repeated_nasa_must_be_returned_once_per_occurrence() -> None:
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=lambda _url, _payload, _timeout: {
+            "message": {"content": ('{"1":"LVT_TOKEN_0001 在 LVT_TOKEN_0003 年发射了任务。"}')}
+        },
+    )
+
+    with pytest.raises(TranslationEngineError, match="placeholder sequence mismatch"):
+        engine.translate({1: "NASA and NASA launched in 2026"}, "en")
+
+
+def test_repeated_url_must_be_returned_once_per_occurrence() -> None:
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=lambda _url, _payload, _timeout: {
+            "message": {"content": '{"1":"访问 LVT_TOKEN_0001。"}'}
+        },
+    )
+
+    with pytest.raises(TranslationEngineError, match="placeholder sequence mismatch"):
+        engine.translate(
+            {1: "Visit https://example.com and https://example.com"},
+            "en",
+        )
+
+
+def test_number_placeholder_requires_strict_boundaries() -> None:
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=lambda _url, _payload, _timeout: {
+            "message": {"content": '{"1":"任务于 1LVT_TOKEN_0001 年启动。"}'}
+        },
+    )
+
+    with pytest.raises(TranslationEngineError, match="placeholder boundary"):
+        engine.translate({1: "The mission started in 2026"}, "en")
+
+
+def test_protected_token_order_must_not_change() -> None:
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=lambda _url, _payload, _timeout: {
+            "message": {
+                "content": ('{"1":"LVT_TOKEN_0002 由 LVT_TOKEN_0001 于 LVT_TOKEN_0003 年发布。"}')
+            }
+        },
+    )
+
+    with pytest.raises(TranslationEngineError, match="placeholder sequence mismatch"):
+        engine.translate({1: "NASA launched GPT-5 in 2026"}, "en")
+
+
+@pytest.mark.parametrize(
+    "bad_translation",
+    [
+        "任务已完成。",
+        "LVT_TOKEN_0001 和 LVT_TOKEN_9999 完成任务。",
+        "LVT_TOKEN_001 完成任务。",
+        "LVT_TOKEN_0001 和 LVT_TOKEN_0001 完成任务。",
+    ],
+)
+def test_deleted_added_modified_or_duplicated_placeholder_is_rejected(
+    bad_translation: str,
+) -> None:
+    response = json.dumps({"1": bad_translation}, ensure_ascii=False)
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=lambda _url, _payload, _timeout: {"message": {"content": response}},
+    )
+
+    with pytest.raises(TranslationEngineError, match="placeholder"):
+        engine.translate({1: "NASA completed the mission in 2026"}, "en")
+
+
+def test_repeated_tokens_restore_exact_count_boundaries_and_order() -> None:
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=lambda _url, _payload, _timeout: {
+            "message": {
+                "content": ('{"1":"LVT_TOKEN_0001 和 LVT_TOKEN_0002 于 LVT_TOKEN_0003 年发射。"}')
+            }
+        },
+    )
+
+    result = engine.translate({1: "NASA and NASA launched in 2026"}, "en")
+
+    assert result.texts == {1: "NASA 和 NASA 于 2026 年发射。"}
+    assert result.texts[1].count("NASA") == 2
+    assert "12026" not in result.texts[1]
 
 
 def test_both_translation_models_fail() -> None:

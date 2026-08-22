@@ -22,13 +22,13 @@
 ```bash
 cd backend
 ../.venv-smoke/bin/python -m pytest
-# 64 项通过，另有 1 条第三方 StarletteDeprecationWarning
+# 78 项通过，另有 1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m ruff check src tests ../scripts
 # 所有检查通过
 
 ../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
-# 42 个文件格式正确
+# 43 个文件格式正确
 
 ../.venv-smoke/bin/python -m mypy src/lvt
 # 通过：27 个源码文件未发现类型问题
@@ -41,17 +41,44 @@ cd backend
 
 最终实现：
 
-- 完整 URL、时间码、纯数字、Speaker 标签、明确缩写/产品 token 直接 passthrough，
-  不调用 Ollama。
+- 完整 URL、时间码、纯数字和 Speaker 标签直接 passthrough，不调用 Ollama。
+- 缩写仅使用显式白名单 `NASA`；产品名使用显式白名单 `OpenAI`；
+  `GPT-5` 类文本必须同时具备大写、连字符和数字强特征。
+- Good Morning、Thank You、This Is Fine、Hello World、STOP、HELLO 以及无法可靠
+  判断的 Elon Musk、New York 均进入模型，不使用宽泛 Title Case/全大写规则。
 - 混合批次只把需要翻译的 ID 发送给模型，再按原 ID 顺序合并完整结果。
 - 普通英文、俄文等正文仍要求模型输出包含简体中文。
-- 混合句中的 URL、时间码、数字和 NASA/GPT-5 等受保护 token 必须原样保留。
+- 每次受保护 token 出现均替换为全局唯一 `LVT_TOKEN_XXXX` 占位符。
+- 模型结果必须按 Segment 返回完全相同的占位符 ID、数量和顺序，且占位符不能与
+  ASCII 字母、数字或下划线粘连；通过后才逐次恢复原 token。
+- Ollama 输出限制为 `num_predict=1024`，避免异常生成无限延长单次尝试。
 - 主模型和 fallback 都失败时继续返回明确错误，绝不使用原文伪装翻译成功。
 - `source_text` 永久不变，只有 `translated_text` 接收 passthrough 或译文。
 
-新增测试覆盖纯 URL、时间码、数字、Speaker、NASA/GPT-5、普通英文无中文拒绝、
-混合 batch 仅发送部分 ID、完整 ID 合并、受保护 token、Segment 顺序与字段不变量、
-以及主备模型双失败。
+新增测试覆盖普通 Title Case/全大写反例、白名单规则、重复 NASA/URL、数字边界、
+token 删除/增加/修改/重复/错序、混合 batch、完整 ID 合并、Segment 字段不变量、
+模型输出上限以及主备模型双失败。
+
+### Fake/Recording Engine 确定性测试
+
+上述分类、只发送部分 ID、占位符增删改错序、边界、合并和双失败反例由 pytest
+中的 Fake/Recording Engine 确定性测试覆盖，不作为真实模型成功证据。真实模型与
+真实媒体结果分别记录在下面两个独立章节。
+
+### 真实 Ollama passthrough/token smoke
+
+```bash
+.venv-smoke/bin/python scripts/run-translation-passthrough-smoke.py \
+  --output "$PWD/.tmp-strict-token-smoke/report.json"
+# exit 0
+```
+
+- 未发送模型的 ID：`[1, 2, 3, 4, 5]`，分别为 URL、数字、NASA、GPT-5、OpenAI。
+- 实际发送模型的 ID：`[6, 7, 8, 9, 10]`，包括 Good Morning、STOP、重复 NASA、
+  重复 URL 和时间码混合句。
+- 重复 NASA、重复 URL、2026、00:03:21 的数量、边界和顺序恢复一致。
+- 本次使用 `hy-mt2:1.8b-q4km-fixed`，未触发 fallback。
+- 机器报告：`docs/PHASE-1-STRICT-TOKEN-OLLAMA-SMOKE.json`。
 
 ### 可重复生成的媒体测试资产
 
@@ -92,6 +119,20 @@ python -m http.server 8891 --bind 127.0.0.1 --directory test-assets/generated
 
 补充机器可读报告：`docs/PHASE-1-PASSTHROUGH-FOLLOWUP.json`。
 
+严格 token 修复后再次运行：
+
+```bash
+.venv-smoke/bin/python scripts/run-real-e2e.py \
+  --base-url http://127.0.0.1:8891 \
+  --output-root "$PWD/.tmp-real-e2e-strict-token-v2"
+
+.venv-smoke/bin/python scripts/verify-real-e2e.py \
+  .tmp-real-e2e-strict-token-v2/real-e2e-report.json
+# exit 0：已验证 5 个样本和 40 个导出文件
+```
+
+最新机器报告：`docs/PHASE-1-STRICT-TOKEN-E2E.json`。
+
 所有任务均使用真实的 `YtDlpFFmpegDownloader`、`MLXWhisperASREngine`、
 `SherpaOnnxDiarizationEngine` 和 Ollama 翻译引擎。以下命令没有使用 Fake Engine。
 
@@ -117,6 +158,10 @@ python -m http.server 8891 --bind 127.0.0.1 --directory test-assets/generated
 5. `engine_versions.translation` 记录为 `ollama:qwen2.5:1.5b`。
 
 其他四个本地任务均未触发降级。
+
+严格 token 最新媒体回归中，俄语任务的 Hy-MT2 三次输出均在
+`num_predict=1024` 上限内结束，但 JSON 字符串不完整，因此显式降级到 qwen。
+qwen 返回有效结构，`warnings` 与 `engine_versions.translation` 均记录实际模型。
 
 ### 公开网络视频烟雾测试
 
@@ -161,6 +206,8 @@ jq '{samples:[.]}' .tmp-public-smoke/public-smoke-report.json \
 - 合成视频时长为 11–16 秒，尚未覆盖 v0.1 后续要求的 30–120 秒测试资产和
   20 分钟以上压力测试。
 - 本阶段只测试了一个公开网络 URL，远程资源未来可能失效。
+- 专有名词识别故意采用保守策略；NASA/OpenAI 使用显式白名单，其他无法可靠识别
+  的人名、地名和产品名进入模型处理。新增名称需显式扩展白名单或使用可靠 NER。
 - FastAPI `TestClient` 会输出一条来自上游 `httpx` 的弃用警告，不影响测试结果。
 - 队列、取消、重启恢复、Chrome 扩展、安装器和打包明确不属于 Phase 1，本报告
   未将这些能力描述为已实现或已通过。

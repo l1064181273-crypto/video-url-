@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "source_language": "en",
+  "primary_model": "hy-mt2:1.8b-q4km-fixed",
+  "fallback_model": "qwen2.5:1.5b",
+  "classification": {
+    "1": "url",
+    "2": "number",
+    "3": "proper_token",
+    "4": "proper_token",
+    "5": "proper_token",
+    "6": "translate",
+    "7": "translate",
+    "8": "translate",
+    "9": "translate",
+    "10": "translate"
+  },
+  "model_call_count": 1,
+  "sent_ids": [
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "passthrough_ids": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "source": {
+    "1": "https://example.com",
+    "2": "2026",
+    "3": "NASA",
+    "4": "GPT-5",
+    "5": "OpenAI",
+    "6": "Good Morning",
+    "7": "NASA and NASA launched in 2026",
+    "8": "Websites: https://example.com and https://example.com",
+    "9": "STOP",
+    "10": "The time code is 00:03:21"
+  },
+  "translated": {
+    "1": "https://example.com",
+    "2": "2026",
+    "3": "NASA",
+    "4": "GPT-5",
+    "5": "OpenAI",
+    "6": "早上好",
+    "7": "NASA 和 NASA 在 2026 中发布",
+    "8": "网站：https://example.com 和 https://example.com",
+    "9": "停止",
+    "10": "时间代码为 00:03:21"
+  },
+  "protected_tokens": {
+    "1": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "2": {
+      "source": [
+        "2026"
+      ],
+      "translated": [
+        "2026"
+      ]
+    },
+    "3": {
+      "source": [
+        "NASA"
+      ],
+      "translated": [
+        "NASA"
+      ]
+    },
+    "4": {
+      "source": [
+        "GPT-5"
+      ],
+      "translated": [
+        "GPT-5"
+      ]
+    },
+    "5": {
+      "source": [
+        "OpenAI"
+      ],
+      "translated": [
+        "OpenAI"
+      ]
+    },
+    "6": {
+      "source": [],
+      "translated": []
+    },
+    "7": {
+      "source": [
+        "NASA",
+        "NASA",
+        "2026"
+      ],
+      "translated": [
+        "NASA",
+        "NASA",
+        "2026"
+      ]
+    },
+    "8": {
+      "source": [
+        "https://example.com",
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com",
+        "https://example.com"
+      ]
+    },
+    "9": {
+      "source": [],
+      "translated": []
+    },
+    "10": {
+      "source": [
+        "00:03:21"
+      ],
+      "translated": [
+        "00:03:21"
+      ]
+    }
+  },
+  "engine_version": "ollama:hy-mt2:1.8b-q4km-fixed",
+  "warnings": [],
+  "assertions": {
+    "only_expected_ids_sent": true,
+    "complete_id_order_preserved": true,
+    "passthrough_exact": true,
+    "token_count_boundary_order_preserved": true,
+    "ordinary_text_contains_cjk": true
+  }
+}

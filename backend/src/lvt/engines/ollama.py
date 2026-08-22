@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from lvt.engines.base import TranslationResult
-from lvt.engines.translation import protected_tokens
+from lvt.engines.translation import protect_texts, restore_protected_text
 
 RequestFn = Callable[[str, dict[str, Any], float], dict[str, Any]]
 LANGUAGE_NAMES = {
@@ -81,7 +81,7 @@ def resolve_language_name(code: str) -> str:
         ) from exc
 
 
-def validate_translation_text(source_text: str, value: object) -> str:
+def validate_translation_text(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("translation contains an empty or non-string value")
     cleaned = value.strip()
@@ -91,9 +91,6 @@ def validate_translation_text(source_text: str, value: object) -> str:
         raise ValueError("translation contains notes, labels, or timestamps")
     if not re.search(r"[\u3400-\u9fff]", cleaned):
         raise ValueError("Simplified Chinese translation contains no CJK text")
-    missing_tokens = [token for token in protected_tokens(source_text) if token not in cleaned]
-    if missing_tokens:
-        raise ValueError(f"translation changed protected tokens: {missing_tokens}")
     return cleaned
 
 
@@ -120,7 +117,12 @@ class OllamaTranslationEngine:
         if not texts:
             return TranslationResult({}, self.version, [])
         source_language_name = resolve_language_name(source_language)
-        source_data = {str(key): value for key, value in texts.items()}
+        protected_texts, placeholder_manifest = protect_texts(texts)
+        source_data = {str(key): value for key, value in protected_texts.items()}
+        manifest_data = {
+            str(key): [token.placeholder for token in tokens]
+            for key, tokens in placeholder_manifest.items()
+        }
         prompt = (
             "### Task\n"
             f"Translate the user-facing text values from {source_language_name} into "
@@ -128,7 +130,11 @@ class OllamaTranslationEngine:
             "### Strict Rules\n"
             "1. Return ONLY one valid JSON object with the exact same keys.\n"
             "2. Translate ONLY values. Never change, add, remove, merge, or reorder keys.\n"
-            "3. Values contain translated text only, with no notes or labels.\n\n"
+            "3. Values contain translated text only, with no notes or labels.\n"
+            "4. Copy every LVT_TOKEN placeholder exactly once, in the listed order.\n"
+            "5. Never modify, remove, duplicate, or reorder placeholders.\n\n"
+            "### Protected Placeholders By ID\n"
+            f"{json.dumps(manifest_data, ensure_ascii=False)}\n\n"
             "### Source Data\n"
             f"{json.dumps(source_data, ensure_ascii=False)}"
         )
@@ -148,6 +154,7 @@ class OllamaTranslationEngine:
                             "top_k": 20,
                             "repeat_penalty": 1.05,
                             "seed": 42,
+                            "num_predict": 1024,
                         },
                     },
                     self.timeout,
@@ -160,7 +167,10 @@ class OllamaTranslationEngine:
                 if set(result) != set(texts):
                     raise ValueError("translation id set mismatch")
                 validated = {
-                    key: validate_translation_text(texts[key], value)
+                    key: restore_protected_text(
+                        validate_translation_text(value),
+                        placeholder_manifest[key],
+                    )
                     for key, value in result.items()
                 }
                 return TranslationResult(

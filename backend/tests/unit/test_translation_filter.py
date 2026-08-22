@@ -22,6 +22,12 @@ class RecordingTranslationEngine:
         translated = {
             key: {
                 "Hello world.": "你好，世界。",
+                "Good Morning": "早上好",
+                "Thank You": "谢谢",
+                "This Is Fine": "这很好",
+                "Hello World": "你好，世界",
+                "STOP": "停止",
+                "HELLO": "你好",
                 "Visit https://example.com for details": "访问 https://example.com 查看详情",
                 "NASA launched the mission in 2026": "NASA 在 2026 年发射了该任务",
             }[value]
@@ -40,8 +46,14 @@ class RecordingTranslationEngine:
         ("NASA", TextDisposition.PROPER_TOKEN),
         ("GPT-5", TextDisposition.PROPER_TOKEN),
         ("OpenAI", TextDisposition.PROPER_TOKEN),
-        ("Elon Musk", TextDisposition.PROPER_TOKEN),
-        ("New York", TextDisposition.PROPER_TOKEN),
+        ("Elon Musk", TextDisposition.TRANSLATE),
+        ("New York", TextDisposition.TRANSLATE),
+        ("Good Morning", TextDisposition.TRANSLATE),
+        ("Thank You", TextDisposition.TRANSLATE),
+        ("This Is Fine", TextDisposition.TRANSLATE),
+        ("Hello World", TextDisposition.TRANSLATE),
+        ("STOP", TextDisposition.TRANSLATE),
+        ("HELLO", TextDisposition.TRANSLATE),
         ("Hello world.", TextDisposition.TRANSLATE),
         ("Visit https://example.com for details", TextDisposition.TRANSLATE),
         ("NASA launched the mission in 2026", TextDisposition.TRANSLATE),
@@ -61,8 +73,6 @@ def test_text_classification(text: str, disposition: TextDisposition) -> None:
         "NASA",
         "GPT-5",
         "OpenAI",
-        "Elon Musk",
-        "New York",
     ],
 )
 def test_complete_passthrough_text_never_calls_model(text: str) -> None:
@@ -74,6 +84,31 @@ def test_complete_passthrough_text_never_calls_model(text: str) -> None:
     assert delegate.calls == []
     assert result.texts == {1: text}
     assert result.engine_version == "passthrough:no-translation-required"
+
+
+def test_ordinary_title_case_and_uppercase_text_calls_model() -> None:
+    delegate = RecordingTranslationEngine()
+    engine = FilteringTranslationEngine(delegate)
+    source = {
+        1: "Good Morning",
+        2: "Thank You",
+        3: "This Is Fine",
+        4: "Hello World",
+        5: "STOP",
+        6: "HELLO",
+    }
+
+    result = engine.translate(source, "en")
+
+    assert delegate.calls == [source]
+    assert result.texts == {
+        1: "早上好",
+        2: "谢谢",
+        3: "这很好",
+        4: "你好，世界",
+        5: "停止",
+        6: "你好",
+    }
 
 
 def test_mixed_batch_only_sends_translatable_ids_and_merges_in_order() -> None:

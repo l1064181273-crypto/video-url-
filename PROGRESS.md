@@ -92,7 +92,11 @@
   - ✅ Phase 1 follow-up：增加非翻译文本分类与过滤层；纯 URL、时间码、数字、Speaker、NASA/GPT-5 直接 passthrough，混合批次只发送需翻译 ID，合并后保持完整 ID/顺序/Segment 字段。
   - ✅ Phase 1 follow-up：普通正文仍强制中文；混合句强制保留 URL、数字和专有 token；主备模型双失败仍明确报错，不用原文伪装成功。
   - ✅ Phase 1 follow-up 真实回归：本地 HTTP 5 样本/40 文件再次生成并回读通过，机器报告为 `docs/PHASE-1-PASSTHROUGH-FOLLOWUP.json`。
-  - ✅ Phase 1 质量门：`pytest` 64 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
+  - ✅ Phase 1 strict-token follow-up：移除宽泛 Title Case/全大写 passthrough；仅保留 NASA/OpenAI 显式白名单及 GPT-5 类连字符+数字强特征，Good Morning/STOP/Elon Musk 等均进入模型。
+  - ✅ Phase 1 strict-token follow-up：每次 token 出现使用唯一 `LVT_TOKEN_XXXX`；严格验证 Segment 内占位符 ID、数量、顺序和 ASCII 边界后逐次恢复；Ollama 增加 `num_predict=1024` 有界输出。
+  - ✅ Phase 1 真实 Ollama smoke：passthrough IDs `[1,2,3,4,5]` 未发送模型，translate IDs `[6,7,8,9,10]` 实际发送；重复 NASA/URL、数字、时间码恢复一致，报告为 `docs/PHASE-1-STRICT-TOKEN-OLLAMA-SMOKE.json`。
+  - ✅ Phase 1 strict-token 媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过，报告为 `docs/PHASE-1-STRICT-TOKEN-E2E.json`。
+  - ✅ Phase 1 质量门：`pytest` 78 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
   - **Phase 1 退出条件已满足**：三个真实媒体引擎已接入统一 Pipeline，并通过真实 HTTP fixture 生成与验证合规 8 文件。
   - ⏭️ 下一步：等待独立审查；本轮不开始 Phase 2/3/4。
 
