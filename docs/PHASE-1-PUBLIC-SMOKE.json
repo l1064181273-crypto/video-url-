@@ -1,0 +1,28 @@
+{
+  "url": "https://upload.wikimedia.org/wikipedia/commons/0/0d/%22We_should_do_it_ourselves%22_Francis_K%C3%A9r%C3%A9.webm",
+  "title": "_We_should_do_it_ourselves__Francis_Kéré",
+  "duration_ms": 47488,
+  "language": "en",
+  "segment_count": 6,
+  "speakers": [
+    "Speaker 1"
+  ],
+  "engine_versions": {
+    "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+    "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+    "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+    "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+  },
+  "warnings": [],
+  "output_dir": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a",
+  "artifacts": [
+    "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a/source.txt",
+    "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a/source.srt",
+    "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a/source.vtt",
+    "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a/source.json",
+    "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a/zh-CN.txt",
+    "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a/zh-CN.srt",
+    "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a/zh-CN.vtt",
+    "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a/zh-CN.json"
+  ]
+}

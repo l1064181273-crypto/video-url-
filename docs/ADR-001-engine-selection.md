@@ -61,17 +61,43 @@ brief 给出的 mlx-whisper / faster-whisper / WhisperX / pyannote / Hy-MT2 均�
     但不是 v0.1 验收依赖。这直接消除 brief 已知阻塞（DIARIZATION_TOKEN_REQUIRED）成为默认路径的风险。
   - 集群数：已知说话人数时用固定 `num_clusters`；未知时用阈值聚类（`cluster.threshold`）。
 
-### 4. 翻译：**Ollama + qwen2.5:1.5b**（取代 Hy-MT2 作为 v0.1 基线）
+### 4. 翻译：**Ollama + Hy-MT2-1.8B Q4_K_M**（主）+ qwen2.5:1.5b（fallback）
 
-- Ollama `0.32.15`；模型 `qwen2.5:1.5b`（986 MB，**Apache-2.0**，可再分发/本地运行）。
-- 烟雾测试（生产同构模式）：
-  - 输入 `{id: source_text}`（含 EN + RU），system 要求返回**相同 id → 中文**的 JSON。
-  - 使用 `format=json` + `temperature=0`。
-  - 输出：3 条全部翻译，**id 集合完全一致**、全部非空字符串、1.5s。
-- **关键决策**：`Hy-MT2` 在 Ollama registry 不存在（`registry.ollama.ai/v2/library/hy-mt2` → 404），
-  无法作为 v0.1 一键拉取的默认；故基线锁定为 qwen2.5:1.5b。
-  - 若后续取得 Hy-MT2 的 GGUF，可通过 `TranslationEngine` 接口 + Modelfile 作为可选增强，非 v0.1 依赖。
-  - 备选：`qwen2.5:3b`（质量更高，16GB 可跑）；`gemma2:2b`。均通过接口切换，不改上层。
+- Ollama `0.32.15`；主模型为腾讯官方
+  `hf.co/tencent/Hy-MT2-1.8B-GGUF:Q4_K_M`（1.79B、Q4_K_M、1.1 GB、**Apache-2.0**）。
+- Phase 0.1 纠正：`registry.ollama.ai/v2/library/hy-mt2` 的 404 只表示 Ollama 官方 library
+  没有短名称，不表示 Hugging Face GGUF 不可运行。以下命令已真实下载成功：
+  `ollama pull hf.co/tencent/Hy-MT2-1.8B-GGUF:Q4_K_M`。
+- 直接导入缺陷与修复：
+  - Ollama 0.32.15 为该模型自动生成了损坏的 TEMPLATE（出现 `{{ end }}onse }}`），
+    导致 JSON 测试稳定返回错误键 `{"name":"Nyonse"}`。
+  - 按腾讯官方 `chat_template.jinja` 转写为
+    `packaging/ollama/Modelfile.hy-mt2-1.8b-q4km`，复用已下载 GGUF 执行
+    `ollama create hy-mt2:1.8b-q4km-fixed -f <Modelfile>` 后恢复正常。
+  - 安装流程必须使用该 Modelfile 创建本地模型，不能直接信任当前 Ollama 自动模板。
+- Phase 0.1 A/B 方法：
+  - EN、RU、斯瓦希里语各组成独立的双 Segment JSON 批次，符合单个视频通常只有一种源语言的实际场景；提示使用完整语言名。
+  - **范围说明**：Swahili 不在 Hy-MT2 官方支持表中，本项仅为探索性超范围压力测试，不能用于宣称官方支持。生产代码只映射官方列出的 38 个代码，未知代码明确报错。
+  - 每模型每语言运行 3 次，共 9 次；`format=json`、`temperature=0`、固定 seed。
+  - 强制验证 id 集合、值类型/非空/含中文、原文未原样返回，以及翻译前后
+    `id/start_ms/end_ms/speaker/source_language/source_text` 完全不变，只写 `translated_text`。
+  - 完整机器可读结果：`docs/PHASE-0.1-TRANSLATION-AB.json`；可复现脚本：
+    `scripts/phase01_translation_ab.py`。
+- A/B 实测（Apple M5 / 16 GB）：
+
+| 指标 | Hy-MT2-1.8B Q4_K_M | qwen2.5:1.5b |
+|---|---:|---:|
+| JSON/结构不变量 | 9/9 通过 | 9/9 通过 |
+| 冷首请求 | 1.008s | 1.264s |
+| 热请求中位数 | 0.350s | 0.307s |
+| 热生成速度 | 99.27 tok/s | 112.62 tok/s |
+| Ollama `size_vram`（统一内存） | 1,446,772,735 B（约 1379 MiB） | 1,163,080,498 B（约 1109 MiB） |
+| EN/RU 人工抽查 | 准确、自然 | 基本准确 |
+| 探索性 Swahili（官方范围外） | 核心语义基本保留，第二段把“故障后”弱化成“完成后” | 两段均出现明显语义幻觉 |
+
+- **决策**：Hy-MT2 在目标场景的小语种质量优势超过约 14% 的速度差和约 270 MiB
+  的内存差，锁定为 v0.1 默认翻译引擎。`qwen2.5:1.5b` 保留为已验证 fallback，
+  用于 Hy-MT2 安装或运行失败时；不能因官方 library 短名称 404 而取代 Hy-MT2。
 - 禁止：OpenAI / DeepL / Google Translate 等在线翻译接口（brief 4.3 / 6）。
 
 ## 模型磁盘占用（实测/预估）
@@ -83,7 +109,8 @@ brief 给出的 mlx-whisper / faster-whisper / WhisperX / pyannote / Hy-MT2 均�
 | whisper-medium（16GB 可选） | ~1.5 GB |
 | diar segmentation (pyannote-3.0 onnx) | ~7 MB |
 | diar embedding (titanet-small) | ~40 MB |
-| qwen2.5:1.5b | 986 MB |
+| Hy-MT2-1.8B Q4_K_M（默认） | 1.1 GB |
+| qwen2.5:1.5b（fallback） | 986 MB |
 | ffmpeg 静态二进制 | ~80 MB |
 
 ## 引擎接口抽象（避免耦合，brief 第 9 条）
@@ -99,12 +126,13 @@ brief 给出的 mlx-whisper / faster-whisper / WhisperX / pyannote / Hy-MT2 均�
 |---|---|---|
 | WhisperX | v0.1 不强制 | 对齐/整合价值在本架构可由独立 diarization 替代，依赖更重 |
 | pyannote.audio | 降为可选后端 | 需 HF gated token，安装摩擦大；sherpa-onnx 免 token 已满足双人验收 |
-| Hy-MT2 1.8B | 可选增强 | Ollama registry 无此模型（404），无法作为默认一键安装 |
+| qwen2.5:1.5b | 已验证 fallback | 更快、更省内存；探索性范围外 Swahili 测试出现明显语义幻觉 |
 | evermeet.cx ffmpeg | 放弃 | 下载过慢导致超时；改用 PyPI static-ffmpeg |
 | Homebrew 安装依赖 | 不依赖 | 本机无 brew；且 brief 要求不静默 sudo |
 
 ## 后续复核触发条件
 
 - 若目标机 mlx 不稳定 → 启用 faster-whisper 分支并在此 ADR 追加。
-- 若用户需要更高翻译质量 → 评估 qwen2.5:3b，并记录内存/时延影响。
+- 若 Hy-MT2 安装或运行失败 → 自动降级 qwen2.5:1.5b，并明确提示小语种质量风险。
+- 升级 Ollama 后重新验证 HF GGUF 自动模板；确认修复前继续使用项目 Modelfile。
 - 若用户提供 HF token 且需要 pyannote → 作为可选 diarization 后端启用。

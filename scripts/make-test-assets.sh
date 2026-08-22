@@ -51,5 +51,25 @@ EOF
 # 5) Filename with Chinese + spaces
 cp "$OUT/en_single.wav" "$OUT/中文 名字 test.wav"
 
+# Real HTTP video fixtures used by the Phase 1 end-to-end pipeline.
+make_video() {
+  local audio="$1"
+  local output="$2"
+  mkdir -p "$(dirname "$output")"
+  "$FFMPEG" -y \
+    -f lavfi -i "color=c=0x20242b:s=640x360:r=24" \
+    -i "$audio" \
+    -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+    -c:a aac -b:a 96k -movflags +faststart \
+    "$output" -loglevel error
+}
+
+make_video "$OUT/en_single.wav" "$OUT/English Single.mp4"
+make_video "$OUT/ru_single.wav" "$OUT/Русский single.mp4"
+make_video "$OUT/two_speakers.wav" "$OUT/中文 双人 video.mp4"
+make_video "$OUT/en_single.wav" "$OUT/same-a/Same Title.mp4"
+make_video "$OUT/en_single.wav" "$OUT/same-b/Same Title.mp4"
+
 echo "==> generated:"
 ls -la "$OUT"/*.wav
+find "$OUT" -name "*.mp4" -print

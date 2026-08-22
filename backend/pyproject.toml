@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-video-transcriber"
+version = "0.1.0"
+description = "Local video transcription, diarization, translation, and export service"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "mlx-whisper==0.4.3",
+  "numpy>=2.4,<3",
+  "pydantic>=2.11,<3",
+  "sherpa-onnx==1.13.6",
+  "srt>=3.5,<4",
+  "static-ffmpeg==3.0",
+  "uvicorn>=0.35,<1",
+  "webvtt-py>=0.5,<1",
+  "yt-dlp>=2025.8.22",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lvt"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["lvt.core", "lvt.exporters", "lvt.pipeline", "lvt.security"]

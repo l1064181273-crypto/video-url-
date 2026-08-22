@@ -1,0 +1,393 @@
+{
+  "schema_version": 1,
+  "test_inputs": {
+    "en": [
+      {
+        "id": 1,
+        "start_ms": 0,
+        "end_ms": 3200,
+        "speaker": "Speaker 1",
+        "source_language": "en",
+        "source_text": "Local processing keeps your audio and transcript private.",
+        "translated_text": ""
+      },
+      {
+        "id": 2,
+        "start_ms": 3200,
+        "end_ms": 6900,
+        "speaker": "Speaker 2",
+        "source_language": "en",
+        "source_text": "The application can recover an interrupted job from its last safe stage.",
+        "translated_text": ""
+      }
+    ],
+    "ru": [
+      {
+        "id": 1,
+        "start_ms": 0,
+        "end_ms": 3900,
+        "speaker": "Speaker 1",
+        "source_language": "ru",
+        "source_text": "Система автоматически определяет язык и создаёт точные субтитры.",
+        "translated_text": ""
+      },
+      {
+        "id": 2,
+        "start_ms": 3900,
+        "end_ms": 7600,
+        "speaker": "Speaker 2",
+        "source_language": "ru",
+        "source_text": "После перезапуска обработка продолжается с последнего безопасного этапа.",
+        "translated_text": ""
+      }
+    ],
+    "sw": [
+      {
+        "id": 1,
+        "start_ms": 0,
+        "end_ms": 3900,
+        "speaker": "Speaker 1",
+        "source_language": "sw",
+        "source_text": "Mfumo huu unafanya kazi kwenye kompyuta yako bila kutuma data mtandaoni.",
+        "translated_text": ""
+      },
+      {
+        "id": 2,
+        "start_ms": 3900,
+        "end_ms": 7800,
+        "speaker": "Speaker 2",
+        "source_language": "sw",
+        "source_text": "Baada ya hitilafu, kazi inaweza kuendelea kutoka hatua salama ya mwisho.",
+        "translated_text": ""
+      }
+    ]
+  },
+  "models": [
+    {
+      "model": "hy-mt2:1.8b-q4km-fixed",
+      "all_runs_passed": true,
+      "median_warm_wall_seconds": 0.35,
+      "median_warm_tokens_per_second": 99.27,
+      "memory": {
+        "size_bytes": 1446772735,
+        "size_vram_bytes": 1446772735,
+        "context_length": 4096
+      },
+      "cases": [
+        {
+          "source_language": "en",
+          "all_runs_passed": true,
+          "median_warm_wall_seconds": 0.348,
+          "median_warm_tokens_per_second": 99.41,
+          "runs": [
+            {
+              "run": 1,
+              "wall_seconds": 1.008,
+              "total_seconds": 0.997,
+              "load_seconds": 0.561,
+              "eval_count": 33,
+              "tokens_per_second": 98.48,
+              "mapping": {
+                "1": "本地处理会确保您的音频和文字记录不被公开.",
+                "2": "该应用可以从最后安全阶段恢复中断的工作任务。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 2,
+              "wall_seconds": 0.348,
+              "total_seconds": 0.348,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 99.35,
+              "mapping": {
+                "1": "本地处理会确保您的音频和文字记录不被公开.",
+                "2": "该应用可以从最后安全阶段恢复中断的工作任务。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 3,
+              "wall_seconds": 0.349,
+              "total_seconds": 0.349,
+              "load_seconds": 0.003,
+              "eval_count": 33,
+              "tokens_per_second": 99.46,
+              "mapping": {
+                "1": "本地处理会确保您的音频和文字记录不被公开.",
+                "2": "该应用可以从最后安全阶段恢复中断的工作任务。"
+              },
+              "errors": [],
+              "passed": true
+            }
+          ]
+        },
+        {
+          "source_language": "ru",
+          "all_runs_passed": true,
+          "median_warm_wall_seconds": 0.349,
+          "median_warm_tokens_per_second": 98.91,
+          "runs": [
+            {
+              "run": 1,
+              "wall_seconds": 0.439,
+              "total_seconds": 0.438,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 98.81,
+              "mapping": {
+                "1": "系统会自动识别语言并生成精确的字幕。",
+                "2": "重启后，处理过程将继续进行到最后一个安全阶段。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 2,
+              "wall_seconds": 0.347,
+              "total_seconds": 0.347,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 99.59,
+              "mapping": {
+                "1": "系统会自动识别语言并生成精确的字幕。",
+                "2": "重启后，处理过程将继续进行到最后一个安全阶段。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 3,
+              "wall_seconds": 0.352,
+              "total_seconds": 0.351,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 98.23,
+              "mapping": {
+                "1": "系统会自动识别语言并生成精确的字幕。",
+                "2": "重启后，处理过程将继续进行到最后一个安全阶段。"
+              },
+              "errors": [],
+              "passed": true
+            }
+          ]
+        },
+        {
+          "source_language": "sw",
+          "all_runs_passed": true,
+          "median_warm_wall_seconds": 0.379,
+          "median_warm_tokens_per_second": 99.13,
+          "runs": [
+            {
+              "run": 1,
+              "wall_seconds": 0.468,
+              "total_seconds": 0.467,
+              "load_seconds": 0.002,
+              "eval_count": 36,
+              "tokens_per_second": 98.61,
+              "mapping": {
+                "1": "您可以在不将数据上传到云端的情况下使用电脑完成操作。",
+                "2": "完成后，操作可能会从最后的安全步骤继续下去。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 2,
+              "wall_seconds": 0.379,
+              "total_seconds": 0.378,
+              "load_seconds": 0.002,
+              "eval_count": 36,
+              "tokens_per_second": 99.08,
+              "mapping": {
+                "1": "您可以在不将数据上传到云端的情况下使用电脑完成操作。",
+                "2": "完成后，操作可能会从最后的安全步骤继续下去。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 3,
+              "wall_seconds": 0.379,
+              "total_seconds": 0.378,
+              "load_seconds": 0.002,
+              "eval_count": 36,
+              "tokens_per_second": 99.19,
+              "mapping": {
+                "1": "您可以在不将数据上传到云端的情况下使用电脑完成操作。",
+                "2": "完成后，操作可能会从最后的安全步骤继续下去。"
+              },
+              "errors": [],
+              "passed": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "qwen2.5:1.5b",
+      "all_runs_passed": true,
+      "median_warm_wall_seconds": 0.307,
+      "median_warm_tokens_per_second": 112.62,
+      "memory": {
+        "size_bytes": 1163080498,
+        "size_vram_bytes": 1163080498,
+        "context_length": 4096
+      },
+      "cases": [
+        {
+          "source_language": "en",
+          "all_runs_passed": true,
+          "median_warm_wall_seconds": 0.307,
+          "median_warm_tokens_per_second": 112.67,
+          "runs": [
+            {
+              "run": 1,
+              "wall_seconds": 1.264,
+              "total_seconds": 1.263,
+              "load_seconds": 0.82,
+              "eval_count": 33,
+              "tokens_per_second": 110.75,
+              "mapping": {
+                "1": "本地处理将您的音频和转录保持私密。",
+                "2": "应用程序可以从其最近的安全阶段恢复中断的工作。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 2,
+              "wall_seconds": 0.307,
+              "total_seconds": 0.306,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 112.64,
+              "mapping": {
+                "1": "本地处理将您的音频和转录保持私密。",
+                "2": "应用程序可以从其最近的安全阶段恢复中断的工作。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 3,
+              "wall_seconds": 0.307,
+              "total_seconds": 0.306,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 112.71,
+              "mapping": {
+                "1": "本地处理将您的音频和转录保持私密。",
+                "2": "应用程序可以从其最近的安全阶段恢复中断的工作。"
+              },
+              "errors": [],
+              "passed": true
+            }
+          ]
+        },
+        {
+          "source_language": "ru",
+          "all_runs_passed": true,
+          "median_warm_wall_seconds": 0.305,
+          "median_warm_tokens_per_second": 112.45,
+          "runs": [
+            {
+              "run": 1,
+              "wall_seconds": 0.386,
+              "total_seconds": 0.385,
+              "load_seconds": 0.001,
+              "eval_count": 32,
+              "tokens_per_second": 112.19,
+              "mapping": {
+                "1": "系统自动识别语言并生成精确字幕。",
+                "2": "重启后，处理将继续从最近的安全阶段开始。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 2,
+              "wall_seconds": 0.307,
+              "total_seconds": 0.307,
+              "load_seconds": 0.004,
+              "eval_count": 32,
+              "tokens_per_second": 112.14,
+              "mapping": {
+                "1": "系统自动识别语言并生成精确字幕。",
+                "2": "重启后，处理将继续从最近的安全阶段开始。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 3,
+              "wall_seconds": 0.304,
+              "total_seconds": 0.303,
+              "load_seconds": 0.002,
+              "eval_count": 32,
+              "tokens_per_second": 112.76,
+              "mapping": {
+                "1": "系统自动识别语言并生成精确字幕。",
+                "2": "重启后，处理将继续从最近的安全阶段开始。"
+              },
+              "errors": [],
+              "passed": true
+            }
+          ]
+        },
+        {
+          "source_language": "sw",
+          "all_runs_passed": true,
+          "median_warm_wall_seconds": 0.307,
+          "median_warm_tokens_per_second": 112.58,
+          "runs": [
+            {
+              "run": 1,
+              "wall_seconds": 0.387,
+              "total_seconds": 0.386,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 111.59,
+              "mapping": {
+                "1": "电脑自学编程时会自动保存数据记录。",
+                "2": "自从安装了安全软件，编程过程变得安全可靠。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 2,
+              "wall_seconds": 0.307,
+              "total_seconds": 0.306,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 112.55,
+              "mapping": {
+                "1": "电脑自学编程时会自动保存数据记录。",
+                "2": "自从安装了安全软件，编程过程变得安全可靠。"
+              },
+              "errors": [],
+              "passed": true
+            },
+            {
+              "run": 3,
+              "wall_seconds": 0.307,
+              "total_seconds": 0.307,
+              "load_seconds": 0.002,
+              "eval_count": 33,
+              "tokens_per_second": 112.61,
+              "mapping": {
+                "1": "电脑自学编程时会自动保存数据记录。",
+                "2": "自从安装了安全软件，编程过程变得安全可靠。"
+              },
+              "errors": [],
+              "passed": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+# The installer places or links the official Tencent GGUF beside this file:
+# https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF
+FROM ./Hy-MT2-1.8B-Q4_K_M.gguf
+
+# Ported from tencent/Hy-MT2-1.8B chat_template.jinja. Ollama 0.32.15
+# generates a malformed template when importing the HF GGUF directly.
+TEMPLATE """{{ if .System }}<｜hy_begin▁of▁sentence｜>{{ .System }}<｜hy_place▁holder▁no▁3｜>{{ else }}<｜hy_begin▁of▁sentence｜>{{ end }}{{ if .Prompt }}<｜hy_User｜>{{ .Prompt }}{{ end }}<｜hy_Assistant｜>"""
+
+PARAMETER stop <｜hy_place▁holder▁no▁2｜>
+PARAMETER temperature 0.7
+PARAMETER top_p 0.6
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.05

@@ -24,6 +24,9 @@ extension/dist/
 dist/
 build/
 packaging/build/
+packaging/ollama/*.gguf
+backend/.tmp-*/
+.tmp-*/
 
 # ---- Runtime data (NEVER commit) ----
 # App runtime lives in ~/Library/Application Support/LocalVideoTranscriber,
