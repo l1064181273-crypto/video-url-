@@ -21,11 +21,11 @@ class TextDisposition(StrEnum):
 URL_START_PATTERN = re.compile(r"https?://", re.I)
 TIMECODE_PATTERN = re.compile(r"(?<!\d)(?:\d{1,2}:)?[0-5]\d:[0-5]\d(?:[.,]\d{1,3})?(?!\d)")
 NUMERIC_SEQUENCE_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_-])[+-]?\d+(?:[.,]\d+)*"
+    r"(?<![A-Za-z0-9_.,-])[+-]?\d+(?:[.,]\d+)*"
     r"(?:[ \t]*[-–—/][ \t]*[+-]?\d+(?:[.,]\d+)*)+"
     r"(?![A-Za-z0-9_-])"
 )
-NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])[+-]?\d+(?:[.,]\d+)*(?![A-Za-z0-9_-])")
+NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_.,-])[+-]?\d+(?:[.,]\d+)*(?![A-Za-z0-9_-])")
 SPEAKER_PATTERN = re.compile(r"(?:speaker|spk|说话人)\s*[_#:-]?\s*\d+", re.I)
 EXPLICIT_PROPER_TOKENS = frozenset({"NASA", "OpenAI"})
 EXPLICIT_PROPER_PATTERN = re.compile(
@@ -37,12 +37,18 @@ STRONG_PRODUCT_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])[A-Z]{2,}[A-Z0-9]*(?:-[A-Z0-9-]*\d[A-Z0-9-]*)"
     r"(?![A-Za-z0-9_])"
 )
+VERSION_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:release-v|version|v)\d+(?:\.\d+)+"
+    r"(?![A-Za-z0-9_.-])",
+    re.I,
+)
 FULL_NUMBER_PATTERN = re.compile(r"[+-]?\d+(?:[.,]\d+)*")
 RESERVED_PREFIX_PATTERN = re.compile(r"LVT_[A-Za-z0-9_]+")
 NONCE_PATTERN = re.compile(r"[A-Z0-9]{4,64}")
 URL_STOP_CHARACTERS = frozenset(" \t\r\n`<>{}[]\"'“”‘’")
 URL_INLINE_BOUNDARY_CHARACTERS = frozenset(",，。！？；：")
 URL_TRAILING_PUNCTUATION = frozenset(".,;:!?，。！？；：")
+URL_PARENTHESIS_PAIRS = {"(": ")", "（": "）"}
 ATOMIC_PUNCTUATION = frozenset(".,:;?!，。；：？！")
 ATOMIC_BRACKET_PAIRS = {
     "(": ")",
@@ -88,6 +94,8 @@ def _classify_token_value(value: str) -> TextDisposition:
     if SPEAKER_PATTERN.fullmatch(value):
         return TextDisposition.SPEAKER_LABEL
     if value in EXPLICIT_PROPER_TOKENS or STRONG_PRODUCT_PATTERN.fullmatch(value):
+        return TextDisposition.PROPER_TOKEN
+    if VERSION_PATTERN.fullmatch(value):
         return TextDisposition.PROPER_TOKEN
     return TextDisposition.TRANSLATE
 
@@ -145,21 +153,24 @@ def classify_text(text: str) -> TextDisposition:
 
 def _url_occurrences(text: str) -> list[ProtectedOccurrence]:
     occurrences: list[ProtectedOccurrence] = []
+    closing_parentheses = frozenset(URL_PARENTHESIS_PAIRS.values())
     for match in URL_START_PATTERN.finditer(text):
         end = match.end()
-        while (
-            end < len(text)
-            and text[end] not in URL_STOP_CHARACTERS
-            and text[end] not in URL_INLINE_BOUNDARY_CHARACTERS
-        ):
+        parenthesis_stack: list[str] = []
+        while end < len(text):
+            character = text[end]
+            if character in URL_STOP_CHARACTERS or character in URL_INLINE_BOUNDARY_CHARACTERS:
+                break
+            if character in URL_PARENTHESIS_PAIRS:
+                parenthesis_stack.append(URL_PARENTHESIS_PAIRS[character])
+            elif character in closing_parentheses:
+                if not parenthesis_stack or parenthesis_stack[-1] != character:
+                    break
+                parenthesis_stack.pop()
             end += 1
         candidate = text[match.start() : end]
         while candidate:
             if candidate[-1] in URL_TRAILING_PUNCTUATION:
-                candidate = candidate[:-1]
-                end -= 1
-                continue
-            if candidate[-1] == ")" and candidate.count(")") > candidate.count("("):
                 candidate = candidate[:-1]
                 end -= 1
                 continue
@@ -176,6 +187,7 @@ def protected_occurrences(text: str) -> list[ProtectedOccurrence]:
     ]
     for priority, pattern in enumerate(
         (
+            VERSION_PATTERN,
             NUMERIC_SEQUENCE_PATTERN,
             TIMECODE_PATTERN,
             SPEAKER_PATTERN,

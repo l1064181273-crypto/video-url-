@@ -112,6 +112,14 @@
   - ✅ Phase 1 扩展真实 Ollama smoke：首次 31 段单批压力测试因占位符重排与 fallback JSON 截断而安全双失败；最终按真实字幕规模分为两个批次，nonce `FBD1EC4DBE32FF87`，均由 Hy-MT2 成功，报告为 `docs/PHASE-1-URL-MULTIPART-WRAPPING-OLLAMA-SMOKE.json`。
   - ✅ Phase 1 最新媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过；俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2，报告为 `docs/PHASE-1-URL-MULTIPART-WRAPPING-E2E.json`。
   - ✅ Phase 1 质量门：`pytest` 147 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
+
+- **2026-08-23**
+  - ✅ Phase 1 右括号 URL follow-up：URL 扫描维护半角/全角圆括号闭合栈；匹配的 URL 内右括号保留，无对应左括号的右括号在其前终止，后续无空格正文继续进入模型。
+  - ✅ Phase 1 前缀版本 follow-up：`v1.2.3`、`version1.2.3`、`release-v1.2.3` 整体保护；普通数字匹配禁止从点分链中间开始，`prefix1.2.3` 不再错误生成尾部 `2.3` token。
+  - ✅ Phase 1 生产 prompt 回归：确定性测试直接捕获 `OllamaTranslationEngine` prompt，确认 URL/版本本体完全替换，`)Continue`、`）继续` 和正文仍对模型可见；模型返回 `v9.2.3` 会被严格拒绝。
+  - ✅ 真实 smoke 稳定性如实记录：独立审查历史为 1/2；本轮扩展后连续两次为 2/2，nonce 分别为 `A8CCB0A5658DB1AF`、`904921B8DE99F31E`。每次 3 个真实批次均由 Hy-MT2 完成；双失败仍保持非零退出。报告为 `docs/PHASE-1-PAREN-VERSION-OLLAMA-SMOKE.json`。
+  - ✅ Phase 1 最新媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过；俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2，报告为 `docs/PHASE-1-PAREN-VERSION-E2E.json`。
+  - ✅ Phase 1 质量门：`pytest` 167 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
   - **Phase 1 退出条件已满足**：三个真实媒体引擎已接入统一 Pipeline，并通过真实 HTTP fixture 生成与验证合规 8 文件。
   - ⏭️ 下一步：等待独立审查；本轮不开始 Phase 2/3/4。
 

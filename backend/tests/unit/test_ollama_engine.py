@@ -164,6 +164,95 @@ def test_mixed_translation_must_preserve_protected_tokens() -> None:
     assert "Protected Placeholders" in prompt
 
 
+@pytest.mark.parametrize(
+    ("source", "protected_fragment", "model_output", "expected"),
+    [
+        (
+            "Visit (https://example.com)Continue",
+            "Visit (LVT_TEST_TOKEN_0001)Continue",
+            "访问 (LVT_TEST_TOKEN_0001)继续",
+            "访问 (https://example.com)继续",
+        ),
+        (
+            "Visit https://example.com)Continue",
+            "Visit LVT_TEST_TOKEN_0001)Continue",
+            "访问 LVT_TEST_TOKEN_0001)继续",
+            "访问 https://example.com)继续",
+        ),
+        (
+            "访问（https://example.com）继续",
+            "访问（LVT_TEST_TOKEN_0001）继续",
+            "访问（LVT_TEST_TOKEN_0001）继续",
+            "访问（https://example.com）继续",
+        ),
+        (
+            "https://example.com）继续",
+            "LVT_TEST_TOKEN_0001）继续",
+            "LVT_TEST_TOKEN_0001）继续",
+            "https://example.com）继续",
+        ),
+    ],
+)
+def test_url_closing_parenthesis_keeps_following_body_in_production_prompt(
+    source: str,
+    protected_fragment: str,
+    model_output: str,
+    expected: str,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        calls.append(payload)
+        return {"message": {"content": json.dumps({"1": model_output}, ensure_ascii=False)}}
+
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=request,
+        nonce_factory=fixed_test_nonce,
+    )
+
+    result = engine.translate({1: source}, "en")
+
+    prompt = calls[0]["messages"][0]["content"]
+    assert "https://example.com" not in prompt
+    assert protected_fragment in prompt
+    assert result.texts == {1: expected}
+
+
+def test_prefixed_version_is_fully_protected_in_production_prompt() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        calls.append(payload)
+        return {"message": {"content": '{"1":"使用 LVT_TEST_TOKEN_0001。"}'}}
+
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=request,
+        nonce_factory=fixed_test_nonce,
+    )
+
+    result = engine.translate({1: "Use v1.2.3 now"}, "en")
+
+    prompt = calls[0]["messages"][0]["content"]
+    assert "v1.2.3" not in prompt
+    assert "Use LVT_TEST_TOKEN_0001 now" in prompt
+    assert result.texts == {1: "使用 v1.2.3。"}
+
+
+def test_prefixed_version_cannot_be_changed_behind_partial_token() -> None:
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=lambda _url, _payload, _timeout: {
+            "message": {"content": '{"1":"使用 v9.2.3。"}'}
+        },
+        nonce_factory=fixed_test_nonce,
+    )
+
+    with pytest.raises(TranslationEngineError, match="placeholder sequence mismatch"):
+        engine.translate({1: "Use v1.2.3 now"}, "en")
+
+
 def test_repeated_nasa_must_be_returned_once_per_occurrence() -> None:
     engine = OllamaTranslationEngine(
         max_attempts=1,

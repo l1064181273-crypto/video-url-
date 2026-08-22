@@ -22,7 +22,7 @@
 ```bash
 cd backend
 ../.venv-smoke/bin/python -m pytest
-# 147 项通过，另有 1 条第三方 StarletteDeprecationWarning
+# 167 项通过，另有 1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m ruff check src tests ../scripts
 # 所有检查通过
@@ -99,10 +99,23 @@ ASCII 标识符边界、平衡括号 URL、URL 尾随标点、nonce 碰撞、跨
   字符，无空格正文使用这些字符分隔时仍存在歧义。
 - hyphen、en dash、em dash 或 `/` 连接的两段及以上纯数字链作为一个 token，例如
   `2026-08-22`、`010-1234-5678`、`2026/08/22`。裸点分数字链沿用数字规则，
-  因此 IPv4 和裸数字版本整体保护但不做语义合法性校验；`v1.2.3` 等 ASCII 前缀版本
-  不拆分，属于当前已知限制。
+  因此 IPv4 和裸数字版本整体保护但不做语义合法性校验。
 - 原子包装改为顺序栈校验：前缀只允许压入开放括号/引号，后缀必须按逆序闭合。
   `([“NASA”])` 合法；`([NASA)]`、`”NASA“`、缺失或反向包装进入模型。
+
+### Phase 1 右括号 URL 与前缀版本 follow-up
+
+- URL 扫描器分别维护半角 `()` 与全角 `（）` 的预期闭合栈。URL 内左括号压栈，
+  匹配右括号计入 URL 并出栈；无对应左括号或类型不匹配的右括号在其前终止 URL。
+- Wikipedia `Foo_(bar)`、带 query/fragment 的 `a_(b)?x=2026#part` 以及全角
+  URL 内括号保持完整；外层 `(...)`、`（...）` 继续由原子包装规则处理。
+- `Visit (https://example.com)Continue`、`Visit https://example.com)Continue`、
+  `访问（https://example.com）继续`、`https://example.com）继续` 均进入模型；
+  prompt 中 URL 本体被占位符替换，`)Continue` 或 `）继续` 保留为可翻译正文。
+- 版本号策略改为完整保护：`v1.2.3`、`version1.2.3`、
+  `release-v1.2.3` 均为单一 token；纯版本整段 passthrough，混合正文中的版本由
+  placeholder 保护。普通数字模式禁止从 `.` 或 `,` 后开始，不能再只保护尾部 `2.3`。
+- `prefix1.2.3` 不匹配受支持版本前缀，且不会生成部分 token；这是有意的保守策略。
 
 ### 真实 Ollama passthrough/token smoke
 
@@ -145,6 +158,22 @@ URL、多段数字和包装顺序 smoke：
 - 多段数字 IDs `[29,30,31]` 实际发送模型；`2026-08-22` 和
   `010-1234-5678` 均作为单一占位符并完整恢复。
 - 报告：`docs/PHASE-1-URL-MULTIPART-WRAPPING-OLLAMA-SMOKE.json`。
+
+右括号 URL 与前缀版本 smoke：
+
+- 独立审查提供的历史记录：2 次尝试，第一次
+  `TRANSLATION_ALL_MODELS_FAILED`，第二次成功，成功率 `1/2`；审查方未提供两次
+  nonce 和双模型内部错误，因此报告明确标记为未知，未补造细节。
+- 本轮扩展后连续运行 2 次，均退出 0，成功率 `2/2`：
+  - Attempt 1 nonce：`A8CCB0A5658DB1AF`；
+  - Attempt 2 nonce：`904921B8DE99F31E`。
+- 每次均分为 3 个真实模型批次；依据是把回归集合控制在接近真实字幕任务的批量规模。
+  任一批次主备模型双失败仍直接非零退出，不跨批吞错或返回原文。
+- IDs `[32,33,34,35]` 的 prompt 仅含 URL 占位符，并保留
+  `)Continue`/`）继续`；IDs `[36,37,38]` 完整保护三种前缀版本；
+  IDs `[39,40,41]` 为原子版本 passthrough。
+- 两次成功均由 Hy-MT2 完成 3 个批次，未触发 fallback。
+- 机器报告：`docs/PHASE-1-PAREN-VERSION-OLLAMA-SMOKE.json`。
 
 ### 可重复生成的媒体测试资产
 
@@ -209,6 +238,10 @@ Unicode 数字、随机 nonce 与完整 URL 修复后又执行相同五样本回
 URL、多段数字和包装顺序修复后再次执行相同五样本回归，5 个任务、40 个文件
 全部通过。俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2。最新报告：
 `docs/PHASE-1-URL-MULTIPART-WRAPPING-E2E.json`。
+
+右括号 URL 与前缀版本修复后再次执行相同五样本回归，5 个任务、40 个文件
+全部通过。俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2。最新报告：
+`docs/PHASE-1-PAREN-VERSION-E2E.json`。
 
 所有任务均使用真实的 `YtDlpFFmpegDownloader`、`MLXWhisperASREngine`、
 `SherpaOnnxDiarizationEngine` 和 Ollama 翻译引擎。以下命令没有使用 Fake Engine。

@@ -332,6 +332,53 @@ def test_url_followed_by_unspaced_body_is_sent_to_translation_delegate() -> None
 
 
 @pytest.mark.parametrize(
+    ("text", "expected_protected"),
+    [
+        (
+            "Visit (https://example.com)Continue",
+            "Visit (LVT_URLPAREN_TOKEN_0001)Continue",
+        ),
+        (
+            "Visit https://example.com)Continue",
+            "Visit LVT_URLPAREN_TOKEN_0001)Continue",
+        ),
+        (
+            "访问（https://example.com）继续",
+            "访问（LVT_URLPAREN_TOKEN_0001）继续",
+        ),
+        (
+            "https://example.com）继续",
+            "LVT_URLPAREN_TOKEN_0001）继续",
+        ),
+    ],
+)
+def test_unmatched_url_closing_parenthesis_keeps_following_body_translatable(
+    text: str,
+    expected_protected: str,
+) -> None:
+    assert classify_text(text) is TextDisposition.TRANSLATE
+    assert protected_tokens(text) == ["https://example.com"]
+
+    protected, manifests = protect_texts({1: text}, nonce_factory=lambda: "URLPAREN")
+
+    assert protected == {1: expected_protected}
+    assert [token.original for token in manifests[1]] == ["https://example.com"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "(https://example.com)",
+        "（https://example.com）",
+        "https://en.wikipedia.org/wiki/Foo_(bar)",
+        "https://example.com/路径（甲）",
+    ],
+)
+def test_balanced_ascii_and_fullwidth_url_parentheses_remain_complete(text: str) -> None:
+    assert classify_text(text) is TextDisposition.URL
+
+
+@pytest.mark.parametrize(
     ("text", "disposition"),
     [
         ("  ([“NASA”])?!  ", TextDisposition.PROPER_TOKEN),
@@ -393,6 +440,24 @@ def test_multi_part_numeric_sequence_is_one_protected_token(
     expected: str,
 ) -> None:
     assert protected_tokens(text) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("v1.2.3", ["v1.2.3"]),
+        ("version1.2.3", ["version1.2.3"]),
+        ("release-v1.2.3", ["release-v1.2.3"]),
+        ("1.2.3", ["1.2.3"]),
+        ("192.168.1.1", ["192.168.1.1"]),
+        ("prefix1.2.3", []),
+    ],
+)
+def test_version_and_dotted_number_tokens_never_start_mid_chain(
+    text: str,
+    expected: list[str],
+) -> None:
+    assert protected_tokens(text) == expected
 
 
 @pytest.mark.parametrize(

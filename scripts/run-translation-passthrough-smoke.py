@@ -71,6 +71,16 @@ def main() -> None:
         29: "Release on 2026-08-22",
         30: "Call 010-1234-5678 today",
         31: "计划为2026-08-22发布",
+        32: "Visit (https://example.com)Continue",
+        33: "Visit https://example.com)Continue",
+        34: "访问（https://example.com）继续",
+        35: "https://example.com）继续",
+        36: "Use v1.2.3 now",
+        37: "Use version1.2.3 now",
+        38: "Use release-v1.2.3 now",
+        39: "v1.2.3",
+        40: "version1.2.3",
+        41: "release-v1.2.3",
     }
     nonce = secrets.token_hex(8).upper()
 
@@ -92,7 +102,7 @@ def main() -> None:
         )
     )
     filtering = FilteringTranslationEngine(observed)
-    batch_ids = (range(1, 16), range(16, 32))
+    batch_ids = (range(1, 16), range(16, 32), range(32, 42))
     batch_results = [
         filtering.translate(
             {segment_id: source[segment_id] for segment_id in ids},
@@ -127,13 +137,45 @@ def main() -> None:
         29,
         30,
         31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
     ]
     assert sent_ids == expected_sent_ids
     assert list(translated) == list(source)
     assert len(translated) == len(source)
-    for segment_id in (1, 2, 3, 4, 5, 13, 16, 17, 18, 19, 20, 21):
+    for segment_id in (1, 2, 3, 4, 5, 13, 16, 17, 18, 19, 20, 21, 39, 40, 41):
         assert translated[segment_id] == source[segment_id]
-    protected_ids = (7, 8, 10, 11, 12, 14, 15, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)
+    protected_ids = (
+        7,
+        8,
+        10,
+        11,
+        12,
+        14,
+        15,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+    )
     for segment_id in protected_ids:
         assert protected_tokens(translated[segment_id]) == protected_tokens(source[segment_id])
     assert translated[7].count("NASA") == 2
@@ -177,6 +219,21 @@ def main() -> None:
     }.items():
         assert "https://example.com" not in protected_source[segment_id]
         assert trailing_body in protected_source[segment_id]
+    for segment_id, trailing_body in {
+        32: ")Continue",
+        33: ")Continue",
+        34: "）继续",
+        35: "）继续",
+    }.items():
+        assert "https://example.com" not in protected_source[segment_id]
+        assert trailing_body in protected_source[segment_id]
+    for segment_id, version in {
+        36: "v1.2.3",
+        37: "version1.2.3",
+        38: "release-v1.2.3",
+    }.items():
+        assert version not in protected_source[segment_id]
+        assert version in translated[segment_id]
 
     report = {
         "schema_version": 1,
@@ -196,6 +253,9 @@ def main() -> None:
         "mixed_text_sent_ids": [22, 23, 24],
         "unspaced_url_body_sent_ids": [25, 26, 27, 28],
         "multi_part_numeric_sent_ids": [29, 30, 31],
+        "url_closing_parenthesis_sent_ids": [32, 33, 34, 35],
+        "prefixed_version_sent_ids": [36, 37, 38],
+        "prefixed_version_passthrough_ids": [39, 40, 41],
         "protected_source_sent_to_model": protected_source,
         "placeholder_sequences": {
             str(segment_id): [token.placeholder for token in tokens]
