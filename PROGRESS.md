@@ -126,7 +126,27 @@
   - ✅ Phase 1 最新媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过；俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2，报告为 `docs/PHASE-1-NUMERIC-CHAIN-VERSION-E2E.json`。
   - ✅ Phase 1 质量门：`pytest` 193 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
   - **Phase 1 退出条件已满足**：三个真实媒体引擎已接入统一 Pipeline，并通过真实 HTTP fixture 生成与验证合规 8 文件。
-  - ⏭️ 下一步：等待独立审查；本轮不开始 Phase 2/3/4。
+  - ✅ Phase 1 已由独立审查在 commit `872c42d614a77056c1e9510425955a53ffe40361`
+    验收，strict-token 实现冻结。
+
+- **2026-08-23**
+  - ✅ Phase 2 实施计划已完成并在 commit `4576edb279875c752921058a1992430ed591c33c`
+    补充实施前澄清：run-scoped 所有权、worker 元数据 CAS、取消 run 生命周期、
+    重试周期、生产错误码、resume stage、orphan reconciliation 和时间戳语义。
+  - ✅ Phase 2 Checkpoint 1 完成：新增 Job 状态、合法转换、事件类型、完整错误策略和
+    结构化错误 adapter 契约。
+  - ✅ SQLite schema v2→v3 事务 migration：保留 Job、JobOptions、events 和
+    artifacts；增加 run/retry/checkpoint 字段、settings 表、claim 索引和 artifact
+    唯一约束。
+  - ✅ SQLite 连接启用 WAL、`busy_timeout=5000` 和 foreign keys；未来 schema
+    版本拒绝启动；migration 失败完整回滚；重复 initialize 幂等。
+  - ✅ worker concurrency 在领域配置和 Repository 中只允许 1 或 2。
+  - ✅ TDD 红灯已记录：实现前测试因缺少 `lvt.core.jobs` 和
+    `UnsupportedSchemaVersionError` 在收集阶段失败；实现后目标测试 178 passed。
+  - ✅ Checkpoint 1 全量质量门：`pytest` 363 passed（1 条第三方弃用警告）；
+    Ruff lint/format 通过；mypy 28 个源码文件通过。
+  - ⏭️ 下一步：等待 Checkpoint 1 独立审查；未开始 Checkpoint 2 的 claim/CAS
+    Repository 操作、worker、Pipeline checkpoint、取消、恢复或控制 API。
 
 ## 已知阻塞
 

@@ -46,4 +46,4 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["lvt.core", "lvt.exporters", "lvt.pipeline", "lvt.security"]
+packages = ["lvt.core", "lvt.db", "lvt.exporters", "lvt.pipeline", "lvt.security"]

@@ -333,6 +333,70 @@ jq '{samples:[.]}' .tmp-public-smoke/public-smoke-report.json \
 主模型，没有降级告警。输出目录：
 `.tmp-public-smoke/exports/_We_should_do_it_ourselves__Francis_Kéré--public-0677a`.
 
+## Phase 2 Checkpoint 1：生命周期契约与 schema v3
+
+本轮遵循测试先行。生产代码修改前执行：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest \
+  tests/unit/test_job_contracts.py \
+  tests/unit/test_repository.py \
+  tests/unit/test_config.py
+# exit 2：测试收集按预期失败
+# ModuleNotFoundError: lvt.core.jobs
+# ImportError: UnsupportedSchemaVersionError
+```
+
+实现后的目标测试：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest \
+  tests/unit/test_job_contracts.py \
+  tests/unit/test_repository.py \
+  tests/unit/test_config.py
+# 178 passed
+```
+
+全量质量门：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest
+# 363 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# All checks passed!
+
+../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# 45 files already formatted
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# Success: no issues found in 28 source files
+```
+
+已验证：
+
+- Job 的 12 个持久化状态、全部合法转换和非法转换；`interrupted` 仅是事件类型。
+- 所有公开 Job 错误码均有自动重试、手工 retry、缓存恢复点和非空中文建议。
+- 结构化错误 adapter 只读取 `error.code`，不根据异常消息字符串推断策略。
+- 真实 schema v2 fixture 原位升级到 v3，并保留 Job、JobOptions、events 和 artifacts。
+- v2 `attempts` 回填为 `execution_count_total`；新增 retry cycle、run 和 checkpoint 字段。
+- migration 中途因重复 artifact 无法创建唯一索引时，DDL、settings 和版本更新全部回滚。
+- 重复 initialize 幂等；高于 v3 的未来 schema 拒绝启动且不修改数据库。
+- WAL、`busy_timeout=5000`、foreign keys、claim 索引和 artifact 唯一约束生效。
+- Settings 和 Repository 均只接受 worker concurrency 1 或 2。
+
+范围限制：
+
+- 本轮只完成 Checkpoint 1，没有实现 claim、worker、Pipeline checkpoint、取消、恢复
+  或控制 API。
+- 本轮没有改动媒体处理或翻译路径，因此未重新运行真实 Ollama 和五样本媒体 E2E；
+  既有 Phase 1 真实报告不冒充本轮验证。
+- `attempts` 作为 v2 兼容列暂时保留，只用于 migration 回填；后续逻辑使用
+  `execution_count_total`、`retry_cycle` 和 `automatic_requeue_count_in_cycle`。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：
