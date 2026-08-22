@@ -64,6 +64,13 @@ def main() -> None:
         22: "计划为2026-2027年",
         23: "Visit https://example.com.",
         24: "NASA launched in 2026.",
+        25: "Visit https://example.com,then continue",
+        26: "Visit https://example.com。Continue",
+        27: "访问https://example.com。继续",
+        28: "https://example.com。继续",
+        29: "Release on 2026-08-22",
+        30: "Call 010-1234-5678 today",
+        31: "计划为2026-08-22发布",
     }
     nonce = secrets.token_hex(8).upper()
 
@@ -84,30 +91,92 @@ def main() -> None:
             ),
         )
     )
-    result = FilteringTranslationEngine(observed).translate(source, "en")
+    filtering = FilteringTranslationEngine(observed)
+    batch_ids = (range(1, 16), range(16, 32))
+    batch_results = [
+        filtering.translate(
+            {segment_id: source[segment_id] for segment_id in ids},
+            "en",
+        )
+        for ids in batch_ids
+    ]
+    translated = {
+        segment_id: batch_result.texts[segment_id]
+        for batch_result in batch_results
+        for segment_id in batch_result.texts
+    }
 
-    sent_ids = list(observed.calls[0]) if observed.calls else []
-    expected_sent_ids = [6, 7, 8, 9, 10, 11, 12, 14, 15, 22, 23, 24]
+    sent_ids = [segment_id for model_batch in observed.calls for segment_id in model_batch]
+    expected_sent_ids = [
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        14,
+        15,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+    ]
     assert sent_ids == expected_sent_ids
-    assert list(result.texts) == list(source)
-    assert len(result.texts) == len(source)
+    assert list(translated) == list(source)
+    assert len(translated) == len(source)
     for segment_id in (1, 2, 3, 4, 5, 13, 16, 17, 18, 19, 20, 21):
-        assert result.texts[segment_id] == source[segment_id]
-    for segment_id in (7, 8, 10, 11, 12, 14, 15, 22, 23, 24):
-        assert protected_tokens(result.texts[segment_id]) == protected_tokens(source[segment_id])
-    assert result.texts[7].count("NASA") == 2
-    assert result.texts[8].count("https://example.com") == 2
-    assert "12026" not in result.texts[7]
-    assert "2027" not in result.texts[11] + result.texts[12]
-    assert "2026-2027" in result.texts[22]
-    assert "LVT_TOKEN_0001" in result.texts[14]
-    assert "https://example.com/LVT_TOKEN_0002" in result.texts[15]
+        assert translated[segment_id] == source[segment_id]
+    protected_ids = (7, 8, 10, 11, 12, 14, 15, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)
+    for segment_id in protected_ids:
+        assert protected_tokens(translated[segment_id]) == protected_tokens(source[segment_id])
+    assert translated[7].count("NASA") == 2
+    assert translated[8].count("https://example.com") == 2
+    assert "12026" not in translated[7]
+    assert "2027" not in translated[11] + translated[12]
+    assert "2026-2027" in translated[22]
+    assert "2026-08-22" in translated[29] + translated[31]
+    assert "010-1234-5678" in translated[30]
+    assert "LVT_TOKEN_0001" in translated[14]
+    assert "https://example.com/LVT_TOKEN_0002" in translated[15]
 
-    sent_source = observed.calls[0]
-    protected_source, manifests = protect_texts(
-        sent_source,
-        nonce_factory=nonce_factory,
-    )
+    protected_source: dict[int, str] = {}
+    manifests_by_id = {}
+    model_batches = []
+    for batch_index, sent_source in enumerate(observed.calls, start=1):
+        batch_protected, batch_manifests = protect_texts(
+            sent_source,
+            nonce_factory=nonce_factory,
+        )
+        protected_source.update(batch_protected)
+        manifests_by_id.update(batch_manifests)
+        model_batches.append(
+            {
+                "batch_index": batch_index,
+                "sent_ids": list(sent_source),
+                "protected_source": batch_protected,
+                "placeholder_manifest": {
+                    str(segment_id): [token.placeholder for token in tokens]
+                    for segment_id, tokens in batch_manifests.items()
+                },
+                "engine_version": batch_results[batch_index - 1].engine_version,
+                "warnings": batch_results[batch_index - 1].warnings,
+            }
+        )
+    for segment_id, trailing_body in {
+        25: ",then continue",
+        26: "。Continue",
+        27: "。继续",
+        28: "。继续",
+    }.items():
+        assert "https://example.com" not in protected_source[segment_id]
+        assert trailing_body in protected_source[segment_id]
 
     report = {
         "schema_version": 1,
@@ -119,27 +188,30 @@ def main() -> None:
             str(segment_id): classify_text(text).value for segment_id, text in source.items()
         },
         "model_call_count": len(observed.calls),
+        "model_batches": model_batches,
         "sent_ids": sent_ids,
         "passthrough_ids": [segment_id for segment_id in source if segment_id not in sent_ids],
         "atomic_punctuation_passthrough_ids": [16, 17, 18, 19, 20],
         "numeric_range_passthrough_ids": [21],
         "mixed_text_sent_ids": [22, 23, 24],
+        "unspaced_url_body_sent_ids": [25, 26, 27, 28],
+        "multi_part_numeric_sent_ids": [29, 30, 31],
         "protected_source_sent_to_model": protected_source,
         "placeholder_sequences": {
             str(segment_id): [token.placeholder for token in tokens]
-            for segment_id, tokens in manifests.items()
+            for segment_id, tokens in manifests_by_id.items()
         },
         "source": source,
-        "translated": result.texts,
+        "translated": translated,
         "protected_tokens": {
             str(segment_id): {
                 "source": protected_tokens(source[segment_id]),
-                "translated": protected_tokens(result.texts[segment_id]),
+                "translated": protected_tokens(translated[segment_id]),
             }
             for segment_id in source
         },
-        "engine_version": result.engine_version,
-        "warnings": result.warnings,
+        "engine_versions": [result.engine_version for result in batch_results],
+        "warnings": [warning for result in batch_results for warning in result.warnings],
         "assertions": {
             "only_expected_ids_sent": True,
             "complete_id_order_preserved": True,

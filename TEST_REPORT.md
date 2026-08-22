@@ -22,7 +22,7 @@
 ```bash
 cd backend
 ../.venv-smoke/bin/python -m pytest
-# 124 项通过，另有 1 条第三方 StarletteDeprecationWarning
+# 147 项通过，另有 1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m ruff check src tests ../scripts
 # 所有检查通过
@@ -88,6 +88,22 @@ ASCII 标识符边界、平衡括号 URL、URL 尾随标点、nonce 碰撞、跨
 - 原文中的 `LVT_TOKEN_0001` 等字面量先作为普通受保护 token 替换，恢复后允许存在；
   普通单词 `LVT` 和 `TOKEN` 不受该规则影响。
 
+### Phase 1 URL、多段数字和包装顺序 follow-up
+
+- URL 扫描遇到 ASCII 逗号或中文 `，。！？；：` 时立即结束，因此无空格正文
+  `,then continue`、`。Continue`、`。继续` 不会被吞入 URL。
+- `?`、`#`、`%`、端口冒号、Unicode 路径和平衡圆括号继续视为 URL 内容；
+  末尾 ASCII `.,;:!?` 仍按既有规则剥离。
+- 歧义策略：裸 ASCII 逗号和中文句读优先解释为正文分隔符。合法 URL 若确实需要这些
+  字符，应使用百分号编码；ASCII 句号、分号、感叹号在非末尾位置仍可能是合法 URL
+  字符，无空格正文使用这些字符分隔时仍存在歧义。
+- hyphen、en dash、em dash 或 `/` 连接的两段及以上纯数字链作为一个 token，例如
+  `2026-08-22`、`010-1234-5678`、`2026/08/22`。裸点分数字链沿用数字规则，
+  因此 IPv4 和裸数字版本整体保护但不做语义合法性校验；`v1.2.3` 等 ASCII 前缀版本
+  不拆分，属于当前已知限制。
+- 原子包装改为顺序栈校验：前缀只允许压入开放括号/引号，后缀必须按逆序闭合。
+  `([“NASA”])` 合法；`([NASA)]`、`”NASA“`、缺失或反向包装进入模型。
+
 ### 真实 Ollama passthrough/token smoke
 
 ```bash
@@ -117,6 +133,18 @@ ASCII 标识符边界、平衡括号 URL、URL 尾随标点、nonce 碰撞、跨
 - 总模型 IDs：`[6,7,8,9,10,11,12,14,15,22,23,24]`。
 - Hy-MT2 成功，未触发 fallback。
 - 报告：`docs/PHASE-1-FINAL-BOUNDARY-OLLAMA-SMOKE.json`。
+
+URL、多段数字和包装顺序 smoke：
+
+- 首次把全部 31 段放入单个模型批次时安全失败：Hy-MT2 重排占位符，qwen 返回
+  截断 JSON，最终抛出 `TRANSLATION_ALL_MODELS_FAILED`，没有放宽校验或返回原文。
+- 最终脚本按真实字幕规模拆成两个模型批次，nonce 均为
+  `FBD1EC4DBE32FF87`；两个批次都由 Hy-MT2 成功完成，未 fallback。
+- URL 无空格正文 IDs `[25,26,27,28]` 实际发送模型；报告中的模型输入只包含 URL
+  占位符，同时保留 `,then continue`、`。Continue`、`。继续` 正文。
+- 多段数字 IDs `[29,30,31]` 实际发送模型；`2026-08-22` 和
+  `010-1234-5678` 均作为单一占位符并完整恢复。
+- 报告：`docs/PHASE-1-URL-MULTIPART-WRAPPING-OLLAMA-SMOKE.json`。
 
 ### 可重复生成的媒体测试资产
 
@@ -177,6 +205,10 @@ Unicode 数字、随机 nonce 与完整 URL 修复后又执行相同五样本回
 
 最终边界修复后再次执行相同五样本回归，5 个任务、40 个文件全部通过。
 最新报告：`docs/PHASE-1-FINAL-BOUNDARY-E2E.json`。
+
+URL、多段数字和包装顺序修复后再次执行相同五样本回归，5 个任务、40 个文件
+全部通过。俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2。最新报告：
+`docs/PHASE-1-URL-MULTIPART-WRAPPING-E2E.json`。
 
 所有任务均使用真实的 `YtDlpFFmpegDownloader`、`MLXWhisperASREngine`、
 `SherpaOnnxDiarizationEngine` 和 Ollama 翻译引擎。以下命令没有使用 Fake Engine。

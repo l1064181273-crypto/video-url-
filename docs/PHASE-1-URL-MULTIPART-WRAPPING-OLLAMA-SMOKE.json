@@ -1,0 +1,629 @@
+{
+  "schema_version": 1,
+  "source_language": "en",
+  "primary_model": "hy-mt2:1.8b-q4km-fixed",
+  "fallback_model": "qwen2.5:1.5b",
+  "placeholder_nonce": "FBD1EC4DBE32FF87",
+  "classification": {
+    "1": "url",
+    "2": "number",
+    "3": "proper_token",
+    "4": "proper_token",
+    "5": "proper_token",
+    "6": "translate",
+    "7": "translate",
+    "8": "translate",
+    "9": "translate",
+    "10": "translate",
+    "11": "translate",
+    "12": "translate",
+    "13": "url",
+    "14": "translate",
+    "15": "translate",
+    "16": "url",
+    "17": "url",
+    "18": "proper_token",
+    "19": "number",
+    "20": "speaker_label",
+    "21": "number",
+    "22": "translate",
+    "23": "translate",
+    "24": "translate",
+    "25": "translate",
+    "26": "translate",
+    "27": "translate",
+    "28": "translate",
+    "29": "translate",
+    "30": "translate",
+    "31": "translate"
+  },
+  "model_call_count": 2,
+  "model_batches": [
+    {
+      "batch_index": 1,
+      "sent_ids": [
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        14,
+        15
+      ],
+      "protected_source": {
+        "6": "Good Morning",
+        "7": "LVT_FBD1EC4DBE32FF87_TOKEN_0001 and LVT_FBD1EC4DBE32FF87_TOKEN_0002 launched in LVT_FBD1EC4DBE32FF87_TOKEN_0003",
+        "8": "Websites: LVT_FBD1EC4DBE32FF87_TOKEN_0004 and LVT_FBD1EC4DBE32FF87_TOKEN_0005",
+        "9": "STOP",
+        "10": "The time code is LVT_FBD1EC4DBE32FF87_TOKEN_0006",
+        "11": "Published in 发布于LVT_FBD1EC4DBE32FF87_TOKEN_0007年",
+        "12": "Published in ВLVT_FBD1EC4DBE32FF87_TOKEN_0008году",
+        "14": "Keep LVT_FBD1EC4DBE32FF87_TOKEN_0009 unchanged",
+        "15": "Visit LVT_FBD1EC4DBE32FF87_TOKEN_0010 for details"
+      },
+      "placeholder_manifest": {
+        "6": [],
+        "7": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0001",
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0002",
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0003"
+        ],
+        "8": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0004",
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0005"
+        ],
+        "9": [],
+        "10": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0006"
+        ],
+        "11": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0007"
+        ],
+        "12": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0008"
+        ],
+        "14": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0009"
+        ],
+        "15": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0010"
+        ]
+      },
+      "engine_version": "ollama:hy-mt2:1.8b-q4km-fixed",
+      "warnings": []
+    },
+    {
+      "batch_index": 2,
+      "sent_ids": [
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "protected_source": {
+        "22": "计划为LVT_FBD1EC4DBE32FF87_TOKEN_0001年",
+        "23": "Visit LVT_FBD1EC4DBE32FF87_TOKEN_0002.",
+        "24": "LVT_FBD1EC4DBE32FF87_TOKEN_0003 launched in LVT_FBD1EC4DBE32FF87_TOKEN_0004.",
+        "25": "Visit LVT_FBD1EC4DBE32FF87_TOKEN_0005,then continue",
+        "26": "Visit LVT_FBD1EC4DBE32FF87_TOKEN_0006。Continue",
+        "27": "访问LVT_FBD1EC4DBE32FF87_TOKEN_0007。继续",
+        "28": "LVT_FBD1EC4DBE32FF87_TOKEN_0008。继续",
+        "29": "Release on LVT_FBD1EC4DBE32FF87_TOKEN_0009",
+        "30": "Call LVT_FBD1EC4DBE32FF87_TOKEN_0010 today",
+        "31": "计划为LVT_FBD1EC4DBE32FF87_TOKEN_0011发布"
+      },
+      "placeholder_manifest": {
+        "22": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0001"
+        ],
+        "23": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0002"
+        ],
+        "24": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0003",
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0004"
+        ],
+        "25": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0005"
+        ],
+        "26": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0006"
+        ],
+        "27": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0007"
+        ],
+        "28": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0008"
+        ],
+        "29": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0009"
+        ],
+        "30": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0010"
+        ],
+        "31": [
+          "LVT_FBD1EC4DBE32FF87_TOKEN_0011"
+        ]
+      },
+      "engine_version": "ollama:hy-mt2:1.8b-q4km-fixed",
+      "warnings": []
+    }
+  ],
+  "sent_ids": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    14,
+    15,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31
+  ],
+  "passthrough_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    13,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21
+  ],
+  "atomic_punctuation_passthrough_ids": [
+    16,
+    17,
+    18,
+    19,
+    20
+  ],
+  "numeric_range_passthrough_ids": [
+    21
+  ],
+  "mixed_text_sent_ids": [
+    22,
+    23,
+    24
+  ],
+  "unspaced_url_body_sent_ids": [
+    25,
+    26,
+    27,
+    28
+  ],
+  "multi_part_numeric_sent_ids": [
+    29,
+    30,
+    31
+  ],
+  "protected_source_sent_to_model": {
+    "6": "Good Morning",
+    "7": "LVT_FBD1EC4DBE32FF87_TOKEN_0001 and LVT_FBD1EC4DBE32FF87_TOKEN_0002 launched in LVT_FBD1EC4DBE32FF87_TOKEN_0003",
+    "8": "Websites: LVT_FBD1EC4DBE32FF87_TOKEN_0004 and LVT_FBD1EC4DBE32FF87_TOKEN_0005",
+    "9": "STOP",
+    "10": "The time code is LVT_FBD1EC4DBE32FF87_TOKEN_0006",
+    "11": "Published in 发布于LVT_FBD1EC4DBE32FF87_TOKEN_0007年",
+    "12": "Published in ВLVT_FBD1EC4DBE32FF87_TOKEN_0008году",
+    "14": "Keep LVT_FBD1EC4DBE32FF87_TOKEN_0009 unchanged",
+    "15": "Visit LVT_FBD1EC4DBE32FF87_TOKEN_0010 for details",
+    "22": "计划为LVT_FBD1EC4DBE32FF87_TOKEN_0001年",
+    "23": "Visit LVT_FBD1EC4DBE32FF87_TOKEN_0002.",
+    "24": "LVT_FBD1EC4DBE32FF87_TOKEN_0003 launched in LVT_FBD1EC4DBE32FF87_TOKEN_0004.",
+    "25": "Visit LVT_FBD1EC4DBE32FF87_TOKEN_0005,then continue",
+    "26": "Visit LVT_FBD1EC4DBE32FF87_TOKEN_0006。Continue",
+    "27": "访问LVT_FBD1EC4DBE32FF87_TOKEN_0007。继续",
+    "28": "LVT_FBD1EC4DBE32FF87_TOKEN_0008。继续",
+    "29": "Release on LVT_FBD1EC4DBE32FF87_TOKEN_0009",
+    "30": "Call LVT_FBD1EC4DBE32FF87_TOKEN_0010 today",
+    "31": "计划为LVT_FBD1EC4DBE32FF87_TOKEN_0011发布"
+  },
+  "placeholder_sequences": {
+    "6": [],
+    "7": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0001",
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0002",
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0003"
+    ],
+    "8": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0004",
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0005"
+    ],
+    "9": [],
+    "10": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0006"
+    ],
+    "11": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0007"
+    ],
+    "12": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0008"
+    ],
+    "14": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0009"
+    ],
+    "15": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0010"
+    ],
+    "22": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0001"
+    ],
+    "23": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0002"
+    ],
+    "24": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0003",
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0004"
+    ],
+    "25": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0005"
+    ],
+    "26": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0006"
+    ],
+    "27": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0007"
+    ],
+    "28": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0008"
+    ],
+    "29": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0009"
+    ],
+    "30": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0010"
+    ],
+    "31": [
+      "LVT_FBD1EC4DBE32FF87_TOKEN_0011"
+    ]
+  },
+  "source": {
+    "1": "https://example.com",
+    "2": "2026",
+    "3": "NASA",
+    "4": "GPT-5",
+    "5": "OpenAI",
+    "6": "Good Morning",
+    "7": "NASA and NASA launched in 2026",
+    "8": "Websites: https://example.com and https://example.com",
+    "9": "STOP",
+    "10": "The time code is 00:03:21",
+    "11": "Published in 发布于2026年",
+    "12": "Published in В2026году",
+    "13": "https://en.wikipedia.org/wiki/Foo_(bar)",
+    "14": "Keep LVT_TOKEN_0001 unchanged",
+    "15": "Visit https://example.com/LVT_TOKEN_0002 for details",
+    "16": "https://example.com.",
+    "17": "(https://example.com)",
+    "18": "NASA.",
+    "19": "2026.",
+    "20": "Speaker 1:",
+    "21": "2026-2027",
+    "22": "计划为2026-2027年",
+    "23": "Visit https://example.com.",
+    "24": "NASA launched in 2026.",
+    "25": "Visit https://example.com,then continue",
+    "26": "Visit https://example.com。Continue",
+    "27": "访问https://example.com。继续",
+    "28": "https://example.com。继续",
+    "29": "Release on 2026-08-22",
+    "30": "Call 010-1234-5678 today",
+    "31": "计划为2026-08-22发布"
+  },
+  "translated": {
+    "1": "https://example.com",
+    "2": "2026",
+    "3": "NASA",
+    "4": "GPT-5",
+    "5": "OpenAI",
+    "6": "早上好",
+    "7": "NASA 和 NASA 在 2026 发布",
+    "8": "网站：https://example.com 和 https://example.com",
+    "9": "停止",
+    "10": "时间代码为 00:03:21",
+    "11": "发布于 2026年",
+    "12": "发布于 В2026年",
+    "13": "https://en.wikipedia.org/wiki/Foo_(bar)",
+    "14": "保持 LVT_TOKEN_0001 不变",
+    "15": "访问 https://example.com/LVT_TOKEN_0002 了解详情",
+    "16": "https://example.com.",
+    "17": "(https://example.com)",
+    "18": "NASA.",
+    "19": "2026.",
+    "20": "Speaker 1:",
+    "21": "2026-2027",
+    "22": "计划于2026-2027年",
+    "23": "访问https://example.com。",
+    "24": "NASA在2026发布。",
+    "25": "访问https://example.com，然后继续",
+    "26": "访问https://example.com。继续",
+    "27": "访问https://example.com。继续",
+    "28": "https://example.com。继续",
+    "29": "在2026-08-22发布",
+    "30": "今天联系010-1234-5678",
+    "31": "计划于2026-08-22发布"
+  },
+  "protected_tokens": {
+    "1": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "2": {
+      "source": [
+        "2026"
+      ],
+      "translated": [
+        "2026"
+      ]
+    },
+    "3": {
+      "source": [
+        "NASA"
+      ],
+      "translated": [
+        "NASA"
+      ]
+    },
+    "4": {
+      "source": [
+        "GPT-5"
+      ],
+      "translated": [
+        "GPT-5"
+      ]
+    },
+    "5": {
+      "source": [
+        "OpenAI"
+      ],
+      "translated": [
+        "OpenAI"
+      ]
+    },
+    "6": {
+      "source": [],
+      "translated": []
+    },
+    "7": {
+      "source": [
+        "NASA",
+        "NASA",
+        "2026"
+      ],
+      "translated": [
+        "NASA",
+        "NASA",
+        "2026"
+      ]
+    },
+    "8": {
+      "source": [
+        "https://example.com",
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com",
+        "https://example.com"
+      ]
+    },
+    "9": {
+      "source": [],
+      "translated": []
+    },
+    "10": {
+      "source": [
+        "00:03:21"
+      ],
+      "translated": [
+        "00:03:21"
+      ]
+    },
+    "11": {
+      "source": [
+        "2026"
+      ],
+      "translated": [
+        "2026"
+      ]
+    },
+    "12": {
+      "source": [
+        "2026"
+      ],
+      "translated": [
+        "2026"
+      ]
+    },
+    "13": {
+      "source": [
+        "https://en.wikipedia.org/wiki/Foo_(bar)"
+      ],
+      "translated": [
+        "https://en.wikipedia.org/wiki/Foo_(bar)"
+      ]
+    },
+    "14": {
+      "source": [
+        "LVT_TOKEN_0001"
+      ],
+      "translated": [
+        "LVT_TOKEN_0001"
+      ]
+    },
+    "15": {
+      "source": [
+        "https://example.com/LVT_TOKEN_0002"
+      ],
+      "translated": [
+        "https://example.com/LVT_TOKEN_0002"
+      ]
+    },
+    "16": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "17": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "18": {
+      "source": [
+        "NASA"
+      ],
+      "translated": [
+        "NASA"
+      ]
+    },
+    "19": {
+      "source": [
+        "2026"
+      ],
+      "translated": [
+        "2026"
+      ]
+    },
+    "20": {
+      "source": [
+        "Speaker 1"
+      ],
+      "translated": [
+        "Speaker 1"
+      ]
+    },
+    "21": {
+      "source": [
+        "2026-2027"
+      ],
+      "translated": [
+        "2026-2027"
+      ]
+    },
+    "22": {
+      "source": [
+        "2026-2027"
+      ],
+      "translated": [
+        "2026-2027"
+      ]
+    },
+    "23": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "24": {
+      "source": [
+        "NASA",
+        "2026"
+      ],
+      "translated": [
+        "NASA",
+        "2026"
+      ]
+    },
+    "25": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "26": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "27": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "28": {
+      "source": [
+        "https://example.com"
+      ],
+      "translated": [
+        "https://example.com"
+      ]
+    },
+    "29": {
+      "source": [
+        "2026-08-22"
+      ],
+      "translated": [
+        "2026-08-22"
+      ]
+    },
+    "30": {
+      "source": [
+        "010-1234-5678"
+      ],
+      "translated": [
+        "010-1234-5678"
+      ]
+    },
+    "31": {
+      "source": [
+        "2026-08-22"
+      ],
+      "translated": [
+        "2026-08-22"
+      ]
+    }
+  },
+  "engine_versions": [
+    "ollama:hy-mt2:1.8b-q4km-fixed",
+    "ollama:hy-mt2:1.8b-q4km-fixed"
+  ],
+  "warnings": [],
+  "assertions": {
+    "only_expected_ids_sent": true,
+    "complete_id_order_preserved": true,
+    "passthrough_exact": true,
+    "token_count_boundary_order_preserved": true,
+    "ordinary_text_contains_cjk": true
+  }
+}

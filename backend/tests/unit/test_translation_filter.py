@@ -36,6 +36,10 @@ class RecordingTranslationEngine:
                 "NASA launched the mission in 2026": "NASA 在 2026 年发射了该任务",
                 "NASA launched in 2026.": "NASA 于 2026 年发射。",
                 "Speaker 1 said hello.": "Speaker 1 说你好。",
+                "Visit https://example.com,then continue": "访问 https://example.com，然后继续",
+                "Visit https://example.com。Continue": "访问 https://example.com。继续",
+                "访问https://example.com。继续": "访问https://example.com。继续",
+                "https://example.com。继续": "https://example.com。继续",
             }[value]
             for key, value in texts.items()
         }
@@ -292,6 +296,70 @@ def test_complete_url_extraction(text: str, expected: list[str]) -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Visit https://example.com,then continue",
+        "Visit https://example.com。Continue",
+        "访问https://example.com。继续",
+        "https://example.com。继续",
+    ],
+)
+def test_url_followed_by_unspaced_body_is_not_atomic_passthrough(text: str) -> None:
+    assert classify_text(text) is TextDisposition.TRANSLATE
+    assert protected_tokens(text) == ["https://example.com"]
+
+    protected, _manifests = protect_texts({1: text}, nonce_factory=lambda: "URLBODY")
+
+    assert "https://example.com" not in protected[1]
+    assert "LVT_URLBODY_TOKEN_0001" in protected[1]
+    assert any(body in protected[1] for body in (",then continue", "。Continue", "。继续"))
+
+
+def test_url_followed_by_unspaced_body_is_sent_to_translation_delegate() -> None:
+    source = {
+        1: "Visit https://example.com,then continue",
+        2: "Visit https://example.com。Continue",
+        3: "访问https://example.com。继续",
+        4: "https://example.com。继续",
+    }
+    delegate = RecordingTranslationEngine()
+
+    result = FilteringTranslationEngine(delegate).translate(source, "en")
+
+    assert delegate.calls == [source]
+    assert list(result.texts) == list(source)
+    assert len(result.texts) == len(source)
+
+
+@pytest.mark.parametrize(
+    ("text", "disposition"),
+    [
+        ("  ([“NASA”])?!  ", TextDisposition.PROPER_TOKEN),
+        ("([NASA)]", TextDisposition.TRANSLATE),
+        ("[NASA", TextDisposition.TRANSLATE),
+        (")NASA(", TextDisposition.TRANSLATE),
+        ("”NASA“", TextDisposition.TRANSLATE),
+        ("‘NASA‘", TextDisposition.TRANSLATE),
+    ],
+)
+def test_atomic_wrapping_requires_ordered_balanced_delimiters(
+    text: str,
+    disposition: TextDisposition,
+) -> None:
+    assert classify_text(text) is disposition
+
+
+def test_valid_nested_atomic_wrapping_preserves_every_character() -> None:
+    text = "  ([“NASA”])?!  "
+    delegate = RecordingTranslationEngine()
+
+    result = FilteringTranslationEngine(delegate).translate({1: text}, "en")
+
+    assert delegate.calls == []
+    assert result.texts == {1: text}
+
+
+@pytest.mark.parametrize(
     ("text", "expected"),
     [
         ("2026-2027", "2026-2027"),
@@ -304,6 +372,26 @@ def test_complete_url_extraction(text: str, expected: list[str]) -> None:
     ],
 )
 def test_numeric_range_is_one_protected_token(text: str, expected: str) -> None:
+    assert protected_tokens(text) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("2026-08-22", "2026-08-22"),
+        ("010-1234-5678", "010-1234-5678"),
+        ("2026–08–22", "2026–08–22"),
+        ("010—1234—5678", "010—1234—5678"),
+        ("2026/08/22", "2026/08/22"),
+        ("计划为2026-08-22发布", "2026-08-22"),
+        ("날짜는2026-08-22입니다", "2026-08-22"),
+        ("Дата2026-08-22года", "2026-08-22"),
+    ],
+)
+def test_multi_part_numeric_sequence_is_one_protected_token(
+    text: str,
+    expected: str,
+) -> None:
     assert protected_tokens(text) == [expected]
 
 
@@ -337,3 +425,21 @@ def test_repeated_numeric_ranges_use_distinct_placeholders_and_restore_in_order(
         manifests[1],
     )
     assert restored == "从 2026-2027 到 2026-2027"
+
+
+def test_repeated_multi_part_numeric_sequences_restore_in_order() -> None:
+    source = {1: "Call 010-1234-5678 on 2026-08-22, then 010-1234-5678"}
+    protected, manifests = protect_texts(source, nonce_factory=lambda: "MULTIPART")
+
+    assert [token.original for token in manifests[1]] == [
+        "010-1234-5678",
+        "2026-08-22",
+        "010-1234-5678",
+    ]
+    assert len({token.placeholder for token in manifests[1]}) == 3
+    restored = restore_protected_text(
+        f"请拨打 {manifests[1][0].placeholder}，日期 {manifests[1][1].placeholder}，"
+        f"不要重复 {manifests[1][2].placeholder}",
+        manifests[1],
+    )
+    assert restored == "请拨打 010-1234-5678，日期 2026-08-22，不要重复 010-1234-5678"

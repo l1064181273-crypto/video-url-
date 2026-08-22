@@ -20,9 +20,10 @@ class TextDisposition(StrEnum):
 
 URL_START_PATTERN = re.compile(r"https?://", re.I)
 TIMECODE_PATTERN = re.compile(r"(?<!\d)(?:\d{1,2}:)?[0-5]\d:[0-5]\d(?:[.,]\d{1,3})?(?!\d)")
-NUMERIC_RANGE_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_-])[+-]?\d+(?:[.,]\d+)*[ \t]*[-–—][ \t]*"
-    r"[+-]?\d+(?:[.,]\d+)*(?![A-Za-z0-9_-])"
+NUMERIC_SEQUENCE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[+-]?\d+(?:[.,]\d+)*"
+    r"(?:[ \t]*[-–—/][ \t]*[+-]?\d+(?:[.,]\d+)*)+"
+    r"(?![A-Za-z0-9_-])"
 )
 NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])[+-]?\d+(?:[.,]\d+)*(?![A-Za-z0-9_-])")
 SPEAKER_PATTERN = re.compile(r"(?:speaker|spk|说话人)\s*[_#:-]?\s*\d+", re.I)
@@ -40,6 +41,7 @@ FULL_NUMBER_PATTERN = re.compile(r"[+-]?\d+(?:[.,]\d+)*")
 RESERVED_PREFIX_PATTERN = re.compile(r"LVT_[A-Za-z0-9_]+")
 NONCE_PATTERN = re.compile(r"[A-Z0-9]{4,64}")
 URL_STOP_CHARACTERS = frozenset(" \t\r\n`<>{}[]\"'“”‘’")
+URL_INLINE_BOUNDARY_CHARACTERS = frozenset(",，。！？；：")
 URL_TRAILING_PUNCTUATION = frozenset(".,;:!?，。！？；：")
 ATOMIC_PUNCTUATION = frozenset(".,:;?!，。；：？！")
 ATOMIC_BRACKET_PAIRS = {
@@ -81,7 +83,7 @@ def _classify_token_value(value: str) -> TextDisposition:
         return TextDisposition.URL
     if TIMECODE_PATTERN.fullmatch(value):
         return TextDisposition.TIMECODE
-    if NUMERIC_RANGE_PATTERN.fullmatch(value) or FULL_NUMBER_PATTERN.fullmatch(value):
+    if NUMERIC_SEQUENCE_PATTERN.fullmatch(value) or FULL_NUMBER_PATTERN.fullmatch(value):
         return TextDisposition.NUMBER
     if SPEAKER_PATTERN.fullmatch(value):
         return TextDisposition.SPEAKER_LABEL
@@ -106,13 +108,22 @@ def _has_only_valid_atomic_wrapping(
     )
     if any(character not in allowed for character in prefix + suffix):
         return False
-    for opening, closing in ATOMIC_BRACKET_PAIRS.items():
-        if closing in prefix or opening in suffix or prefix.count(opening) != suffix.count(closing):
+    opening_to_closing = ATOMIC_BRACKET_PAIRS | ATOMIC_QUOTE_PAIRS
+    closing_characters = frozenset(opening_to_closing.values())
+    ignored = ATOMIC_PUNCTUATION | frozenset(" \t\r\n")
+    stack: list[str] = []
+    for character in prefix:
+        if character in ignored:
+            continue
+        if character not in opening_to_closing:
             return False
-    for opening, closing in ATOMIC_QUOTE_PAIRS.items():
-        if prefix.count(opening) != suffix.count(closing):
+        stack.append(opening_to_closing[character])
+    for character in suffix:
+        if character in ignored:
+            continue
+        if character not in closing_characters or not stack or stack.pop() != character:
             return False
-    return True
+    return not stack
 
 
 def classify_text(text: str) -> TextDisposition:
@@ -136,7 +147,11 @@ def _url_occurrences(text: str) -> list[ProtectedOccurrence]:
     occurrences: list[ProtectedOccurrence] = []
     for match in URL_START_PATTERN.finditer(text):
         end = match.end()
-        while end < len(text) and text[end] not in URL_STOP_CHARACTERS:
+        while (
+            end < len(text)
+            and text[end] not in URL_STOP_CHARACTERS
+            and text[end] not in URL_INLINE_BOUNDARY_CHARACTERS
+        ):
             end += 1
         candidate = text[match.start() : end]
         while candidate:
@@ -161,7 +176,7 @@ def protected_occurrences(text: str) -> list[ProtectedOccurrence]:
     ]
     for priority, pattern in enumerate(
         (
-            NUMERIC_RANGE_PATTERN,
+            NUMERIC_SEQUENCE_PATTERN,
             TIMECODE_PATTERN,
             SPEAKER_PATTERN,
             RESERVED_PREFIX_PATTERN,

@@ -326,6 +326,65 @@ def test_numeric_range_change_triggers_fallback() -> None:
     assert result.warnings
 
 
+def test_multi_part_numeric_sequence_change_triggers_fallback() -> None:
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        if payload["model"] == "hy-mt2:1.8b-q4km-fixed":
+            return {"message": {"content": '{"1":"计划于2027-08-22发布。"}'}}
+        return {"message": {"content": '{"1":"计划于 LVT_MULTIPART_TOKEN_0001 发布。"}'}}
+
+    engine = FallbackTranslationEngine(
+        primary=OllamaTranslationEngine(
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "MULTIPART",
+        ),
+        fallback=OllamaTranslationEngine(
+            model="qwen2.5:1.5b",
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "MULTIPART",
+        ),
+    )
+
+    result = engine.translate({1: "Planned for 2026-08-22"}, "en")
+
+    assert result.texts == {1: "计划于 2026-08-22 发布。"}
+    assert result.engine_version == "ollama:qwen2.5:1.5b"
+    assert result.warnings
+
+
+def test_multi_part_numeric_sequence_change_fails_both_models() -> None:
+    attempts: list[str] = []
+
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        attempts.append(payload["model"])
+        return {"message": {"content": '{"1":"计划于2027-08-22发布。"}'}}
+
+    engine = FallbackTranslationEngine(
+        primary=OllamaTranslationEngine(
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "MULTIPART",
+        ),
+        fallback=OllamaTranslationEngine(
+            model="qwen2.5:1.5b",
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "MULTIPART",
+        ),
+    )
+
+    with pytest.raises(TranslationEngineError, match="TRANSLATION_ALL_MODELS_FAILED"):
+        engine.translate({1: "Planned for 2026-08-22"}, "en")
+
+    assert attempts == [
+        "hy-mt2:1.8b-q4km-fixed",
+        "hy-mt2:1.8b-q4km-fixed",
+        "qwen2.5:1.5b",
+        "qwen2.5:1.5b",
+    ]
+
+
 def test_plain_lvt_and_token_words_are_not_reserved_placeholders() -> None:
     engine = OllamaTranslationEngine(
         max_attempts=1,

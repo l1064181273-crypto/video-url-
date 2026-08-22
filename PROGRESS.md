@@ -106,7 +106,12 @@
   - ✅ Phase 1 内部前缀 follow-up：模型输出统一扫描 `LVT_` 保留前缀，只允许 manifest 精确列出的占位符；其他 nonce、位数错误、增加、重复、修改或错序均失败，原文字面量仅在单次恢复后允许重新出现。
   - ✅ Phase 1 最终边界真实 Ollama smoke：nonce `2B15629AF58F1A95`；带标点原子 passthrough IDs `[16,17,18,19,20]`、纯范围 ID `[21]` 未发送模型，新增混合正文 IDs `[22,23,24]` 实际发送；Hy-MT2 成功且未 fallback，报告为 `docs/PHASE-1-FINAL-BOUNDARY-OLLAMA-SMOKE.json`。
   - ✅ Phase 1 最终边界媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过；俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2，报告为 `docs/PHASE-1-FINAL-BOUNDARY-E2E.json`。
-  - ✅ Phase 1 质量门：`pytest` 124 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
+  - ✅ Phase 1 URL 边界 follow-up：ASCII 逗号和中文句读终止 URL 扫描，无空格英文/中文正文继续进入模型；query、fragment、百分号编码、Unicode 路径和平衡括号能力保持不变。
+  - ✅ Phase 1 多段数字 follow-up：hyphen、en dash、em dash 和 `/` 数字链整体保护；日期、电话号码及中日韩/西里尔文字相邻形式均覆盖，ASCII 标识符不拆分。
+  - ✅ Phase 1 包装顺序 follow-up：使用栈验证括号和方向引号的嵌套与方向；合法 `([“NASA”])` passthrough，交叉、缺失和反向包装进入模型。
+  - ✅ Phase 1 扩展真实 Ollama smoke：首次 31 段单批压力测试因占位符重排与 fallback JSON 截断而安全双失败；最终按真实字幕规模分为两个批次，nonce `FBD1EC4DBE32FF87`，均由 Hy-MT2 成功，报告为 `docs/PHASE-1-URL-MULTIPART-WRAPPING-OLLAMA-SMOKE.json`。
+  - ✅ Phase 1 最新媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过；俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2，报告为 `docs/PHASE-1-URL-MULTIPART-WRAPPING-E2E.json`。
+  - ✅ Phase 1 质量门：`pytest` 147 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
   - **Phase 1 退出条件已满足**：三个真实媒体引擎已接入统一 Pipeline，并通过真实 HTTP fixture 生成与验证合规 8 文件。
   - ⏭️ 下一步：等待独立审查；本轮不开始 Phase 2/3/4。
 
