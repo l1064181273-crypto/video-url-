@@ -119,7 +119,12 @@
   - ✅ Phase 1 生产 prompt 回归：确定性测试直接捕获 `OllamaTranslationEngine` prompt，确认 URL/版本本体完全替换，`)Continue`、`）继续` 和正文仍对模型可见；模型返回 `v9.2.3` 会被严格拒绝。
   - ✅ 真实 smoke 稳定性如实记录：独立审查历史为 1/2；本轮扩展后连续两次为 2/2，nonce 分别为 `A8CCB0A5658DB1AF`、`904921B8DE99F31E`。每次 3 个真实批次均由 Hy-MT2 完成；双失败仍保持非零退出。报告为 `docs/PHASE-1-PAREN-VERSION-OLLAMA-SMOKE.json`。
   - ✅ Phase 1 最新媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过；俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2，报告为 `docs/PHASE-1-PAREN-VERSION-E2E.json`。
-  - ✅ Phase 1 质量门：`pytest` 167 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
+  - ✅ Phase 1 数字候选链 follow-up：先扫描完整点/逗号/斜杠/三类横线数字链，再按候选两端 ASCII 标识符上下文整体接收或拒绝；拒绝后跳过整个候选，禁止从中段重新匹配。
+  - ✅ Phase 1 句末版本 follow-up：`v`、`version`、`release-v` 点分版本支持句末标点、更长数字段、prerelease 与 build 后缀；`foo-v1.2.3` 等非支持前缀完全不匹配。
+  - ✅ Phase 1 输出增量校验：移除 expected placeholder 后重新扫描模型输出，模型额外生成的 URL、数字、版本或其他 protected token 会触发有限重试/fallback；主备模型同错仍抛出 `TRANSLATION_ALL_MODELS_FAILED`。
+  - ✅ Phase 1 最新真实 Ollama smoke：历史独立审查 1/2 和上一轮 2/2 记录均保留；本轮连续两次为 2/2，nonce `798AD684EDDC8608`、`82B9D463AE4AAD6D`，每次 5 个批次均由 Hy-MT2 完成，报告为 `docs/PHASE-1-NUMERIC-CHAIN-VERSION-OLLAMA-SMOKE.json`。
+  - ✅ Phase 1 最新媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过；俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2，报告为 `docs/PHASE-1-NUMERIC-CHAIN-VERSION-E2E.json`。
+  - ✅ Phase 1 质量门：`pytest` 193 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
   - **Phase 1 退出条件已满足**：三个真实媒体引擎已接入统一 Pipeline，并通过真实 HTTP fixture 生成与验证合规 8 文件。
   - ⏭️ 下一步：等待独立审查；本轮不开始 Phase 2/3/4。
 

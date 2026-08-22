@@ -445,9 +445,42 @@ def test_multi_part_numeric_sequence_is_one_protected_token(
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
+        ("Year,2026", ["2026"]),
+        ("Date,2026-08-22", ["2026-08-22"]),
+        ("Date,2026/08/22", ["2026/08/22"]),
+        ("Call,010-1234-5678", ["010-1234-5678"]),
+        ("计划,2026-08-22", ["2026-08-22"]),
+        ("Date.2026-08-22", ["2026-08-22"]),
+        ("prefix2026/08/22", []),
+        ("prefix2026–08–22", []),
+        ("prefix2026—08—22", []),
+        ("prefix1.2.3", []),
+    ],
+)
+def test_numeric_candidate_is_protected_whole_or_not_at_all(
+    text: str,
+    expected: list[str],
+) -> None:
+    assert protected_tokens(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
         ("v1.2.3", ["v1.2.3"]),
         ("version1.2.3", ["version1.2.3"]),
         ("release-v1.2.3", ["release-v1.2.3"]),
+        ("v1.2.3.", ["v1.2.3"]),
+        ("version10.20.30.", ["version10.20.30"]),
+        ("release-v1.2.3.", ["release-v1.2.3"]),
+        ("Use v1.2.3. now", ["v1.2.3"]),
+        ("Use v1.2.3, now", ["v1.2.3"]),
+        ("Use v1.2.3!", ["v1.2.3"]),
+        ("v1.2.3.4", ["v1.2.3.4"]),
+        ("v1.2.3-beta", ["v1.2.3-beta"]),
+        ("v1.2.3+build", ["v1.2.3+build"]),
+        ("v1.2.3-beta+build", ["v1.2.3-beta+build"]),
+        ("foo-v1.2.3", []),
         ("1.2.3", ["1.2.3"]),
         ("192.168.1.1", ["192.168.1.1"]),
         ("prefix1.2.3", []),

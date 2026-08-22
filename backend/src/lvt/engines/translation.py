@@ -20,12 +20,7 @@ class TextDisposition(StrEnum):
 
 URL_START_PATTERN = re.compile(r"https?://", re.I)
 TIMECODE_PATTERN = re.compile(r"(?<!\d)(?:\d{1,2}:)?[0-5]\d:[0-5]\d(?:[.,]\d{1,3})?(?!\d)")
-NUMERIC_SEQUENCE_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_.,-])[+-]?\d+(?:[.,]\d+)*"
-    r"(?:[ \t]*[-–—/][ \t]*[+-]?\d+(?:[.,]\d+)*)+"
-    r"(?![A-Za-z0-9_-])"
-)
-NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_.,-])[+-]?\d+(?:[.,]\d+)*(?![A-Za-z0-9_-])")
+NUMERIC_CANDIDATE_PATTERN = re.compile(r"\d+(?:(?:[.,]\d+)|(?:[ \t]*[-–—/][ \t]*[+-]?\d+))*")
 SPEAKER_PATTERN = re.compile(r"(?:speaker|spk|说话人)\s*[_#:-]?\s*\d+", re.I)
 EXPLICIT_PROPER_TOKENS = frozenset({"NASA", "OpenAI"})
 EXPLICIT_PROPER_PATTERN = re.compile(
@@ -39,10 +34,12 @@ STRONG_PRODUCT_PATTERN = re.compile(
 )
 VERSION_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(?:release-v|version|v)\d+(?:\.\d+)+"
-    r"(?![A-Za-z0-9_.-])",
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+    r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+    r"(?=$|[\s,.!?;:，。！？；：)\]）］\"'”’])",
     re.I,
 )
-FULL_NUMBER_PATTERN = re.compile(r"[+-]?\d+(?:[.,]\d+)*")
+FULL_NUMERIC_TOKEN_PATTERN = re.compile(r"[+-]?\d+(?:(?:[.,]\d+)|(?:[ \t]*[-–—/][ \t]*[+-]?\d+))*")
 RESERVED_PREFIX_PATTERN = re.compile(r"LVT_[A-Za-z0-9_]+")
 NONCE_PATTERN = re.compile(r"[A-Z0-9]{4,64}")
 URL_STOP_CHARACTERS = frozenset(" \t\r\n`<>{}[]\"'“”‘’")
@@ -89,7 +86,7 @@ def _classify_token_value(value: str) -> TextDisposition:
         return TextDisposition.URL
     if TIMECODE_PATTERN.fullmatch(value):
         return TextDisposition.TIMECODE
-    if NUMERIC_SEQUENCE_PATTERN.fullmatch(value) or FULL_NUMBER_PATTERN.fullmatch(value):
+    if FULL_NUMERIC_TOKEN_PATTERN.fullmatch(value):
         return TextDisposition.NUMBER
     if SPEAKER_PATTERN.fullmatch(value):
         return TextDisposition.SPEAKER_LABEL
@@ -180,6 +177,39 @@ def _url_occurrences(text: str) -> list[ProtectedOccurrence]:
     return occurrences
 
 
+def _is_ascii_identifier_character(character: str) -> bool:
+    return bool(character and re.fullmatch(r"[A-Za-z0-9_]", character))
+
+
+def _numeric_occurrences(text: str) -> list[ProtectedOccurrence]:
+    occurrences: list[ProtectedOccurrence] = []
+    cursor = 0
+    while match := NUMERIC_CANDIDATE_PATTERN.search(text, cursor):
+        digit_start = match.start()
+        start = digit_start
+        end = match.end()
+        if digit_start > 0 and text[digit_start - 1] in "+-":
+            sign_start = digit_start - 1
+            before_sign = text[sign_start - 1] if sign_start > 0 else ""
+            if not _is_ascii_identifier_character(before_sign):
+                start = sign_start
+
+        before = text[start - 1] if start > 0 else ""
+        before_previous = text[start - 2] if start > 1 else ""
+        after = text[end] if end < len(text) else ""
+        after_next = text[end + 1] if end + 1 < len(text) else ""
+        starts_inside_identifier = _is_ascii_identifier_character(before) or (
+            before in "-–—/" and _is_ascii_identifier_character(before_previous)
+        )
+        ends_inside_identifier = _is_ascii_identifier_character(after) or (
+            after in "-–—/" and _is_ascii_identifier_character(after_next)
+        )
+        if not starts_inside_identifier and not ends_inside_identifier:
+            occurrences.append(ProtectedOccurrence(start, end, text[start:end]))
+        cursor = end
+    return occurrences
+
+
 def protected_occurrences(text: str) -> list[ProtectedOccurrence]:
     candidates: list[tuple[int, int, int, str]] = [
         (occurrence.start, occurrence.end, 0, occurrence.value)
@@ -188,13 +218,11 @@ def protected_occurrences(text: str) -> list[ProtectedOccurrence]:
     for priority, pattern in enumerate(
         (
             VERSION_PATTERN,
-            NUMERIC_SEQUENCE_PATTERN,
             TIMECODE_PATTERN,
             SPEAKER_PATTERN,
             RESERVED_PREFIX_PATTERN,
             EXPLICIT_PROPER_PATTERN,
             STRONG_PRODUCT_PATTERN,
-            NUMBER_PATTERN,
         ),
         start=1,
     ):
@@ -202,6 +230,10 @@ def protected_occurrences(text: str) -> list[ProtectedOccurrence]:
             (match.start(), match.end(), priority, match.group(0))
             for match in pattern.finditer(text)
         )
+    candidates.extend(
+        (occurrence.start, occurrence.end, 100, occurrence.value)
+        for occurrence in _numeric_occurrences(text)
+    )
     selected: list[ProtectedOccurrence] = []
     for start, end, _priority, value in sorted(
         candidates,
@@ -276,6 +308,10 @@ def restore_protected_text(text: str, tokens: list[PlaceholderToken]) -> str:
             after and re.match(r"[A-Za-z0-9_]", after)
         ):
             raise ValueError(f"placeholder boundary changed: {match.group(0)}")
+    without_placeholders = RESERVED_PREFIX_PATTERN.sub(" ", text)
+    unexpected_tokens = protected_tokens(without_placeholders)
+    if unexpected_tokens:
+        raise ValueError(f"unexpected protected token in translation: {unexpected_tokens}")
     replacements = {token.placeholder: token.original for token in tokens}
     restored = RESERVED_PREFIX_PATTERN.sub(
         lambda match: replacements[match.group(0)],

@@ -22,7 +22,7 @@
 ```bash
 cd backend
 ../.venv-smoke/bin/python -m pytest
-# 167 项通过，另有 1 条第三方 StarletteDeprecationWarning
+# 193 项通过，另有 1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m ruff check src tests ../scripts
 # 所有检查通过
@@ -116,6 +116,25 @@ ASCII 标识符边界、平衡括号 URL、URL 尾随标点、nonce 碰撞、跨
   `release-v1.2.3` 均为单一 token；纯版本整段 passthrough，混合正文中的版本由
   placeholder 保护。普通数字模式禁止从 `.` 或 `,` 后开始，不能再只保护尾部 `2.3`。
 - `prefix1.2.3` 不匹配受支持版本前缀，且不会生成部分 token；这是有意的保守策略。
+- URL 内缺失右括号时，扫描器会保留未闭合左括号并继续到下一个 URL 边界；
+  这是无法仅凭局部文本消除的歧义边界。
+
+### Phase 1 数字候选链与句末版本 follow-up
+
+- 数字保护改为最大候选扫描：先从首个数字读取完整的点、逗号、斜杠、
+  hyphen、en dash、em dash 数字链，再根据整个候选前后的 ASCII 标识符上下文决定
+  整体接收或整体拒绝；拒绝后游标跳过完整候选，不从 `08/22` 等中段重新匹配。
+- `Year,2026`、`Date,2026-08-22`、`Date,2026/08/22`、
+  `Call,010-1234-5678`、`计划,2026-08-22`、`Date.2026-08-22`
+  均保护完整数字或数字链。
+- `prefix2026/08/22`、`prefix2026–08–22`、
+  `prefix2026—08—22`、`prefix1.2.3` 完全不生成 token。
+- 版本内部点与句末点分离；`v1.2.3.` 仅保护 `v1.2.3`，混合句 prompt 为
+  `Use <placeholder>. now`。更长 `v1.2.3.4` 不截断。
+- 支持完整 prerelease/build token：`v1.2.3-beta`、`v1.2.3+build`、
+  `v1.2.3-beta+build`；`foo-v1.2.3` 不属于支持前缀并完全不匹配。
+- 恢复前会移除 expected placeholder 后再次扫描模型输出；新增 URL、数字、版本或
+  其他受保护 token 均失败。因此 `2027/<expected placeholder>` 不能通过校验。
 
 ### 真实 Ollama passthrough/token smoke
 
@@ -174,6 +193,20 @@ URL、多段数字和包装顺序 smoke：
   IDs `[39,40,41]` 为原子版本 passthrough。
 - 两次成功均由 Hy-MT2 完成 3 个批次，未触发 fallback。
 - 机器报告：`docs/PHASE-1-PAREN-VERSION-OLLAMA-SMOKE.json`。
+
+数字候选链与句末版本 smoke：
+
+- 历史独立审查 `1/2` 记录继续保留；上一轮右括号/版本复测为 `2/2`。
+- 本轮扩展 smoke 连续两次退出 0，成功率 `2/2`：
+  - Attempt 1 nonce：`798AD684EDDC8608`；
+  - Attempt 2 nonce：`82B9D463AE4AAD6D`。
+- 每次分为 5 个真实模型批次；任一批次双失败仍导致脚本非零退出。
+- 标点后数字 IDs `[42,43,44,45,46,47]` 的 prompt 均为完整单占位符；
+  句末版本 IDs `[48,49,50,51,52]` 保留 token 外标点；
+  扩展版本 IDs `[53,54,55,56]` 完整保护 `.4`、prerelease 和 build；
+  IDs `[57,58,59]` 为带句末点号的原子版本 passthrough。
+- 两次运行的 5 个批次均由 Hy-MT2 完成，未触发 fallback。
+- 机器报告：`docs/PHASE-1-NUMERIC-CHAIN-VERSION-OLLAMA-SMOKE.json`。
 
 ### 可重复生成的媒体测试资产
 
@@ -242,6 +275,10 @@ URL、多段数字和包装顺序修复后再次执行相同五样本回归，5 
 右括号 URL 与前缀版本修复后再次执行相同五样本回归，5 个任务、40 个文件
 全部通过。俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2。最新报告：
 `docs/PHASE-1-PAREN-VERSION-E2E.json`。
+
+数字候选链与句末版本修复后再次执行相同五样本回归，5 个任务、40 个文件
+全部通过。俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2。最新报告：
+`docs/PHASE-1-NUMERIC-CHAIN-VERSION-E2E.json`。
 
 所有任务均使用真实的 `YtDlpFFmpegDownloader`、`MLXWhisperASREngine`、
 `SherpaOnnxDiarizationEngine` 和 Ollama 翻译引擎。以下命令没有使用 Fake Engine。

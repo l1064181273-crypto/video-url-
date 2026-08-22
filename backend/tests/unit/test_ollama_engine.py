@@ -253,6 +253,126 @@ def test_prefixed_version_cannot_be_changed_behind_partial_token() -> None:
         engine.translate({1: "Use v1.2.3 now"}, "en")
 
 
+@pytest.mark.parametrize(
+    ("source", "protected_fragment", "expected"),
+    [
+        (
+            "Use v1.2.3. now",
+            "Use LVT_VERSION_TOKEN_0001. now",
+            "使用 v1.2.3。现在。",
+        ),
+        (
+            "Use v1.2.3, now",
+            "Use LVT_VERSION_TOKEN_0001, now",
+            "使用 v1.2.3，现在。",
+        ),
+        (
+            "Use v1.2.3!",
+            "Use LVT_VERSION_TOKEN_0001!",
+            "使用 v1.2.3！",
+        ),
+    ],
+)
+def test_sentence_final_version_is_fully_protected_in_production_prompt(
+    source: str,
+    protected_fragment: str,
+    expected: str,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        calls.append(payload)
+        punctuation = "！" if source.endswith("!") else "，现在。" if "," in source else "。现在。"
+        return {
+            "message": {
+                "content": json.dumps(
+                    {"1": f"使用 LVT_VERSION_TOKEN_0001{punctuation}"},
+                    ensure_ascii=False,
+                )
+            }
+        }
+
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=request,
+        nonce_factory=lambda: "VERSION",
+    )
+
+    result = engine.translate({1: source}, "en")
+
+    prompt = calls[0]["messages"][0]["content"]
+    assert "v1.2.3" not in prompt
+    assert protected_fragment in prompt
+    assert result.texts == {1: expected}
+
+
+def test_punctuation_prefixed_numeric_chain_change_triggers_fallback() -> None:
+    attempts: list[str] = []
+
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        attempts.append(payload["model"])
+        if payload["model"] == "hy-mt2:1.8b-q4km-fixed":
+            return {"message": {"content": '{"1":"日期为2027/LVT_CHAIN_TOKEN_0001。"}'}}
+        return {"message": {"content": '{"1":"日期为 LVT_CHAIN_TOKEN_0001。"}'}}
+
+    engine = FallbackTranslationEngine(
+        primary=OllamaTranslationEngine(
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "CHAIN",
+        ),
+        fallback=OllamaTranslationEngine(
+            model="qwen2.5:1.5b",
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "CHAIN",
+        ),
+    )
+
+    result = engine.translate({1: "Date,2026/08/22"}, "en")
+
+    assert attempts == [
+        "hy-mt2:1.8b-q4km-fixed",
+        "hy-mt2:1.8b-q4km-fixed",
+        "qwen2.5:1.5b",
+    ]
+    assert result.texts == {1: "日期为 2026/08/22。"}
+    assert result.engine_version == "ollama:qwen2.5:1.5b"
+    assert result.warnings
+
+
+def test_punctuation_prefixed_numeric_chain_change_fails_both_models() -> None:
+    attempts: list[str] = []
+
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        attempts.append(payload["model"])
+        return {"message": {"content": '{"1":"日期为2027/LVT_CHAIN_TOKEN_0001。"}'}}
+
+    engine = FallbackTranslationEngine(
+        primary=OllamaTranslationEngine(
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "CHAIN",
+        ),
+        fallback=OllamaTranslationEngine(
+            model="qwen2.5:1.5b",
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "CHAIN",
+        ),
+    )
+
+    with pytest.raises(TranslationEngineError, match="TRANSLATION_ALL_MODELS_FAILED"):
+        engine.translate({1: "Date,2026/08/22"}, "en")
+
+    assert attempts == [
+        "hy-mt2:1.8b-q4km-fixed",
+        "hy-mt2:1.8b-q4km-fixed",
+        "qwen2.5:1.5b",
+        "qwen2.5:1.5b",
+    ]
+
+
 def test_repeated_nasa_must_be_returned_once_per_occurrence() -> None:
     engine = OllamaTranslationEngine(
         max_attempts=1,

@@ -81,6 +81,24 @@ def main() -> None:
         39: "v1.2.3",
         40: "version1.2.3",
         41: "release-v1.2.3",
+        42: "Year,2026",
+        43: "Date,2026-08-22",
+        44: "Date,2026/08/22",
+        45: "Call,010-1234-5678",
+        46: "计划,2026-08-22",
+        47: "Date.2026-08-22",
+        48: "Use v1.2.3. now",
+        49: "Use v1.2.3, now",
+        50: "Use v1.2.3!",
+        51: "Use version10.20.30. now",
+        52: "Use release-v1.2.3. now",
+        53: "Use v1.2.3.4 now",
+        54: "Use v1.2.3-beta now",
+        55: "Use v1.2.3+build now",
+        56: "Use v1.2.3-beta+build now",
+        57: "v1.2.3.",
+        58: "version10.20.30.",
+        59: "release-v1.2.3.",
     }
     nonce = secrets.token_hex(8).upper()
 
@@ -102,7 +120,13 @@ def main() -> None:
         )
     )
     filtering = FilteringTranslationEngine(observed)
-    batch_ids = (range(1, 16), range(16, 32), range(32, 42))
+    batch_ids = (
+        range(1, 16),
+        range(16, 32),
+        range(32, 42),
+        range(42, 49),
+        range(49, 60),
+    )
     batch_results = [
         filtering.translate(
             {segment_id: source[segment_id] for segment_id in ids},
@@ -144,11 +168,45 @@ def main() -> None:
         36,
         37,
         38,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
     ]
     assert sent_ids == expected_sent_ids
     assert list(translated) == list(source)
     assert len(translated) == len(source)
-    for segment_id in (1, 2, 3, 4, 5, 13, 16, 17, 18, 19, 20, 21, 39, 40, 41):
+    for segment_id in (
+        1,
+        2,
+        3,
+        4,
+        5,
+        13,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        39,
+        40,
+        41,
+        57,
+        58,
+        59,
+    ):
         assert translated[segment_id] == source[segment_id]
     protected_ids = (
         7,
@@ -175,6 +233,21 @@ def main() -> None:
         36,
         37,
         38,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
     )
     for segment_id in protected_ids:
         assert protected_tokens(translated[segment_id]) == protected_tokens(source[segment_id])
@@ -234,6 +307,28 @@ def main() -> None:
     }.items():
         assert version not in protected_source[segment_id]
         assert version in translated[segment_id]
+    for segment_id, token in {
+        42: "2026",
+        43: "2026-08-22",
+        44: "2026/08/22",
+        45: "010-1234-5678",
+        46: "2026-08-22",
+        47: "2026-08-22",
+    }.items():
+        assert token not in protected_source[segment_id]
+        assert token in translated[segment_id]
+    for segment_id, suffix in {
+        48: ". now",
+        49: ", now",
+        50: "!",
+        51: ". now",
+        52: ". now",
+        53: " now",
+        54: " now",
+        55: " now",
+        56: " now",
+    }.items():
+        assert suffix in protected_source[segment_id]
 
     report = {
         "schema_version": 1,
@@ -256,6 +351,10 @@ def main() -> None:
         "url_closing_parenthesis_sent_ids": [32, 33, 34, 35],
         "prefixed_version_sent_ids": [36, 37, 38],
         "prefixed_version_passthrough_ids": [39, 40, 41],
+        "punctuation_prefixed_numeric_sent_ids": [42, 43, 44, 45, 46, 47],
+        "sentence_version_sent_ids": [48, 49, 50, 51, 52],
+        "extended_version_sent_ids": [53, 54, 55, 56],
+        "sentence_version_passthrough_ids": [57, 58, 59],
         "protected_source_sent_to_model": protected_source,
         "placeholder_sequences": {
             str(segment_id): [token.placeholder for token in tokens]
