@@ -1,0 +1,57 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Virtual environments ----
+.venv/
+.venv-smoke/
+venv/
+env/
+
+# ---- Node / extension ----
+node_modules/
+extension/dist/
+*.tsbuildinfo
+
+# ---- Build / packaging output ----
+dist/
+build/
+packaging/build/
+
+# ---- Runtime data (NEVER commit) ----
+# App runtime lives in ~/Library/Application Support/LocalVideoTranscriber,
+# but guard against any local copies too.
+*.sqlite
+*.sqlite3
+*.db
+*.log
+logs/
+work/
+exports/
+models/
+config/token*
+*.token
+
+# ---- Secrets ----
+.env
+.env.local
+*.hf_token
+hf_token*
+
+# ---- Test / media artifacts ----
+test-assets/*.wav
+test-assets/*.mp3
+test-assets/*.mp4
+test-assets/*.m4a
+test-assets/generated/
+backend/tests/fixtures/media/
+
+# ---- OS ----
+.DS_Store
