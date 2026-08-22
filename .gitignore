@@ -53,5 +53,9 @@ test-assets/*.m4a
 test-assets/generated/
 backend/tests/fixtures/media/
 
+# ---- Phase 0 smoke artifacts (large binaries/models, not committed) ----
+vendor/
+test-assets/generated/
+
 # ---- OS ----
 .DS_Store
