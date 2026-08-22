@@ -101,7 +101,12 @@
   - ✅ Phase 1 URL follow-up：扫描器支持平衡圆括号、query、fragment、百分号编码和 Unicode URL，并剥离句末标点。
   - ✅ Phase 1 扩展真实 Ollama smoke：nonce `AAD66A1ECF24DF6D`；passthrough IDs `[1,2,3,4,5,13]`，模型 IDs `[6,7,8,9,10,11,12,14,15]`；报告为 `docs/PHASE-1-UNICODE-NONCE-OLLAMA-SMOKE.json`。
   - ✅ Phase 1 最新媒体回归：本地 HTTP 5 样本/40 文件再次通过，报告为 `docs/PHASE-1-UNICODE-NONCE-E2E.json`。
-  - ✅ Phase 1 质量门：`pytest` 95 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
+  - ✅ Phase 1 最终边界 follow-up：恰好一个 passthrough token 且外围仅有原始空白、中英文标点、成对圆/方括号或成对引号时整段逐字符 passthrough；含真实正文的混合句仍进入模型。
+  - ✅ Phase 1 数字范围 follow-up：`2026-2027`、`10-20`、`123-456` 及 en dash/em dash 形式作为单一 token；中文、韩文和西里尔文字相邻时仍保护，GPT-5/abc-2026/version-2/GPT5 不被错误拆分。
+  - ✅ Phase 1 内部前缀 follow-up：模型输出统一扫描 `LVT_` 保留前缀，只允许 manifest 精确列出的占位符；其他 nonce、位数错误、增加、重复、修改或错序均失败，原文字面量仅在单次恢复后允许重新出现。
+  - ✅ Phase 1 最终边界真实 Ollama smoke：nonce `2B15629AF58F1A95`；带标点原子 passthrough IDs `[16,17,18,19,20]`、纯范围 ID `[21]` 未发送模型，新增混合正文 IDs `[22,23,24]` 实际发送；Hy-MT2 成功且未 fallback，报告为 `docs/PHASE-1-FINAL-BOUNDARY-OLLAMA-SMOKE.json`。
+  - ✅ Phase 1 最终边界媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过；俄语样本显式使用 qwen fallback，其余样本使用 Hy-MT2，报告为 `docs/PHASE-1-FINAL-BOUNDARY-E2E.json`。
+  - ✅ Phase 1 质量门：`pytest` 124 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
   - **Phase 1 退出条件已满足**：三个真实媒体引擎已接入统一 Pipeline，并通过真实 HTTP fixture 生成与验证合规 8 文件。
   - ⏭️ 下一步：等待独立审查；本轮不开始 Phase 2/3/4。
 

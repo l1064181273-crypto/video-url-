@@ -32,7 +32,10 @@ class RecordingTranslationEngine:
                 "STOP": "停止",
                 "HELLO": "你好",
                 "Visit https://example.com for details": "访问 https://example.com 查看详情",
+                "Visit https://example.com.": "请访问 https://example.com。",
                 "NASA launched the mission in 2026": "NASA 在 2026 年发射了该任务",
+                "NASA launched in 2026.": "NASA 于 2026 年发射。",
+                "Speaker 1 said hello.": "Speaker 1 说你好。",
             }[value]
             for key, value in texts.items()
         }
@@ -87,6 +90,51 @@ def test_complete_passthrough_text_never_calls_model(text: str) -> None:
     assert delegate.calls == []
     assert result.texts == {1: text}
     assert result.engine_version == "passthrough:no-translation-required"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://example.com.",
+        "https://example.com,",
+        "(https://example.com)",
+        "NASA.",
+        "OpenAI!",
+        "GPT-5,",
+        "2026.",
+        "2026-2027",
+        "  2026-2027.  ",
+        "Speaker 1:",
+        '  [ "NASA" ]?!  ',
+        "（OpenAI！）",
+    ],
+)
+def test_atomic_passthrough_with_outer_punctuation_preserves_exact_text(
+    text: str,
+) -> None:
+    delegate = RecordingTranslationEngine()
+    result = FilteringTranslationEngine(delegate).translate({1: text}, "en")
+
+    assert delegate.calls == []
+    assert result.texts == {1: text}
+
+
+def test_mixed_text_around_protected_tokens_still_calls_model() -> None:
+    source = {
+        1: "Visit https://example.com.",
+        2: "NASA launched in 2026.",
+        3: "Speaker 1 said hello.",
+    }
+    delegate = RecordingTranslationEngine()
+
+    result = FilteringTranslationEngine(delegate).translate(source, "en")
+
+    assert delegate.calls == [source]
+    assert result.texts == {
+        1: "请访问 https://example.com。",
+        2: "NASA 于 2026 年发射。",
+        3: "Speaker 1 说你好。",
+    }
 
 
 def test_ordinary_title_case_and_uppercase_text_calls_model() -> None:
@@ -241,3 +289,51 @@ def test_literal_old_placeholder_and_url_restore_in_one_pass() -> None:
 )
 def test_complete_url_extraction(text: str, expected: list[str]) -> None:
     assert protected_tokens(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("2026-2027", "2026-2027"),
+        ("10-20", "10-20"),
+        ("123-456", "123-456"),
+        ("2026–2027", "2026–2027"),
+        ("2026—2027", "2026—2027"),
+        ("计划为2026-2027年", "2026-2027"),
+        ("기간은2026-2027년", "2026-2027"),
+    ],
+)
+def test_numeric_range_is_one_protected_token(text: str, expected: str) -> None:
+    assert protected_tokens(text) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("GPT-5", ["GPT-5"]),
+        ("abc-2026", []),
+        ("version-2", []),
+        ("GPT5", []),
+    ],
+)
+def test_numeric_range_does_not_split_ascii_identifiers(
+    text: str,
+    expected: list[str],
+) -> None:
+    assert protected_tokens(text) == expected
+
+
+def test_repeated_numeric_ranges_use_distinct_placeholders_and_restore_in_order() -> None:
+    source = {1: "From 2026-2027 to 2026-2027"}
+    protected, manifests = protect_texts(source, nonce_factory=lambda: "RANGE")
+
+    assert [token.original for token in manifests[1]] == [
+        "2026-2027",
+        "2026-2027",
+    ]
+    assert manifests[1][0].placeholder != manifests[1][1].placeholder
+    restored = restore_protected_text(
+        f"从 {manifests[1][0].placeholder} 到 {manifests[1][1].placeholder}",
+        manifests[1],
+    )
+    assert restored == "从 2026-2027 到 2026-2027"

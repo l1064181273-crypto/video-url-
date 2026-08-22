@@ -233,6 +233,8 @@ def test_protected_token_order_must_not_change() -> None:
         "LVT_TEST_TOKEN_0001 和 LVT_TEST_TOKEN_9999 完成任务。",
         "LVT_TEST_TOKEN_001 完成任务。",
         "LVT_TEST_TOKEN_0001 和 LVT_TEST_TOKEN_0001 完成任务。",
+        ("LVT_TEST_TOKEN_0001 和 LVT_TEST_TOKEN_0002 LVT_OTHER_TOKEN_001 完成任务。"),
+        ("LVT_TEST_TOKEN_0001 和 LVT_TEST_TOKEN_0002 LVT_OTHER_TOKEN_0001 完成任务。"),
     ],
 )
 def test_deleted_added_modified_or_duplicated_placeholder_is_rejected(
@@ -295,6 +297,47 @@ def test_unicode_adjacent_number_change_triggers_fallback() -> None:
     assert result.texts == {1: "发布于 2026 年。"}
     assert result.engine_version == "ollama:qwen2.5:1.5b"
     assert result.warnings
+
+
+def test_numeric_range_change_triggers_fallback() -> None:
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        if payload["model"] == "hy-mt2:1.8b-q4km-fixed":
+            return {"message": {"content": '{"1":"计划为2026-2028年。"}'}}
+        return {"message": {"content": '{"1":"计划为 LVT_RANGE_TOKEN_0001 年。"}'}}
+
+    engine = FallbackTranslationEngine(
+        primary=OllamaTranslationEngine(
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "RANGE",
+        ),
+        fallback=OllamaTranslationEngine(
+            model="qwen2.5:1.5b",
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "RANGE",
+        ),
+    )
+
+    result = engine.translate({1: "计划为2026-2027年"}, "en")
+
+    assert result.texts == {1: "计划为 2026-2027 年。"}
+    assert result.engine_version == "ollama:qwen2.5:1.5b"
+    assert result.warnings
+
+
+def test_plain_lvt_and_token_words_are_not_reserved_placeholders() -> None:
+    engine = OllamaTranslationEngine(
+        max_attempts=1,
+        request_fn=lambda _url, _payload, _timeout: {
+            "message": {"content": '{"1":"LVT 和 TOKEN 是普通单词。"}'}
+        },
+        nonce_factory=fixed_test_nonce,
+    )
+
+    result = engine.translate({1: "LVT and TOKEN are ordinary words."}, "en")
+
+    assert result.texts == {1: "LVT 和 TOKEN 是普通单词。"}
 
 
 def test_both_translation_models_fail() -> None:

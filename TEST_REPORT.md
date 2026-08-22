@@ -22,7 +22,7 @@
 ```bash
 cd backend
 ../.venv-smoke/bin/python -m pytest
-# 95 项通过，另有 1 条第三方 StarletteDeprecationWarning
+# 124 项通过，另有 1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m ruff check src tests ../scripts
 # 所有检查通过
@@ -73,6 +73,21 @@ ASCII 标识符边界、平衡括号 URL、URL 尾随标点、nonce 碰撞、跨
 中的 Fake/Recording Engine 确定性测试覆盖，不作为真实模型成功证据。真实模型与
 真实媒体结果分别记录在下面两个独立章节。
 
+### Phase 1 最终边界 follow-up
+
+- 若整段恰好包含一个 passthrough token，且其余字符只有空白、中英文句末标点、
+  成对圆/方括号或成对引号，则整段原样 passthrough，不调用模型。
+- `https://example.com.`、`(https://example.com)`、`NASA.`、`OpenAI!`、
+  `GPT-5,`、`2026.`、`Speaker 1:` 均保留每个原始字符。
+- Visit URL、NASA launched、Speaker 1 said hello 等包含正文的句子仍进入模型。
+- `2026-2027`、`10-20`、`123-456` 及 en dash/em dash 范围作为单一 token；
+  与中文、韩文和西里尔文字相邻时仍受保护。
+- `GPT-5` 仍按产品 token 处理；abc-2026、version-2、GPT5 不被错误拆分。
+- 模型输出阶段统一扫描所有 `LVT_` 保留前缀；只有 manifest 中精确列出的占位符
+  才允许出现。其他 nonce、位数错误、额外、重复、修改或错序均失败。
+- 原文中的 `LVT_TOKEN_0001` 等字面量先作为普通受保护 token 替换，恢复后允许存在；
+  普通单词 `LVT` 和 `TOKEN` 不受该规则影响。
+
 ### 真实 Ollama passthrough/token smoke
 
 ```bash
@@ -91,6 +106,17 @@ ASCII 标识符边界、平衡括号 URL、URL 尾随标点、nonce 碰撞、跨
 - 重复 NASA、重复 URL、Unicode 相邻数字、时间码和旧占位符字面量均恢复一致。
 - 本次使用 `hy-mt2:1.8b-q4km-fixed`，未触发 fallback。
 - 最新机器报告：`docs/PHASE-1-UNICODE-NONCE-OLLAMA-SMOKE.json`。
+
+最终边界 smoke：
+
+- nonce：`2B15629AF58F1A95`。
+- 带标点原子 passthrough IDs：`[16, 17, 18, 19, 20]`。
+- 纯数字范围 passthrough ID：`[21]`。
+- 新增混合正文模型 IDs：`[22, 23, 24]`。
+- 总 passthrough IDs：`[1,2,3,4,5,13,16,17,18,19,20,21]`。
+- 总模型 IDs：`[6,7,8,9,10,11,12,14,15,22,23,24]`。
+- Hy-MT2 成功，未触发 fallback。
+- 报告：`docs/PHASE-1-FINAL-BOUNDARY-OLLAMA-SMOKE.json`。
 
 ### 可重复生成的媒体测试资产
 
@@ -148,6 +174,9 @@ python -m http.server 8891 --bind 127.0.0.1 --directory test-assets/generated
 Unicode 数字、随机 nonce 与完整 URL 修复后又执行相同五样本回归，结果仍为
 5 个任务、40 个文件全部通过。最新报告：
 `docs/PHASE-1-UNICODE-NONCE-E2E.json`。
+
+最终边界修复后再次执行相同五样本回归，5 个任务、40 个文件全部通过。
+最新报告：`docs/PHASE-1-FINAL-BOUNDARY-E2E.json`。
 
 所有任务均使用真实的 `YtDlpFFmpegDownloader`、`MLXWhisperASREngine`、
 `SherpaOnnxDiarizationEngine` 和 Ollama 翻译引擎。以下命令没有使用 Fake Engine。

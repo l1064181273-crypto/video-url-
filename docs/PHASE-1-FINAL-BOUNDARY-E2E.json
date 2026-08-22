@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "samples": [
+    {
+      "label": "english",
+      "job_id": "english-0cda12d8c24c",
+      "url": "http://127.0.0.1:8891/English%20Single.mp4",
+      "title": "English Single",
+      "duration_ms": 14016,
+      "language": "en",
+      "segment_count": 5,
+      "speakers": [
+        "Speaker 1"
+      ],
+      "engine_versions": {
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+      },
+      "warnings": [],
+      "output_dir": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda",
+      "artifacts": [
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda/source.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda/source.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda/source.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda/source.json",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda/zh-CN.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda/zh-CN.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda/zh-CN.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/English Single--english-0cda/zh-CN.json"
+      ]
+    },
+    {
+      "label": "russian",
+      "job_id": "russian-34a6050ad1ac",
+      "url": "http://127.0.0.1:8891/%D0%A0%D1%83%D1%81%D1%81%D0%BA%D0%B8%D0%B9%20single.mp4",
+      "title": "Русский single",
+      "duration_ms": 11328,
+      "language": "ru",
+      "segment_count": 4,
+      "speakers": [
+        "Speaker 1"
+      ],
+      "engine_versions": {
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "translation": "ollama:qwen2.5:1.5b"
+      },
+      "warnings": [
+        "Translation fallback used: hy-mt2:1.8b-q4km-fixed failed; used qwen2.5:1.5b. Primary error: TRANSLATION_FAILED: hy-mt2:1.8b-q4km-fixed failed after 3 attempts: Unterminated string starting at: line 1 column 73 (char 72)"
+      ],
+      "output_dir": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6",
+      "artifacts": [
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6/source.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6/source.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6/source.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6/source.json",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6/zh-CN.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6/zh-CN.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6/zh-CN.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Русский single--russian-34a6/zh-CN.json"
+      ]
+    },
+    {
+      "label": "two_speakers",
+      "job_id": "two_speakers-57f1a8ff2432",
+      "url": "http://127.0.0.1:8891/%E4%B8%AD%E6%96%87%20%E5%8F%8C%E4%BA%BA%20video.mp4",
+      "title": "中文 双人 video",
+      "duration_ms": 16256,
+      "language": "en",
+      "segment_count": 7,
+      "speakers": [
+        "Speaker 1",
+        "Speaker 2"
+      ],
+      "engine_versions": {
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+      },
+      "warnings": [],
+      "output_dir": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers",
+      "artifacts": [
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers/source.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers/source.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers/source.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers/source.json",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers/zh-CN.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers/zh-CN.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers/zh-CN.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/中文 双人 video--two_speakers/zh-CN.json"
+      ]
+    },
+    {
+      "label": "same_title_a",
+      "job_id": "same_title_a-8a191866f5a8",
+      "url": "http://127.0.0.1:8891/same-a/Same%20Title.mp4",
+      "title": "Same Title",
+      "duration_ms": 14016,
+      "language": "en",
+      "segment_count": 5,
+      "speakers": [
+        "Speaker 1"
+      ],
+      "engine_versions": {
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+      },
+      "warnings": [],
+      "output_dir": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a",
+      "artifacts": [
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a/source.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a/source.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a/source.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a/source.json",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a/zh-CN.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a/zh-CN.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a/zh-CN.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_a/zh-CN.json"
+      ]
+    },
+    {
+      "label": "same_title_b",
+      "job_id": "same_title_b-57dfaec28a69",
+      "url": "http://127.0.0.1:8891/same-b/Same%20Title.mp4",
+      "title": "Same Title",
+      "duration_ms": 14016,
+      "language": "en",
+      "segment_count": 5,
+      "speakers": [
+        "Speaker 1"
+      ],
+      "engine_versions": {
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+      },
+      "warnings": [],
+      "output_dir": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b",
+      "artifacts": [
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b/source.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b/source.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b/source.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b/source.json",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b/zh-CN.txt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b/zh-CN.srt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b/zh-CN.vtt",
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.tmp-real-e2e-final-boundary/exports/Same Title--same_title_b/zh-CN.json"
+      ]
+    }
+  ]
+}

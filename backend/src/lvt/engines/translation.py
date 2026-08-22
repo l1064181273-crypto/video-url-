@@ -20,6 +20,10 @@ class TextDisposition(StrEnum):
 
 URL_START_PATTERN = re.compile(r"https?://", re.I)
 TIMECODE_PATTERN = re.compile(r"(?<!\d)(?:\d{1,2}:)?[0-5]\d:[0-5]\d(?:[.,]\d{1,3})?(?!\d)")
+NUMERIC_RANGE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[+-]?\d+(?:[.,]\d+)*[ \t]*[-–—][ \t]*"
+    r"[+-]?\d+(?:[.,]\d+)*(?![A-Za-z0-9_-])"
+)
 NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])[+-]?\d+(?:[.,]\d+)*(?![A-Za-z0-9_-])")
 SPEAKER_PATTERN = re.compile(r"(?:speaker|spk|说话人)\s*[_#:-]?\s*\d+", re.I)
 EXPLICIT_PROPER_TOKENS = frozenset({"NASA", "OpenAI"})
@@ -33,11 +37,24 @@ STRONG_PRODUCT_PATTERN = re.compile(
     r"(?![A-Za-z0-9_])"
 )
 FULL_NUMBER_PATTERN = re.compile(r"[+-]?\d+(?:[.,]\d+)*")
-LEGACY_PLACEHOLDER_PATTERN = re.compile(r"LVT_TOKEN_\d{4,}")
-INTERNAL_PLACEHOLDER_PATTERN = re.compile(r"LVT_[A-Z0-9]+_TOKEN_\d{4,}")
+RESERVED_PREFIX_PATTERN = re.compile(r"LVT_[A-Za-z0-9_]+")
 NONCE_PATTERN = re.compile(r"[A-Z0-9]{4,64}")
 URL_STOP_CHARACTERS = frozenset(" \t\r\n`<>{}[]\"'“”‘’")
 URL_TRAILING_PUNCTUATION = frozenset(".,;:!?，。！？；：")
+ATOMIC_PUNCTUATION = frozenset(".,:;?!，。；：？！")
+ATOMIC_BRACKET_PAIRS = {
+    "(": ")",
+    "[": "]",
+    "（": "）",
+    "［": "］",
+}
+ATOMIC_QUOTE_PAIRS = {
+    '"': '"',
+    "'": "'",
+    "`": "`",
+    "“": "”",
+    "‘": "’",
+}
 NonceFactory = Callable[[], str]
 
 
@@ -54,23 +71,64 @@ class PlaceholderToken:
     original: str
 
 
-def classify_text(text: str) -> TextDisposition:
-    stripped = text.strip()
-    url_occurrences = _url_occurrences(stripped)
+def _classify_token_value(value: str) -> TextDisposition:
+    url_occurrences = _url_occurrences(value)
     if (
         len(url_occurrences) == 1
         and url_occurrences[0].start == 0
-        and url_occurrences[0].end == len(stripped)
+        and url_occurrences[0].end == len(value)
     ):
         return TextDisposition.URL
-    if TIMECODE_PATTERN.fullmatch(stripped):
+    if TIMECODE_PATTERN.fullmatch(value):
         return TextDisposition.TIMECODE
-    if FULL_NUMBER_PATTERN.fullmatch(stripped):
+    if NUMERIC_RANGE_PATTERN.fullmatch(value) or FULL_NUMBER_PATTERN.fullmatch(value):
         return TextDisposition.NUMBER
-    if SPEAKER_PATTERN.fullmatch(stripped):
+    if SPEAKER_PATTERN.fullmatch(value):
         return TextDisposition.SPEAKER_LABEL
-    if stripped in EXPLICIT_PROPER_TOKENS or STRONG_PRODUCT_PATTERN.fullmatch(stripped):
+    if value in EXPLICIT_PROPER_TOKENS or STRONG_PRODUCT_PATTERN.fullmatch(value):
         return TextDisposition.PROPER_TOKEN
+    return TextDisposition.TRANSLATE
+
+
+def _has_only_valid_atomic_wrapping(
+    text: str,
+    occurrence: ProtectedOccurrence,
+) -> bool:
+    prefix = text[: occurrence.start]
+    suffix = text[occurrence.end :]
+    allowed = (
+        ATOMIC_PUNCTUATION
+        | frozenset(" \t\r\n")
+        | frozenset(ATOMIC_BRACKET_PAIRS)
+        | frozenset(ATOMIC_BRACKET_PAIRS.values())
+        | frozenset(ATOMIC_QUOTE_PAIRS)
+        | frozenset(ATOMIC_QUOTE_PAIRS.values())
+    )
+    if any(character not in allowed for character in prefix + suffix):
+        return False
+    for opening, closing in ATOMIC_BRACKET_PAIRS.items():
+        if closing in prefix or opening in suffix or prefix.count(opening) != suffix.count(closing):
+            return False
+    for opening, closing in ATOMIC_QUOTE_PAIRS.items():
+        if prefix.count(opening) != suffix.count(closing):
+            return False
+    return True
+
+
+def classify_text(text: str) -> TextDisposition:
+    stripped = text.strip()
+    direct = _classify_token_value(stripped)
+    if direct is not TextDisposition.TRANSLATE:
+        return direct
+    occurrences = protected_occurrences(stripped)
+    if len(occurrences) != 1:
+        return TextDisposition.TRANSLATE
+    occurrence = occurrences[0]
+    disposition = _classify_token_value(occurrence.value)
+    if disposition is TextDisposition.TRANSLATE:
+        return disposition
+    if _has_only_valid_atomic_wrapping(stripped, occurrence):
+        return disposition
     return TextDisposition.TRANSLATE
 
 
@@ -103,10 +161,10 @@ def protected_occurrences(text: str) -> list[ProtectedOccurrence]:
     ]
     for priority, pattern in enumerate(
         (
+            NUMERIC_RANGE_PATTERN,
             TIMECODE_PATTERN,
             SPEAKER_PATTERN,
-            INTERNAL_PLACEHOLDER_PATTERN,
-            LEGACY_PLACEHOLDER_PATTERN,
+            RESERVED_PREFIX_PATTERN,
             EXPLICIT_PROPER_PATTERN,
             STRONG_PRODUCT_PATTERN,
             NUMBER_PATTERN,
@@ -177,16 +235,13 @@ def protect_texts(
 
 def restore_protected_text(text: str, tokens: list[PlaceholderToken]) -> str:
     expected = [token.placeholder for token in tokens]
-    actual_matches = list(INTERNAL_PLACEHOLDER_PATTERN.finditer(text))
+    actual_matches = list(RESERVED_PREFIX_PATTERN.finditer(text))
     actual = [match.group(0) for match in actual_matches]
     if actual != expected:
         raise ValueError(f"placeholder sequence mismatch: expected={expected}, actual={actual}")
     namespace = ""
     if tokens:
         namespace = tokens[0].placeholder.rsplit("_", 1)[0] + "_"
-        without_valid_placeholders = INTERNAL_PLACEHOLDER_PATTERN.sub("", text)
-        if namespace in without_valid_placeholders:
-            raise ValueError("placeholder is malformed or modified")
     for match in actual_matches:
         before = text[match.start() - 1] if match.start() > 0 else ""
         after = text[match.end()] if match.end() < len(text) else ""
@@ -195,7 +250,7 @@ def restore_protected_text(text: str, tokens: list[PlaceholderToken]) -> str:
         ):
             raise ValueError(f"placeholder boundary changed: {match.group(0)}")
     replacements = {token.placeholder: token.original for token in tokens}
-    restored = INTERNAL_PLACEHOLDER_PATTERN.sub(
+    restored = RESERVED_PREFIX_PATTERN.sub(
         lambda match: replacements[match.group(0)],
         text,
     )

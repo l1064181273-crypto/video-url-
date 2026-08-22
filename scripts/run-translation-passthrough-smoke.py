@@ -55,6 +55,15 @@ def main() -> None:
         13: "https://en.wikipedia.org/wiki/Foo_(bar)",
         14: "Keep LVT_TOKEN_0001 unchanged",
         15: "Visit https://example.com/LVT_TOKEN_0002 for details",
+        16: "https://example.com.",
+        17: "(https://example.com)",
+        18: "NASA.",
+        19: "2026.",
+        20: "Speaker 1:",
+        21: "2026-2027",
+        22: "计划为2026-2027年",
+        23: "Visit https://example.com.",
+        24: "NASA launched in 2026.",
     }
     nonce = secrets.token_hex(8).upper()
 
@@ -78,20 +87,19 @@ def main() -> None:
     result = FilteringTranslationEngine(observed).translate(source, "en")
 
     sent_ids = list(observed.calls[0]) if observed.calls else []
-    expected_sent_ids = [6, 7, 8, 9, 10, 11, 12, 14, 15]
+    expected_sent_ids = [6, 7, 8, 9, 10, 11, 12, 14, 15, 22, 23, 24]
     assert sent_ids == expected_sent_ids
     assert list(result.texts) == list(source)
     assert len(result.texts) == len(source)
-    for segment_id in (1, 2, 3, 4, 5, 13):
+    for segment_id in (1, 2, 3, 4, 5, 13, 16, 17, 18, 19, 20, 21):
         assert result.texts[segment_id] == source[segment_id]
-    for segment_id in (7, 8, 10, 11, 12, 14, 15):
+    for segment_id in (7, 8, 10, 11, 12, 14, 15, 22, 23, 24):
         assert protected_tokens(result.texts[segment_id]) == protected_tokens(source[segment_id])
-    assert result.texts[7].count("NASA") == 2
-    assert result.texts[8].count("https://example.com") == 2
     assert result.texts[7].count("NASA") == 2
     assert result.texts[8].count("https://example.com") == 2
     assert "12026" not in result.texts[7]
     assert "2027" not in result.texts[11] + result.texts[12]
+    assert "2026-2027" in result.texts[22]
     assert "LVT_TOKEN_0001" in result.texts[14]
     assert "https://example.com/LVT_TOKEN_0002" in result.texts[15]
 
@@ -113,6 +121,9 @@ def main() -> None:
         "model_call_count": len(observed.calls),
         "sent_ids": sent_ids,
         "passthrough_ids": [segment_id for segment_id in source if segment_id not in sent_ids],
+        "atomic_punctuation_passthrough_ids": [16, 17, 18, 19, 20],
+        "numeric_range_passthrough_ids": [21],
+        "mixed_text_sent_ids": [22, 23, 24],
         "protected_source_sent_to_model": protected_source,
         "placeholder_sequences": {
             str(segment_id): [token.placeholder for token in tokens]
