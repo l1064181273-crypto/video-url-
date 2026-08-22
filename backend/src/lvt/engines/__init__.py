@@ -18,6 +18,12 @@ from lvt.engines.ollama import (
     resolve_language_name,
 )
 from lvt.engines.sherpa_diarization import SherpaOnnxDiarizationEngine
+from lvt.engines.translation import (
+    FilteringTranslationEngine,
+    TextDisposition,
+    classify_text,
+    protected_tokens,
+)
 
 __all__ = [
     "ASREngine",
@@ -26,6 +32,7 @@ __all__ = [
     "DiarizationEngine",
     "Downloader",
     "FallbackTranslationEngine",
+    "FilteringTranslationEngine",
     "MediaInfo",
     "MLXWhisperASREngine",
     "OllamaTranslationEngine",
@@ -34,7 +41,10 @@ __all__ = [
     "TranslationEngine",
     "TranslationEngineError",
     "TranslationResult",
+    "TextDisposition",
     "YtDlpFFmpegDownloader",
     "discover_ffmpeg_binaries",
+    "classify_text",
+    "protected_tokens",
     "resolve_language_name",
 ]

@@ -7,6 +7,7 @@ from lvt.engines.base import (
     SpeakerInterval,
     TranslationResult,
 )
+from lvt.engines.translation import FilteringTranslationEngine
 from lvt.pipeline.runner import Pipeline
 
 
@@ -80,3 +81,60 @@ def test_fake_engine_pipeline_generates_eight_aligned_artifacts(tmp_path: Path) 
         "本地处理。",
     ]
     assert (tmp_path / "work" / "job-1" / "transcript.normalized.json").is_file()
+
+
+def test_pipeline_mixed_passthrough_batch_preserves_complete_segment_order(
+    tmp_path: Path,
+) -> None:
+    class MixedASR:
+        version = "mixed-asr-1"
+
+        def transcribe(self, audio_path: Path) -> ASRResult:
+            return ASRResult(
+                language="en",
+                segments=[
+                    ASRSegment(0, 1000, "https://example.com"),
+                    ASRSegment(1100, 2200, "Hello world."),
+                    ASRSegment(2300, 3300, "2026"),
+                    ASRSegment(3400, 5900, "NASA launched the mission in 2026"),
+                ],
+            )
+
+    class SelectiveTranslator:
+        version = "selective-translator-1"
+
+        def translate(self, texts: dict[int, str], source_language: str) -> TranslationResult:
+            assert list(texts) == [2, 4]
+            return TranslationResult(
+                texts={
+                    2: "你好，世界。",
+                    4: "NASA 在 2026 年发射了该任务。",
+                },
+                engine_version=self.version,
+                warnings=[],
+            )
+
+    pipeline = Pipeline(
+        downloader=FakeDownloader(),
+        asr=MixedASR(),
+        diarizer=FakeDiarizer(),
+        translator=FilteringTranslationEngine(SelectiveTranslator()),
+        work_root=tmp_path / "work",
+        export_root=tmp_path / "exports",
+    )
+    result = pipeline.run(job_id="mixed-job", url="https://example.test/video")
+
+    assert len(result.artifacts) == 8
+    assert [item.id for item in result.transcript.segments] == [1, 2, 3, 4]
+    assert [item.source_text for item in result.transcript.segments] == [
+        "https://example.com",
+        "Hello world.",
+        "2026",
+        "NASA launched the mission in 2026",
+    ]
+    assert [item.translated_text for item in result.transcript.segments] == [
+        "https://example.com",
+        "你好，世界。",
+        "2026",
+        "NASA 在 2026 年发射了该任务。",
+    ]

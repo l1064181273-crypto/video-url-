@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from lvt.engines.base import TranslationResult
+from lvt.engines.translation import protected_tokens
 
 RequestFn = Callable[[str, dict[str, Any], float], dict[str, Any]]
 LANGUAGE_NAMES = {
@@ -80,7 +81,7 @@ def resolve_language_name(code: str) -> str:
         ) from exc
 
 
-def validate_translation_text(value: object) -> str:
+def validate_translation_text(source_text: str, value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("translation contains an empty or non-string value")
     cleaned = value.strip()
@@ -90,6 +91,9 @@ def validate_translation_text(value: object) -> str:
         raise ValueError("translation contains notes, labels, or timestamps")
     if not re.search(r"[\u3400-\u9fff]", cleaned):
         raise ValueError("Simplified Chinese translation contains no CJK text")
+    missing_tokens = [token for token in protected_tokens(source_text) if token not in cleaned]
+    if missing_tokens:
+        raise ValueError(f"translation changed protected tokens: {missing_tokens}")
     return cleaned
 
 
@@ -155,7 +159,10 @@ class OllamaTranslationEngine:
                 result = {int(key): value for key, value in parsed.items()}
                 if set(result) != set(texts):
                     raise ValueError("translation id set mismatch")
-                validated = {key: validate_translation_text(value) for key, value in result.items()}
+                validated = {
+                    key: validate_translation_text(texts[key], value)
+                    for key, value in result.items()
+                }
                 return TranslationResult(
                     texts=validated,
                     engine_version=self.version,

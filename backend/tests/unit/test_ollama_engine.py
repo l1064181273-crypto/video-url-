@@ -114,6 +114,35 @@ def test_semantically_invalid_translation_retries_then_falls_back() -> None:
     assert result.warnings
 
 
+def test_ordinary_english_without_cjk_is_rejected() -> None:
+    def request(_url: str, _payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        return {"message": {"content": '{"1":"Still English."}'}}
+
+    engine = OllamaTranslationEngine(max_attempts=1, request_fn=request)
+    with pytest.raises(TranslationEngineError, match="contains no CJK"):
+        engine.translate({1: "Ordinary English sentence."}, "en")
+
+
+def test_mixed_translation_must_preserve_protected_tokens() -> None:
+    responses = iter(
+        [
+            {"message": {"content": '{"1":"请访问网站查看详情。"}'}},
+            {"message": {"content": '{"1":"请访问 https://example.com 查看 2026 年详情。"}'}},
+        ]
+    )
+
+    engine = OllamaTranslationEngine(
+        max_attempts=2,
+        request_fn=lambda _url, _payload, _timeout: next(responses),
+    )
+    result = engine.translate(
+        {1: "Visit https://example.com for 2026 details."},
+        "en",
+    )
+
+    assert result.texts == {1: "请访问 https://example.com 查看 2026 年详情。"}
+
+
 def test_both_translation_models_fail() -> None:
     def request(_url: str, _payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
         return {"message": {"content": "{}"}}

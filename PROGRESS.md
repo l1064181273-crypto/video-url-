@@ -89,7 +89,10 @@
   - ✅ Phase 1 本地 HTTP 真实纵切：英语单人 14.016s、俄语单人 11.328s、双人 16.256s、中文空格文件名、两个同标题任务均生成 8 文件；共 5 样本/40 文件独立回读验证通过。
   - ✅ Phase 1 公开 URL：Wikimedia Commons 英语演讲 47.488s，6 Segment、1 Speaker、8 文件真实纵切与回读通过。
   - ✅ Phase 1 fallback 实测：俄语任务的 Hy-MT2 连续 3 次返回包装文本，被语义校验拒绝；qwen2.5:1.5b 成功接管，warnings 与 engine_versions 明确记录；其余本地任务和公开样本未降级。
-  - ✅ Phase 1 质量门：`pytest` 37 passed；Ruff lint/format（含 scripts）通过；mypy 26 个源码文件通过；真实产物验证 48 个文件通过。
+  - ✅ Phase 1 follow-up：增加非翻译文本分类与过滤层；纯 URL、时间码、数字、Speaker、NASA/GPT-5 直接 passthrough，混合批次只发送需翻译 ID，合并后保持完整 ID/顺序/Segment 字段。
+  - ✅ Phase 1 follow-up：普通正文仍强制中文；混合句强制保留 URL、数字和专有 token；主备模型双失败仍明确报错，不用原文伪装成功。
+  - ✅ Phase 1 follow-up 真实回归：本地 HTTP 5 样本/40 文件再次生成并回读通过，机器报告为 `docs/PHASE-1-PASSTHROUGH-FOLLOWUP.json`。
+  - ✅ Phase 1 质量门：`pytest` 64 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
   - **Phase 1 退出条件已满足**：三个真实媒体引擎已接入统一 Pipeline，并通过真实 HTTP fixture 生成与验证合规 8 文件。
   - ⏭️ 下一步：等待独立审查；本轮不开始 Phase 2/3/4。
 

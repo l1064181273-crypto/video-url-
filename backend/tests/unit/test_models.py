@@ -64,3 +64,26 @@ def test_transcript_rejects_non_continuous_ids() -> None:
             detected_language="ru",
             segments=segments,
         )
+
+
+def test_mixed_passthrough_merge_preserves_all_segment_fields() -> None:
+    original = make_segments()
+    original[0] = original[0].model_copy(update={"source_text": "https://example.com"})
+    translated = apply_translations(
+        original,
+        {1: "https://example.com", 2: "您好。"},
+    )
+
+    assert len(translated) == len(original) == 2
+    assert [item.id for item in translated] == [1, 2]
+    assert [item.source_text for item in translated] == [
+        "https://example.com",
+        "Здравствуйте.",
+    ]
+    assert [item.translated_text for item in translated] == [
+        "https://example.com",
+        "您好。",
+    ]
+    assert [
+        (item.start_ms, item.end_ms, item.speaker, item.source_language) for item in translated
+    ] == [(item.start_ms, item.end_ms, item.speaker, item.source_language) for item in original]
