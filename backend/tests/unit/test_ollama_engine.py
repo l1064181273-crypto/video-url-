@@ -12,6 +12,10 @@ from lvt.engines.ollama import (
 )
 
 
+def fixed_test_nonce() -> str:
+    return "TEST"
+
+
 def test_ollama_translation_retries_invalid_json_then_succeeds() -> None:
     responses = iter(
         [
@@ -131,7 +135,9 @@ def test_mixed_translation_must_preserve_protected_tokens() -> None:
             {"message": {"content": '{"1":"请访问网站查看详情。"}'}},
             {
                 "message": {
-                    "content": ('{"1":"请访问 LVT_TOKEN_0001 查看 LVT_TOKEN_0002 年详情。"}')
+                    "content": (
+                        '{"1":"请访问 LVT_TEST_TOKEN_0001 查看 LVT_TEST_TOKEN_0002 年详情。"}'
+                    )
                 }
             },
         ]
@@ -144,6 +150,7 @@ def test_mixed_translation_must_preserve_protected_tokens() -> None:
     engine = OllamaTranslationEngine(
         max_attempts=2,
         request_fn=request,
+        nonce_factory=fixed_test_nonce,
     )
     result = engine.translate(
         {1: "Visit https://example.com for 2026 details."},
@@ -152,8 +159,8 @@ def test_mixed_translation_must_preserve_protected_tokens() -> None:
 
     assert result.texts == {1: "请访问 https://example.com 查看 2026 年详情。"}
     prompt = calls[0]["messages"][0]["content"]
-    assert "LVT_TOKEN_0001" in prompt
-    assert "LVT_TOKEN_0002" in prompt
+    assert "LVT_TEST_TOKEN_0001" in prompt
+    assert "LVT_TEST_TOKEN_0002" in prompt
     assert "Protected Placeholders" in prompt
 
 
@@ -161,8 +168,11 @@ def test_repeated_nasa_must_be_returned_once_per_occurrence() -> None:
     engine = OllamaTranslationEngine(
         max_attempts=1,
         request_fn=lambda _url, _payload, _timeout: {
-            "message": {"content": ('{"1":"LVT_TOKEN_0001 在 LVT_TOKEN_0003 年发射了任务。"}')}
+            "message": {
+                "content": ('{"1":"LVT_TEST_TOKEN_0001 在 LVT_TEST_TOKEN_0003 年发射了任务。"}')
+            }
         },
+        nonce_factory=fixed_test_nonce,
     )
 
     with pytest.raises(TranslationEngineError, match="placeholder sequence mismatch"):
@@ -173,8 +183,9 @@ def test_repeated_url_must_be_returned_once_per_occurrence() -> None:
     engine = OllamaTranslationEngine(
         max_attempts=1,
         request_fn=lambda _url, _payload, _timeout: {
-            "message": {"content": '{"1":"访问 LVT_TOKEN_0001。"}'}
+            "message": {"content": '{"1":"访问 LVT_TEST_TOKEN_0001。"}'}
         },
+        nonce_factory=fixed_test_nonce,
     )
 
     with pytest.raises(TranslationEngineError, match="placeholder sequence mismatch"):
@@ -188,8 +199,9 @@ def test_number_placeholder_requires_strict_boundaries() -> None:
     engine = OllamaTranslationEngine(
         max_attempts=1,
         request_fn=lambda _url, _payload, _timeout: {
-            "message": {"content": '{"1":"任务于 1LVT_TOKEN_0001 年启动。"}'}
+            "message": {"content": '{"1":"任务于 1LVT_TEST_TOKEN_0001 年启动。"}'}
         },
+        nonce_factory=fixed_test_nonce,
     )
 
     with pytest.raises(TranslationEngineError, match="placeholder boundary"):
@@ -201,9 +213,13 @@ def test_protected_token_order_must_not_change() -> None:
         max_attempts=1,
         request_fn=lambda _url, _payload, _timeout: {
             "message": {
-                "content": ('{"1":"LVT_TOKEN_0002 由 LVT_TOKEN_0001 于 LVT_TOKEN_0003 年发布。"}')
+                "content": (
+                    '{"1":"LVT_TEST_TOKEN_0002 由 LVT_TEST_TOKEN_0001 于 '
+                    'LVT_TEST_TOKEN_0003 年发布。"}'
+                )
             }
         },
+        nonce_factory=fixed_test_nonce,
     )
 
     with pytest.raises(TranslationEngineError, match="placeholder sequence mismatch"):
@@ -214,9 +230,9 @@ def test_protected_token_order_must_not_change() -> None:
     "bad_translation",
     [
         "任务已完成。",
-        "LVT_TOKEN_0001 和 LVT_TOKEN_9999 完成任务。",
-        "LVT_TOKEN_001 完成任务。",
-        "LVT_TOKEN_0001 和 LVT_TOKEN_0001 完成任务。",
+        "LVT_TEST_TOKEN_0001 和 LVT_TEST_TOKEN_9999 完成任务。",
+        "LVT_TEST_TOKEN_001 完成任务。",
+        "LVT_TEST_TOKEN_0001 和 LVT_TEST_TOKEN_0001 完成任务。",
     ],
 )
 def test_deleted_added_modified_or_duplicated_placeholder_is_rejected(
@@ -226,6 +242,7 @@ def test_deleted_added_modified_or_duplicated_placeholder_is_rejected(
     engine = OllamaTranslationEngine(
         max_attempts=1,
         request_fn=lambda _url, _payload, _timeout: {"message": {"content": response}},
+        nonce_factory=fixed_test_nonce,
     )
 
     with pytest.raises(TranslationEngineError, match="placeholder"):
@@ -237,9 +254,13 @@ def test_repeated_tokens_restore_exact_count_boundaries_and_order() -> None:
         max_attempts=1,
         request_fn=lambda _url, _payload, _timeout: {
             "message": {
-                "content": ('{"1":"LVT_TOKEN_0001 和 LVT_TOKEN_0002 于 LVT_TOKEN_0003 年发射。"}')
+                "content": (
+                    '{"1":"LVT_TEST_TOKEN_0001 和 LVT_TEST_TOKEN_0002 于 '
+                    'LVT_TEST_TOKEN_0003 年发射。"}'
+                )
             }
         },
+        nonce_factory=fixed_test_nonce,
     )
 
     result = engine.translate({1: "NASA and NASA launched in 2026"}, "en")
@@ -247,6 +268,33 @@ def test_repeated_tokens_restore_exact_count_boundaries_and_order() -> None:
     assert result.texts == {1: "NASA 和 NASA 于 2026 年发射。"}
     assert result.texts[1].count("NASA") == 2
     assert "12026" not in result.texts[1]
+
+
+def test_unicode_adjacent_number_change_triggers_fallback() -> None:
+    def request(_url: str, payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        if payload["model"] == "hy-mt2:1.8b-q4km-fixed":
+            return {"message": {"content": '{"1":"发布于2027年。"}'}}
+        return {"message": {"content": '{"1":"发布于 LVT_UNICODE_TOKEN_0001 年。"}'}}
+
+    engine = FallbackTranslationEngine(
+        primary=OllamaTranslationEngine(
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "UNICODE",
+        ),
+        fallback=OllamaTranslationEngine(
+            model="qwen2.5:1.5b",
+            max_attempts=2,
+            request_fn=request,
+            nonce_factory=lambda: "UNICODE",
+        ),
+    )
+
+    result = engine.translate({1: "Published in В2026году"}, "en")
+
+    assert result.texts == {1: "发布于 2026 年。"}
+    assert result.engine_version == "ollama:qwen2.5:1.5b"
+    assert result.warnings
 
 
 def test_both_translation_models_fail() -> None:

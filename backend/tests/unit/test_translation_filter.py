@@ -9,6 +9,9 @@ from lvt.engines.translation import (
     FilteringTranslationEngine,
     TextDisposition,
     classify_text,
+    protect_texts,
+    protected_tokens,
+    restore_protected_text,
 )
 
 
@@ -152,3 +155,89 @@ def test_mixed_sentence_keeps_url_number_and_proper_token() -> None:
     assert "https://example.com" in result.texts[1]
     assert "NASA" in result.texts[2]
     assert "2026" in result.texts[2]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "发布于2026年",
+        "2026年发布",
+        "2026年",
+        "В2026году",
+        "2026г.",
+        "2026년",
+    ],
+)
+def test_unicode_adjacent_number_is_protected(text: str) -> None:
+    assert "2026" in protected_tokens(text)
+
+
+@pytest.mark.parametrize("text", ["abc2026", "GPT5", "version2"])
+def test_ascii_identifier_number_is_not_split(text: str) -> None:
+    assert protected_tokens(text) == []
+
+
+def test_nonce_collision_retries_across_all_segments() -> None:
+    candidates = iter(["COLLIDE", "SAFE"])
+    source = {
+        1: "Literal LVT_COLLIDE_TOKEN_0001 and NASA",
+        2: "The year is 2026",
+    }
+
+    protected, manifests = protect_texts(
+        source,
+        nonce_factory=lambda: next(candidates),
+    )
+
+    assert "LVT_SAFE_TOKEN_0001" in protected[1]
+    assert "LVT_SAFE_TOKEN_0002" in protected[1]
+    assert "LVT_SAFE_TOKEN_0003" in protected[2]
+    assert all(
+        token.placeholder.startswith("LVT_SAFE_TOKEN_")
+        for tokens in manifests.values()
+        for token in tokens
+    )
+
+
+def test_literal_old_placeholder_and_url_restore_in_one_pass() -> None:
+    source = {
+        1: "Keep LVT_TOKEN_0001 unchanged",
+        2: "https://example.com/LVT_TOKEN_0002 and NASA",
+    }
+    protected, manifests = protect_texts(source, nonce_factory=lambda: "BATCH")
+
+    restored_first = restore_protected_text(
+        f"保留 {manifests[1][0].placeholder} 不变",
+        manifests[1],
+    )
+    restored_second = restore_protected_text(
+        f"{manifests[2][0].placeholder} 和 {manifests[2][1].placeholder}",
+        manifests[2],
+    )
+
+    assert restored_first == "保留 LVT_TOKEN_0001 不变"
+    assert restored_second == "https://example.com/LVT_TOKEN_0002 和 NASA"
+    assert "LVT_BATCH_TOKEN_" not in restored_first + restored_second
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "https://en.wikipedia.org/wiki/Foo_(bar)",
+            ["https://en.wikipedia.org/wiki/Foo_(bar)"],
+        ),
+        (
+            "https://example.com/a_(b)?x=2026#part",
+            ["https://example.com/a_(b)?x=2026#part"],
+        ),
+        ("Visit https://example.com.", ["https://example.com"]),
+        ("Visit https://example.com, then continue.", ["https://example.com"]),
+        (
+            "访问 https://例子.测试/路径_(一)?年份=2026#部分。",
+            ["https://例子.测试/路径_(一)?年份=2026#部分"],
+        ),
+    ],
+)
+def test_complete_url_extraction(text: str, expected: list[str]) -> None:
+    assert protected_tokens(text) == expected

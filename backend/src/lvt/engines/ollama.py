@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from lvt.engines.base import TranslationResult
-from lvt.engines.translation import protect_texts, restore_protected_text
+from lvt.engines.translation import NonceFactory, protect_texts, restore_protected_text
 
 RequestFn = Callable[[str, dict[str, Any], float], dict[str, Any]]
 LANGUAGE_NAMES = {
@@ -105,19 +105,27 @@ class OllamaTranslationEngine:
         timeout: float = 180,
         max_attempts: int = 3,
         request_fn: RequestFn = _default_request,
+        nonce_factory: NonceFactory | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_attempts = max_attempts
         self.request_fn = request_fn
+        self.nonce_factory = nonce_factory
         self.version = f"ollama:{model}"
 
     def translate(self, texts: dict[int, str], source_language: str) -> TranslationResult:
         if not texts:
             return TranslationResult({}, self.version, [])
         source_language_name = resolve_language_name(source_language)
-        protected_texts, placeholder_manifest = protect_texts(texts)
+        if self.nonce_factory is None:
+            protected_texts, placeholder_manifest = protect_texts(texts)
+        else:
+            protected_texts, placeholder_manifest = protect_texts(
+                texts,
+                nonce_factory=self.nonce_factory,
+            )
         source_data = {str(key): value for key, value in protected_texts.items()}
         manifest_data = {
             str(key): [token.placeholder for token in tokens]

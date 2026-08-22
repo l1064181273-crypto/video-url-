@@ -22,7 +22,7 @@
 ```bash
 cd backend
 ../.venv-smoke/bin/python -m pytest
-# 78 项通过，另有 1 条第三方 StarletteDeprecationWarning
+# 95 项通过，另有 1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m ruff check src tests ../scripts
 # 所有检查通过
@@ -48,16 +48,24 @@ cd backend
   判断的 Elon Musk、New York 均进入模型，不使用宽泛 Title Case/全大写规则。
 - 混合批次只把需要翻译的 ID 发送给模型，再按原 ID 顺序合并完整结果。
 - 普通英文、俄文等正文仍要求模型输出包含简体中文。
-- 每次受保护 token 出现均替换为全局唯一 `LVT_TOKEN_XXXX` 占位符。
+- 每次受保护 token 出现均替换为全批唯一占位符。
+- 每个 batch 使用随机、无碰撞 nonce，实际格式为 `LVT_<nonce>_TOKEN_XXXX`；
+  生成后扫描全部 source_text，发生命名空间碰撞则重新生成。
+- 数字边界只考虑 ASCII 标识符字符，因此中文、日文、韩文、西里尔字母相邻数字
+  仍被保护，而 abc2026、GPT5、version2 不会被错误拆分。
+- URL 使用扫描器提取，保留平衡圆括号、query、fragment、百分号编码和 Unicode，
+  同时剥离句末句号、逗号等标点。
 - 模型结果必须按 Segment 返回完全相同的占位符 ID、数量和顺序，且占位符不能与
   ASCII 字母、数字或下划线粘连；通过后才逐次恢复原 token。
+- 恢复使用一次正则替换回调，不会再次扫描刚恢复的 URL 或原文字面量。
 - Ollama 输出限制为 `num_predict=1024`，避免异常生成无限延长单次尝试。
 - 主模型和 fallback 都失败时继续返回明确错误，绝不使用原文伪装翻译成功。
 - `source_text` 永久不变，只有 `translated_text` 接收 passthrough 或译文。
 
-新增测试覆盖普通 Title Case/全大写反例、白名单规则、重复 NASA/URL、数字边界、
-token 删除/增加/修改/重复/错序、混合 batch、完整 ID 合并、Segment 字段不变量、
-模型输出上限以及主备模型双失败。
+新增测试覆盖普通 Title Case/全大写反例、白名单规则、Unicode 相邻数字、
+ASCII 标识符边界、平衡括号 URL、URL 尾随标点、nonce 碰撞、跨 Segment 唯一性、
+单次恢复、重复 NASA/URL、token 删除/增加/修改/重复/错序、混合 batch、完整 ID
+合并、Segment 字段不变量、模型输出上限以及主备模型双失败。
 
 ### Fake/Recording Engine 确定性测试
 
@@ -73,12 +81,16 @@ token 删除/增加/修改/重复/错序、混合 batch、完整 ID 合并、Seg
 # exit 0
 ```
 
-- 未发送模型的 ID：`[1, 2, 3, 4, 5]`，分别为 URL、数字、NASA、GPT-5、OpenAI。
-- 实际发送模型的 ID：`[6, 7, 8, 9, 10]`，包括 Good Morning、STOP、重复 NASA、
-  重复 URL 和时间码混合句。
-- 重复 NASA、重复 URL、2026、00:03:21 的数量、边界和顺序恢复一致。
+- 本次 nonce：`AAD66A1ECF24DF6D`。
+- 未发送模型的 ID：`[1, 2, 3, 4, 5, 13]`，包括 URL、数字、NASA、GPT-5、
+  OpenAI 和 Wikipedia 括号 URL。
+- 实际发送模型的 ID：`[6, 7, 8, 9, 10, 11, 12, 14, 15]`。
+- 实际模型批次包含 Good Morning、STOP、重复 NASA、重复 URL、时间码、
+  `发布于2026年`、`В2026году`、原文字面量 `LVT_TOKEN_0001`，以及包含
+  `LVT_TOKEN_0002` 的 URL。
+- 重复 NASA、重复 URL、Unicode 相邻数字、时间码和旧占位符字面量均恢复一致。
 - 本次使用 `hy-mt2:1.8b-q4km-fixed`，未触发 fallback。
-- 机器报告：`docs/PHASE-1-STRICT-TOKEN-OLLAMA-SMOKE.json`。
+- 最新机器报告：`docs/PHASE-1-UNICODE-NONCE-OLLAMA-SMOKE.json`。
 
 ### 可重复生成的媒体测试资产
 
@@ -132,6 +144,10 @@ python -m http.server 8891 --bind 127.0.0.1 --directory test-assets/generated
 ```
 
 最新机器报告：`docs/PHASE-1-STRICT-TOKEN-E2E.json`。
+
+Unicode 数字、随机 nonce 与完整 URL 修复后又执行相同五样本回归，结果仍为
+5 个任务、40 个文件全部通过。最新报告：
+`docs/PHASE-1-UNICODE-NONCE-E2E.json`。
 
 所有任务均使用真实的 `YtDlpFFmpegDownloader`、`MLXWhisperASREngine`、
 `SherpaOnnxDiarizationEngine` 和 Ollama 翻译引擎。以下命令没有使用 Fake Engine。

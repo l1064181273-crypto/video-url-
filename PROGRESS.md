@@ -96,7 +96,12 @@
   - ✅ Phase 1 strict-token follow-up：每次 token 出现使用唯一 `LVT_TOKEN_XXXX`；严格验证 Segment 内占位符 ID、数量、顺序和 ASCII 边界后逐次恢复；Ollama 增加 `num_predict=1024` 有界输出。
   - ✅ Phase 1 真实 Ollama smoke：passthrough IDs `[1,2,3,4,5]` 未发送模型，translate IDs `[6,7,8,9,10]` 实际发送；重复 NASA/URL、数字、时间码恢复一致，报告为 `docs/PHASE-1-STRICT-TOKEN-OLLAMA-SMOKE.json`。
   - ✅ Phase 1 strict-token 媒体回归：本地 HTTP 5 样本/40 文件再次生成并回读通过，报告为 `docs/PHASE-1-STRICT-TOKEN-E2E.json`。
-  - ✅ Phase 1 质量门：`pytest` 78 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
+  - ✅ Phase 1 Unicode/nonce follow-up：数字边界改为 ASCII 标识符边界；中文、日韩文、西里尔字母相邻数字可保护，abc2026/GPT5/version2 不拆分。
+  - ✅ Phase 1 Unicode/nonce follow-up：每个 batch 生成无碰撞随机 nonce；使用单次正则回调恢复，支持原文 `LVT_TOKEN_0001`、跨 Segment 碰撞规避和 URL 内旧占位符文本。
+  - ✅ Phase 1 URL follow-up：扫描器支持平衡圆括号、query、fragment、百分号编码和 Unicode URL，并剥离句末标点。
+  - ✅ Phase 1 扩展真实 Ollama smoke：nonce `AAD66A1ECF24DF6D`；passthrough IDs `[1,2,3,4,5,13]`，模型 IDs `[6,7,8,9,10,11,12,14,15]`；报告为 `docs/PHASE-1-UNICODE-NONCE-OLLAMA-SMOKE.json`。
+  - ✅ Phase 1 最新媒体回归：本地 HTTP 5 样本/40 文件再次通过，报告为 `docs/PHASE-1-UNICODE-NONCE-E2E.json`。
+  - ✅ Phase 1 质量门：`pytest` 95 passed；Ruff lint/format（含 scripts）通过；mypy 27 个源码文件通过；真实产物验证通过。
   - **Phase 1 退出条件已满足**：三个真实媒体引擎已接入统一 Pipeline，并通过真实 HTTP fixture 生成与验证合规 8 文件。
   - ⏭️ 下一步：等待独立审查；本轮不开始 Phase 2/3/4。
 

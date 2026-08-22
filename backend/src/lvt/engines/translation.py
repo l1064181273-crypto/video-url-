@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -16,9 +18,9 @@ class TextDisposition(StrEnum):
     TRANSLATE = "translate"
 
 
-URL_PATTERN = re.compile(r"https?://[^\s`<>{}\[\]()\"，。！？]+", re.I)
+URL_START_PATTERN = re.compile(r"https?://", re.I)
 TIMECODE_PATTERN = re.compile(r"(?<!\d)(?:\d{1,2}:)?[0-5]\d:[0-5]\d(?:[.,]\d{1,3})?(?!\d)")
-NUMBER_PATTERN = re.compile(r"(?<![\w-])[+-]?\d+(?:[.,]\d+)*(?![\w-])")
+NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])[+-]?\d+(?:[.,]\d+)*(?![A-Za-z0-9_-])")
 SPEAKER_PATTERN = re.compile(r"(?:speaker|spk|说话人)\s*[_#:-]?\s*\d+", re.I)
 EXPLICIT_PROPER_TOKENS = frozenset({"NASA", "OpenAI"})
 EXPLICIT_PROPER_PATTERN = re.compile(
@@ -31,7 +33,12 @@ STRONG_PRODUCT_PATTERN = re.compile(
     r"(?![A-Za-z0-9_])"
 )
 FULL_NUMBER_PATTERN = re.compile(r"[+-]?\d+(?:[.,]\d+)*")
-PLACEHOLDER_PATTERN = re.compile(r"LVT_TOKEN_\d{4,}")
+LEGACY_PLACEHOLDER_PATTERN = re.compile(r"LVT_TOKEN_\d{4,}")
+INTERNAL_PLACEHOLDER_PATTERN = re.compile(r"LVT_[A-Z0-9]+_TOKEN_\d{4,}")
+NONCE_PATTERN = re.compile(r"[A-Z0-9]{4,64}")
+URL_STOP_CHARACTERS = frozenset(" \t\r\n`<>{}[]\"'“”‘’")
+URL_TRAILING_PUNCTUATION = frozenset(".,;:!?，。！？；：")
+NonceFactory = Callable[[], str]
 
 
 @dataclass(frozen=True)
@@ -49,7 +56,12 @@ class PlaceholderToken:
 
 def classify_text(text: str) -> TextDisposition:
     stripped = text.strip()
-    if URL_PATTERN.fullmatch(stripped):
+    url_occurrences = _url_occurrences(stripped)
+    if (
+        len(url_occurrences) == 1
+        and url_occurrences[0].start == 0
+        and url_occurrences[0].end == len(stripped)
+    ):
         return TextDisposition.URL
     if TIMECODE_PATTERN.fullmatch(stripped):
         return TextDisposition.TIMECODE
@@ -62,17 +74,44 @@ def classify_text(text: str) -> TextDisposition:
     return TextDisposition.TRANSLATE
 
 
+def _url_occurrences(text: str) -> list[ProtectedOccurrence]:
+    occurrences: list[ProtectedOccurrence] = []
+    for match in URL_START_PATTERN.finditer(text):
+        end = match.end()
+        while end < len(text) and text[end] not in URL_STOP_CHARACTERS:
+            end += 1
+        candidate = text[match.start() : end]
+        while candidate:
+            if candidate[-1] in URL_TRAILING_PUNCTUATION:
+                candidate = candidate[:-1]
+                end -= 1
+                continue
+            if candidate[-1] == ")" and candidate.count(")") > candidate.count("("):
+                candidate = candidate[:-1]
+                end -= 1
+                continue
+            break
+        if candidate:
+            occurrences.append(ProtectedOccurrence(match.start(), end, candidate))
+    return occurrences
+
+
 def protected_occurrences(text: str) -> list[ProtectedOccurrence]:
-    candidates: list[tuple[int, int, int, str]] = []
+    candidates: list[tuple[int, int, int, str]] = [
+        (occurrence.start, occurrence.end, 0, occurrence.value)
+        for occurrence in _url_occurrences(text)
+    ]
     for priority, pattern in enumerate(
         (
-            URL_PATTERN,
             TIMECODE_PATTERN,
             SPEAKER_PATTERN,
+            INTERNAL_PLACEHOLDER_PATTERN,
+            LEGACY_PLACEHOLDER_PATTERN,
             EXPLICIT_PROPER_PATTERN,
             STRONG_PRODUCT_PATTERN,
             NUMBER_PATTERN,
-        )
+        ),
+        start=1,
     ):
         candidates.extend(
             (match.start(), match.end(), priority, match.group(0))
@@ -93,9 +132,30 @@ def protected_tokens(text: str) -> list[str]:
     return [occurrence.value for occurrence in protected_occurrences(text)]
 
 
+def _random_nonce() -> str:
+    return secrets.token_hex(8).upper()
+
+
+def choose_placeholder_nonce(
+    texts: dict[int, str],
+    nonce_factory: NonceFactory = _random_nonce,
+) -> str:
+    for _attempt in range(100):
+        nonce = nonce_factory().strip().upper()
+        if not NONCE_PATTERN.fullmatch(nonce):
+            raise ValueError("placeholder nonce must contain 4-64 ASCII letters or digits")
+        namespace = f"LVT_{nonce}_TOKEN_"
+        if all(namespace not in text for text in texts.values()):
+            return nonce
+    raise ValueError("unable to generate a collision-free placeholder nonce")
+
+
 def protect_texts(
     texts: dict[int, str],
+    *,
+    nonce_factory: NonceFactory = _random_nonce,
 ) -> tuple[dict[int, str], dict[int, list[PlaceholderToken]]]:
+    nonce = choose_placeholder_nonce(texts, nonce_factory)
     next_token_id = 1
     protected_texts: dict[int, str] = {}
     manifests: dict[int, list[PlaceholderToken]] = {}
@@ -104,7 +164,7 @@ def protect_texts(
         parts: list[str] = []
         tokens: list[PlaceholderToken] = []
         for occurrence in protected_occurrences(text):
-            placeholder = f"LVT_TOKEN_{next_token_id:04d}"
+            placeholder = f"LVT_{nonce}_TOKEN_{next_token_id:04d}"
             next_token_id += 1
             parts.extend((text[cursor : occurrence.start], placeholder))
             tokens.append(PlaceholderToken(placeholder, occurrence.value))
@@ -117,13 +177,16 @@ def protect_texts(
 
 def restore_protected_text(text: str, tokens: list[PlaceholderToken]) -> str:
     expected = [token.placeholder for token in tokens]
-    actual_matches = list(PLACEHOLDER_PATTERN.finditer(text))
+    actual_matches = list(INTERNAL_PLACEHOLDER_PATTERN.finditer(text))
     actual = [match.group(0) for match in actual_matches]
     if actual != expected:
         raise ValueError(f"placeholder sequence mismatch: expected={expected}, actual={actual}")
-    without_valid_placeholders = PLACEHOLDER_PATTERN.sub("", text)
-    if "LVT_TOKEN_" in without_valid_placeholders:
-        raise ValueError("placeholder is malformed or modified")
+    namespace = ""
+    if tokens:
+        namespace = tokens[0].placeholder.rsplit("_", 1)[0] + "_"
+        without_valid_placeholders = INTERNAL_PLACEHOLDER_PATTERN.sub("", text)
+        if namespace in without_valid_placeholders:
+            raise ValueError("placeholder is malformed or modified")
     for match in actual_matches:
         before = text[match.start() - 1] if match.start() > 0 else ""
         after = text[match.end()] if match.end() < len(text) else ""
@@ -131,9 +194,13 @@ def restore_protected_text(text: str, tokens: list[PlaceholderToken]) -> str:
             after and re.match(r"[A-Za-z0-9_]", after)
         ):
             raise ValueError(f"placeholder boundary changed: {match.group(0)}")
-    restored = text
-    for token in tokens:
-        restored = restored.replace(token.placeholder, token.original, 1)
+    replacements = {token.placeholder: token.original for token in tokens}
+    restored = INTERNAL_PLACEHOLDER_PATTERN.sub(
+        lambda match: replacements[match.group(0)],
+        text,
+    )
+    if namespace and namespace in restored:
+        raise ValueError("internal placeholder remained after restoration")
     return restored
 
 
