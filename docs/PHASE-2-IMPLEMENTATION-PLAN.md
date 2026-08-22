@@ -37,7 +37,7 @@ backend/src/lvt/engines/ollama.py
 - ASR、diarization、翻译或下载引擎重新选型。
 - 新的 strict-token 边界、lexer 或 fuzz 重构。
 
-## 3. 核心领域契约
+## 3. 实施前澄清：核心领域契约
 
 ### 3.1 Job 状态
 
@@ -64,11 +64,11 @@ cancelled
 
 | 当前状态 | 允许目标状态 | 触发者和条件 |
 | --- | --- | --- |
-| `queued` | `downloading` | worker 原子 claim，创建新 `run_id` |
+| `queued` | checkpoint resolver 返回的 `first_required_stage` | worker 原子 claim，创建新 `run_id`；无缓存时为 `downloading` |
 | `queued` | `cancelled` | cancel API，尚未被 claim |
 | `downloading` | `extracting` / `queued` / `failed` / `cancelling` | 当前 run 下载成功、可自动重试错误、终态错误或取消请求 |
 | `extracting` | `transcribing` / `queued` / `failed` / `cancelling` | 当前 run 提取成功、可自动重试错误、终态错误或取消请求 |
-| `transcribing` | `diarizing` / `queued` / `failed` / `cancelling` | 当前 run 转写成功、可自动重试错误、终态错误或取消请求 |
+| `transcribing` | `diarizing` / `segmenting` / `queued` / `failed` / `cancelling` | 当前 run 转写成功；`diarization=false` 时跳过 diarizing；或发生重试、失败、取消 |
 | `diarizing` | `segmenting` / `queued` / `failed` / `cancelling` | 当前 run 分离成功、可自动重试错误、终态错误或取消请求 |
 | `segmenting` | `translating` / `queued` / `failed` / `cancelling` | 当前 run 分段成功、可自动重试错误、终态错误或取消请求 |
 | `translating` | `exporting` / `queued` / `failed` / `cancelling` | 当前 run 翻译成功、可自动重试错误、终态错误或取消请求 |
@@ -84,6 +84,8 @@ cancelled
 
 - 每次 worker 成功 claim 时生成全局唯一 UUID `run_id`，写入 Job 的 `active_run_id`。
 - 初始创建和重新入队时 `active_run_id = NULL`；新 claim 不复用旧值。
+- 每个 run 只能写入自己的 `work/<job_id>/runs/<run_id>/` 临时目录。不同 run
+  不共享可写文件，也不能覆盖其他 run 的 checkpoint 或 artifact。
 - 所有 worker 发起的状态、进度、错误、artifact 和完成更新必须使用：
 
 ```text
@@ -91,21 +93,36 @@ job_id + run_id + expected_status
 ```
 
 - SQL 更新影响行数不是 1 时视为 stale callback，不重试写入，不覆盖新 run 数据，并记录结构化诊断日志。
-- artifact 文件先安全落盘；artifact 行和 `completed` 状态在同一数据库事务中以当前 run CAS 提交。
-- 自动重新入队、启动恢复或取消会使旧 `run_id` 失效。旧 worker 的迟到回调必须因 CAS 不匹配被拒绝。
+- `title`、`duration_ms`、`detected_language`、`work_dir`、checkpoint pointer
+  及其他 worker 派生元数据同样必须使用上述三元 CAS，不能使用普通 UPDATE。
+- checkpoint 先在 run-scoped 目录完整落盘，再由数据库 CAS 发布其 pointer。未发布目录
+  不得作为恢复依据；stale run 只能清理自己的目录，不能删除当前 run 或已发布 checkpoint。
+- artifact 文件先写入 run-scoped 临时目录；artifact 行、最终 artifact pointer 和
+  `completed` 状态在同一数据库事务中以当前 run CAS 提交。
+- 自动重新入队和启动恢复会使旧 `run_id` 失效。运行中取消仅在当前 worker
+  完成清理并提交 `cancelled` 时清空旧 run。旧 worker 的迟到回调必须因 CAS 不匹配被拒绝。
 - API 控制操作不冒充 worker；其转换至少使用 `job_id + expected_status` 的事务 CAS，并在需要时使 `active_run_id` 失效。
+- 运行中 cancel 转为 `cancelling` 时必须保留 `active_run_id`。当前 worker 完成进程和
+  run-scoped 临时文件清理后，使用原 `run_id` CAS 转为 `cancelled`，再原子清空
+  `active_run_id`。只有启动恢复遇到遗留 `cancelling` 时才强制清空旧 run。
 
 ## 4. 重试模型
 
 ### 4.1 精确定义
 
 - 一个 Job 最多有 3 次 Job 级执行：`1 次初始执行 + 最多 2 次自动重新入队`。
-- `execution_count` 在成功 claim 时加 1；`automatic_requeue_count` 在可重试失败被重新置为 `queued` 时加 1。
+- `execution_count_total` 在成功 claim 时加 1，跨手工重试周期永久累加。
+- `retry_cycle` 初始为 0；每次合法手工 retry 加 1。
+- `automatic_requeue_count_in_cycle` 在当前周期发生 Job 级自动重新入队时加 1；
+  手工 retry 时重置为 0。历史执行和重试通过 `execution_count_total` 与
+  `job_events` 永久保留。
 - 第三次执行失败后不得再次自动入队，必须进入 `failed`。
 - 手工 retry 不重置历史计数；它创建新的手工重试周期，并为该周期重新提供最多 2 次自动重新入队。事件必须记录操作者、原错误和新周期编号。
 - Job 级重试与工具内部重试严格分离：
-  - yt-dlp 内部网络/fragment 重试保持有限并在一次 `downloading` stage 内完成，不增加 `execution_count`。
-  - Ollama 引擎内部请求重试及 Hy-MT2 到 qwen fallback 属于一次 `translating` stage，不增加 `execution_count`，也不修改 Phase 1 校验。
+  - yt-dlp 内部网络/fragment 重试固定最多 3 次并在一次 `downloading` stage 内完成，
+    不增加 `execution_count_total`。
+  - Ollama 引擎内部请求重试及 Hy-MT2 到 qwen fallback 属于一次 `translating`
+    stage，不增加 `execution_count_total`，也不修改 Phase 1 校验。
   - 只有整个 stage 最终返回分类后的 `LVTError`，worker 才决定是否 Job 级重新入队。
 - 测试注入时钟和 backoff，不真实等待。生产 Job 级 backoff 固定为第 1 次 2 秒、第 2 次 10 秒。
 
@@ -123,16 +140,23 @@ job_id + run_id + expected_status
 | `ASR_MODEL_MISSING` | 否 | 是 | 规范化音频 | 安装配置的转写模型后重试 |
 | `TRANSCRIPTION_FAILED` | 否 | 是 | 规范化音频 | 检查模型、内存和媒体音轨后重试 |
 | `DIARIZATION_TOKEN_REQUIRED` | 否 | 是 | ASR 结果和规范化音频 | 配置所需凭证后重试 |
+| `DIARIZATION_MODEL_MISSING` | 否 | 是 | ASR 结果和规范化音频 | 安装或修复说话人分离模型后重试 |
 | `DIARIZATION_FAILED` | 否 | 是 | ASR 结果和规范化音频 | 检查说话人模型、内存和音频质量后重试 |
+| `UNSUPPORTED_SOURCE_LANGUAGE` | 否 | 是 | 已分段 source transcript | 当前源语言不受翻译模型支持，请更换模型或输入 |
 | `OLLAMA_UNAVAILABLE` | 是 | 是 | 已分段 source transcript | 启动 Ollama 并确认本地服务可访问 |
 | `TRANSLATION_MODEL_MISSING` | 否 | 是 | 已分段 source transcript | 安装主模型或 fallback 模型后重试 |
 | `TRANSLATION_INVALID_RESPONSE` | 否 | 是 | 已分段 source transcript | 模型响应未通过严格校验，请检查模型状态后重试 |
+| `TRANSLATION_FAILED` | 否 | 是 | 已分段 source transcript | 翻译执行失败，请检查本地模型资源后重试 |
+| `TRANSLATION_ALL_MODELS_FAILED` | 否 | 是 | 已分段 source transcript | 主模型和备用模型均失败，请检查两个模型后重试 |
 | `EXPORT_FAILED` | 否 | 是 | 已验证 translated transcript | 检查输出目录权限和磁盘空间后重试 |
 | `DISK_SPACE_LOW` | 否 | 是 | 最近合法 checkpoint | 清理磁盘空间后重试 |
 | `CANCELLED_BY_USER` | 否 | 是 | 最近合法 checkpoint | 任务已取消，可手工重新加入队列 |
 | `INTERNAL_ERROR` | 否 | 是 | 最近通过完整性验证的 checkpoint | 查看本地日志，确认环境后手工重试 |
 
-错误分类依据异常类型和明确错误码，不得根据错误消息字符串模糊猜测。未识别异常统一为不可自动重试的 `INTERNAL_ERROR`。
+错误分类依据异常类型和明确错误码，不得根据错误消息字符串模糊猜测。由于
+`ollama.py` 属于 Phase 1 冻结文件，新增生产错误映射由非冻结 orchestration/error
+adapter 完成，并读取 `LVTError.code` 等结构化字段。未识别异常统一为不可自动重试的
+`INTERNAL_ERROR`。
 
 ## 5. Checkpoint 与缓存
 
@@ -151,6 +175,9 @@ export_manifest
 ```
 
 下载和 FFmpeg 提取必须是两个独立阶段，不得继续隐藏在一个 downloader 完成回调中。
+queued claim 必须先运行只读 checkpoint resolver，得到连续合法缓存之后的
+`first_required_stage`，再在一个事务中直接从 `queued` 转入该阶段并写入包含
+`resume_stage` 的 claim 事件。不得先进入 `downloading` 再伪造跳阶段事件。
 
 ### 5.2 Manifest 字段
 
@@ -200,6 +227,11 @@ transcript_schema_version (适用时)
 - 只允许复用连续、完整、指纹一致的 checkpoint 前缀，禁止跨过损坏阶段复用更下游结果。
 - 引擎版本变化只使使用该引擎的 stage 及下游失效；不影响无关上游下载。
 - 删除和隔离路径必须经过 data root containment 检查，不能跟随越界符号链接。
+- 如果文件已落盘但 checkpoint pointer 或 artifact DB 事务因 CAS 失败、锁错误或进程
+  崩溃而未发布，该目录属于 orphan run output。启动和任务结束 reconciliation 只能在
+  确认其 `run_id` 不是当前 active run、也未被任何已发布 pointer 引用后清理。
+- reconciliation 必须限制在 `work/<job_id>/runs/<run_id>/` 或对应 artifact 临时根内；
+  不能根据数据库外路径递归删除，也不能让 stale run 清理其他 run 的文件。
 
 ## 6. 进程控制与取消边界
 
@@ -267,11 +299,27 @@ persisted_overall = max(previous_overall, candidate_overall)
 - 新 worker claim 会生成新 `run_id`；旧进程或迟到回调因此无法更新恢复后的 Job。
 - completed artifact 必须重新通过路径 containment 和存在性检查后提供下载；缺失文件不篡改 completed 历史，而由 artifact API 返回稳定错误并记录事件。
 
+### 8.1 时间戳和错误字段
+
+| 场景 | 字段语义 |
+| --- | --- |
+| 创建 queued | 设置 `created_at`、`updated_at`；其余时间和错误字段为空 |
+| 首次 claim | 设置 `started_at`；后续 retry claim 不覆盖首次开始时间；更新 `updated_at` |
+| 自动重新入队 | 保留 `started_at`，清空 `finished_at`；保留本次错误到 event，但 Job 的 `error_code/error_message` 清空；更新 `updated_at` |
+| 手工 retry | 保留 `created_at` 和首次 `started_at`，清空 `finished_at` 及 Job 当前错误；事件保留原错误；更新 `updated_at` |
+| completed | 设置 `finished_at` 和 `updated_at`，清空当前错误 |
+| failed | 设置 `finished_at`、`updated_at`、最终 `error_code/error_message` |
+| cancelled | 设置 `finished_at`、`updated_at` 和 `CANCELLED_BY_USER` |
+
+`error_message` 只保存去敏、可安全展示的摘要；内部异常和完整 stderr 只能进入受控日志。
+
 ## 9. SQLite 设计
 
 - 从 schema v2 事务迁移到 schema v3；迁移使用 `BEGIN IMMEDIATE`，所有 DDL、数据回填和 schema version 更新一起提交。
 - 应用只接受当前版本和可迁移旧版本；检测到高于应用支持的未来版本时拒绝启动并给出明确错误，不尝试降级。
-- 新字段至少包括 `active_run_id`、`execution_count`、`retry_cycle`、`automatic_requeue_count`、`next_attempt_at` 和取消请求时间。
+- 新字段至少包括 `active_run_id`、`execution_count_total`、`retry_cycle`、
+  `automatic_requeue_count_in_cycle`、`next_attempt_at`、取消请求时间和已发布
+  checkpoint pointer。
 - 新增持久化 settings 表，至少保存 worker concurrency。
 - 启用 `PRAGMA foreign_keys=ON`、WAL 和 `busy_timeout=5000`；每个连接一致配置。
 - claim 在一个事务中选择并更新到期的最早 queued Job，排序为 `next_attempt_at, created_at, uuid`。
@@ -383,6 +431,9 @@ persisted_overall = max(previous_overall, candidate_overall)
 | Artifact readback | 五个任务各 8 文件均可通过 API 下载并回读 |
 | Segment invariants | source/zh-CN 的 ID、时间戳、Speaker、语言、顺序、metadata 和 Segment 数量完全一致；`source_text` 永久保留，仅 `translated_text` 写入译文 |
 | Regression | Phase 1 全量 pytest、真实引擎和 strict-token 既有报告要求无退化，冻结文件无修改 |
+| Batch API | 同一批提交两条 URL，一条成功、一条失败；失败任务手工 retry 后成功 |
+| Options | `diarization=false` 从持久化 JobOptions 生效，不调用 diarization 引擎 |
+| Process model | 验收只启动一个 Uvicorn 服务进程；测试结束必须停止服务并确认无 worker、HTTP server、yt-dlp 或 FFmpeg 遗留进程 |
 
 最终执行并记录：
 
