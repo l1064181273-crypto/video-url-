@@ -3,11 +3,14 @@ import {
   type CreateJobsResponse,
   type HealthResponse,
   type Job,
+  type JobEventsResponse,
   type JobOptions,
   type SettingsResponse,
   parseCapabilitiesResponse,
   parseCreateJobsResponse,
   parseHealthResponse,
+  parseJobEventsResponse,
+  parseJobResponse,
   parseJobsResponse,
   parseSettingsResponse,
 } from "./contracts";
@@ -196,6 +199,69 @@ export class LocalApiClient {
     );
   }
 
+  async getJob(jobId: string, signal?: AbortSignal): Promise<Job> {
+    return parseContract(
+      await this.transport.requestJson(jobPath(jobId), "jobs", { signal }),
+      parseJobResponse,
+    );
+  }
+
+  async retryJob(jobId: string, signal?: AbortSignal): Promise<Job> {
+    return parseContract(
+      await this.transport.requestJson(`${jobPath(jobId)}/retry`, "jobs", {
+        method: "POST",
+        signal,
+      }),
+      parseJobResponse,
+    );
+  }
+
+  async cancelJob(jobId: string, signal?: AbortSignal): Promise<Job> {
+    return parseContract(
+      await this.transport.requestJson(`${jobPath(jobId)}/cancel`, "jobs", {
+        method: "POST",
+        signal,
+      }),
+      parseJobResponse,
+    );
+  }
+
+  async deleteJob(jobId: string, signal?: AbortSignal): Promise<void> {
+    await this.transport.requestNoContent(`${jobPath(jobId)}?confirm=true`, "jobs", {
+      method: "DELETE",
+      signal,
+    });
+  }
+
+  async getJobEvents(
+    jobId: string,
+    offset: number,
+    limit = 50,
+    signal?: AbortSignal,
+  ): Promise<JobEventsResponse> {
+    if (
+      !Number.isInteger(offset) ||
+      offset < 0 ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    ) {
+      throw invalidResponse();
+    }
+    const response = parseContract(
+      await this.transport.requestJson(
+        `${jobPath(jobId)}/events?offset=${String(offset)}&limit=${String(limit)}`,
+        "events",
+        { signal },
+      ),
+      parseJobEventsResponse,
+    );
+    if (response.items.some((event) => event.jobId !== jobId)) {
+      throw invalidResponse();
+    }
+    return response;
+  }
+
   async loadConnectionSnapshot(signal?: AbortSignal): Promise<ConnectionSnapshot> {
     const batch = new AbortController();
     const abortBatch = () => batch.abort();
@@ -269,6 +335,13 @@ function assertSafePathSegments(path: string): void {
 
 function invalidApiPath(): ApiClientError {
   return new ApiClientError("invalidResponse", "本地 API 路径无效");
+}
+
+function jobPath(jobId: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(jobId)) {
+    throw invalidApiPath();
+  }
+  return `/api/v1/jobs/${encodeURIComponent(jobId)}`;
 }
 
 function isJsonResponse(response: Response): boolean {

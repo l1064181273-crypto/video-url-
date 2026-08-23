@@ -1,4 +1,4 @@
-export const CONTRACT_VERSION = "phase-3-checkpoint-3";
+export const CONTRACT_VERSION = "phase-3-checkpoint-4";
 
 export const JOB_STATUSES = [
   "queued",
@@ -116,6 +116,39 @@ export type CreateJobsResponse = {
   rejected: RejectedJob[];
 };
 
+export const JOB_EVENT_TYPES = [
+  "created",
+  "claimed",
+  "stage_changed",
+  "progress",
+  "checkpoint_published",
+  "automatic_requeued",
+  "manual_retry",
+  "cancel_requested",
+  "interrupted",
+  "completed",
+  "failed",
+  "cancelled",
+  "artifact_unavailable",
+] as const;
+
+export type JobEventType = (typeof JOB_EVENT_TYPES)[number] | JobStatus;
+
+export type JobEvent = {
+  id: number;
+  jobId: string;
+  status: JobEventType;
+  message: string | null;
+  createdAt: string;
+};
+
+export type JobEventsResponse = {
+  items: JobEvent[];
+  offset: number;
+  limit: number;
+  total: number;
+};
+
 export const CAPABILITY_COMPONENTS = [
   "ffmpeg",
   "ollama",
@@ -157,6 +190,7 @@ export class ContractError extends Error {
 }
 
 const JOB_STATUS_SET = new Set<string>(JOB_STATUSES);
+const JOB_EVENT_TYPE_SET = new Set<string>([...JOB_EVENT_TYPES, ...JOB_STATUSES]);
 const CAPABILITY_STATUS_SET = new Set<string>(CAPABILITY_STATUSES);
 const ERROR_CODE_SET = new Set<string>(ERROR_CODES);
 const MODEL_COMPONENTS = new Set<CapabilityComponentName>([
@@ -259,6 +293,10 @@ export function parseJobsResponse(value: unknown): Job[] {
   return value.map((job, index) => parseJob(job, `$[${String(index)}]`));
 }
 
+export function parseJobResponse(value: unknown): Job {
+  return parseJob(value, "$");
+}
+
 export function parseCreateJobsResponse(value: unknown): CreateJobsResponse {
   const root = expectRecord(value, "$");
   expectExactKeys(root, "$", ["accepted", "rejected"]);
@@ -292,6 +330,36 @@ export function parseApiErrorResponse(value: unknown): ApiErrorResponse {
     errorCode: expectEnum(detail.error_code, ERROR_CODE_SET, "$.detail.error_code") as ErrorCode,
     message: expectNonEmptyString(detail.message, "$.detail.message"),
   };
+}
+
+export function parseJobEventsResponse(value: unknown): JobEventsResponse {
+  const root = expectRecord(value, "$");
+  expectExactKeys(root, "$", ["items", "offset", "limit", "total"]);
+  if (!Array.isArray(root.items)) {
+    throw new ContractError("$.items", "expected an array");
+  }
+  const offset = expectInteger(root.offset, "$.offset", 0);
+  const limit = expectInteger(root.limit, "$.limit", 1, 100);
+  const total = expectInteger(root.total, "$.total", 0);
+  const items = root.items.map((value, index) => {
+    const path = `$.items[${String(index)}]`;
+    const event = expectRecord(value, path);
+    expectExactKeys(event, path, ["id", "job_id", "status", "message", "created_at"]);
+    return {
+      id: expectInteger(event.id, `${path}.id`, 1),
+      jobId: expectUuid(event.job_id, `${path}.job_id`),
+      status: expectEnum(event.status, JOB_EVENT_TYPE_SET, `${path}.status`) as JobEventType,
+      message: expectNullableString(event.message, `${path}.message`),
+      createdAt: expectTimestamp(event.created_at, `${path}.created_at`),
+    };
+  });
+  if (items.some((event) => event.jobId !== items[0]?.jobId)) {
+    throw new ContractError("$.items", "all events must belong to one job");
+  }
+  if (offset + items.length > total) {
+    throw new ContractError("$.total", "cannot be smaller than the returned page");
+  }
+  return { items, offset, limit, total };
 }
 
 function parseJob(value: unknown, path: string): Job {

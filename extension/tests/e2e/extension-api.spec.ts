@@ -10,6 +10,7 @@ import { chromium, expect, test, type BrowserContext, type Worker } from "@playw
 import {
   parseApiErrorResponse,
   parseCapabilitiesResponse,
+  parseCreateJobsResponse,
   parseHealthResponse,
   parseJobsResponse,
   parseSettingsResponse,
@@ -338,6 +339,155 @@ test("side panel submits a mixed batch and restores the real backend job list", 
   }
 });
 
+test("job controls, confirmed delete, and paginated events use the real backend", async () => {
+  const profile = await mkdtemp(resolve(tmpdir(), "lvt-chromium-profile-"));
+  let context: BrowserContext | undefined;
+  try {
+    context = await chromium.launchPersistentContext(profile, {
+      channel: "chromium",
+      headless: true,
+      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    });
+    const worker = await extensionWorker(context);
+    const extensionId = new URL(worker.url()).host;
+    await worker.evaluate(
+      async ({ port, token }) =>
+        chrome.storage.local.set({
+          lvtConnection: { port, token },
+        }),
+      { port: Number(new URL(baseUrl).port), token: TOKEN },
+    );
+    const writes: string[] = [];
+    context.on("request", (request) => {
+      if (
+        request.url().startsWith(`${baseUrl}/api/v1/jobs/`) &&
+        (request.method() === "POST" || request.method() === "DELETE")
+      ) {
+        writes.push(`${request.method()} ${request.url()}`);
+      }
+    });
+
+    const page = await context.newPage();
+    await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
+    const created = parseCreateJobsResponse(
+      await page.evaluate(
+        async ({ origin, token }) => {
+          const response = await fetch(`${origin}/api/v1/jobs`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-LVT-Token": token,
+            },
+            body: JSON.stringify({
+              urls: [
+                "https://example.test/control-cancel",
+                "https://example.test/control-retry",
+                "https://example.test/control-delete",
+              ],
+            }),
+          });
+          return response.json() as Promise<unknown>;
+        },
+        { origin: baseUrl, token: TOKEN },
+      ),
+    );
+    expect(created.accepted).toHaveLength(3);
+    const [cancelJob, retryJob, deleteJob] = created.accepted;
+    if (cancelJob === undefined || retryJob === undefined || deleteJob === undefined) {
+      throw new Error("control test jobs were not created");
+    }
+    await seedControlJobs(cancelJob.uuid, retryJob.uuid, deleteJob.uuid);
+
+    const cancelRow = page.locator(`[data-job-id="${cancelJob.uuid}"]`);
+    const retryRow = page.locator(`[data-job-id="${retryJob.uuid}"]`);
+    const deleteRow = page.locator(`[data-job-id="${deleteJob.uuid}"]`);
+    await expect(cancelRow).toHaveAttribute("data-status", "queued");
+    await expect(retryRow).toHaveAttribute("data-status", "failed");
+    await expect(deleteRow).toHaveAttribute("data-status", "completed");
+
+    await cancelRow.getByRole("button", { name: "取消任务 Cancel Target" }).dblclick();
+    await expect
+      .poll(() => writes.filter((request) => request.endsWith(`/${cancelJob.uuid}/cancel`)).length)
+      .toBe(1);
+    await expect(cancelRow).toHaveAttribute("data-status", "cancelled");
+
+    await retryRow.getByRole("button", { name: "查看详情 Retry Target" }).click();
+    await expect(page.locator("#detail-job-title")).toHaveText("Retry Target");
+    await expect(page.locator("#detail-status")).toHaveText("失败");
+    await expect(page.locator("#detail-asr-model")).toHaveText("mlx-community/whisper-small-mlx");
+    await expect(page.locator("#event-count")).toHaveText("50 / 55 条");
+    await page.getByRole("button", { name: "加载更多" }).click();
+    await expect(page.locator("#event-count")).toHaveText("55 / 55 条");
+    const eventIds = await page
+      .locator(".event-item")
+      .evaluateAll((items) => items.map((item) => Number((item as HTMLElement).dataset.eventId)));
+    expect(eventIds).toEqual([...new Set(eventIds)].sort((left, right) => left - right));
+    await expect(page.locator("#event-list")).toContainText(
+      "来自 失败 · 恢复至 正在下载 · 错误 DOWNLOAD_FAILED · 原因 启动恢复",
+    );
+    await expect(page.locator("body")).not.toContainText("TimelineSecret");
+    await expect(page.locator("#event-list img")).toHaveCount(0);
+
+    const retryUrl = `${baseUrl}/api/v1/jobs/${retryJob.uuid}/retry`;
+    let abortedRetryRequests = 0;
+    await page.route(retryUrl, async (route) => {
+      abortedRetryRequests += 1;
+      await route.abort("failed");
+    });
+    const retryButton = page.getByRole("button", { name: "重试 Retry Target" });
+    await retryButton.click();
+    await expect(page.locator("#detail-action-message")).toHaveText(
+      "操作结果未知，请刷新任务确认；不会自动重试",
+    );
+    await expect(page.locator("#detail-status")).toHaveText("失败");
+    expect(abortedRetryRequests).toBe(1);
+    await page.unroute(retryUrl);
+
+    const retryWritesBeforeSuccess = writes.filter((request) =>
+      request.endsWith(`/${retryJob.uuid}/retry`),
+    ).length;
+    await retryButton.dblclick();
+    await expect
+      .poll(() => writes.filter((request) => request.endsWith(`/${retryJob.uuid}/retry`)).length)
+      .toBe(retryWritesBeforeSuccess + 1);
+    await expect(page.locator("#detail-status")).not.toHaveText("失败");
+    await page.getByRole("button", { name: "返回任务" }).click();
+
+    const deleteButton = deleteRow.getByRole("button", { name: "删除 Delete Target" });
+    await deleteButton.click();
+    await expect(page.locator("#delete-dialog")).toBeVisible();
+    await expect(page.locator("#delete-job-title")).toHaveText("Delete Target");
+    await expect(page.locator("#delete-cancel")).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#delete-confirm")).toBeFocused();
+    await page.keyboard.press("Tab");
+    expect(
+      await page.locator("#delete-dialog").evaluate((dialog) => {
+        return dialog.contains(document.activeElement);
+      }),
+    ).toBe(true);
+    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await expect(page.locator("#delete-dialog")).toBeHidden();
+    await expect(deleteButton).toBeFocused();
+    await deleteButton.click();
+    await page.getByRole("button", { name: "确认删除" }).dblclick();
+    await expect
+      .poll(
+        () =>
+          writes.filter((request) =>
+            request.startsWith(`DELETE ${baseUrl}/api/v1/jobs/${deleteJob.uuid}?confirm=true`),
+          ).length,
+      )
+      .toBe(1);
+    await expect(deleteRow).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText(TOKEN);
+  } finally {
+    await context?.close();
+    await rm(profile, { force: true, recursive: true });
+  }
+});
+
 async function extensionWorker(context: BrowserContext): Promise<Worker> {
   const existing = context.serviceWorkers()[0];
   return existing ?? context.waitForEvent("serviceworker");
@@ -367,6 +517,69 @@ async function seedCompletedJobForLayout(jobId: string, title: string): Promise<
     database,
     jobId,
     title,
+  ]);
+}
+
+async function seedControlJobs(
+  cancelJobId: string,
+  retryJobId: string,
+  deleteJobId: string,
+): Promise<void> {
+  if (dataRoot === undefined) {
+    throw new Error("E2E data root was not initialized");
+  }
+  const database = resolve(dataRoot, "db/lvt.sqlite3");
+  await execFileAsync(PYTHON, [
+    "-c",
+    [
+      "import json, sqlite3, sys",
+      "connection = sqlite3.connect(sys.argv[1])",
+      [
+        "connection.execute(",
+        "\"UPDATE jobs SET title = 'Cancel Target', status = 'queued', stage_progress = 0, \"",
+        '"overall_progress = 0, active_run_id = NULL, "',
+        "\"next_attempt_at = '2099-01-01T00:00:00+00:00' WHERE uuid = ?\",",
+        "(sys.argv[2],))",
+      ].join(""),
+      [
+        "connection.execute(",
+        "\"UPDATE jobs SET title = 'Retry Target', status = 'failed', \"",
+        "\"error_code = 'DOWNLOAD_FAILED', error_message = 'download failed', \"",
+        "\"active_run_id = NULL, finished_at = '2026-08-23T10:02:03+00:00' WHERE uuid = ?\",",
+        "(sys.argv[3],))",
+      ].join(""),
+      [
+        "connection.execute(",
+        "\"UPDATE jobs SET title = 'Delete Target', status = 'completed', \"",
+        '"stage_progress = 100, overall_progress = 100, active_run_id = NULL, "',
+        "\"finished_at = '2026-08-23T10:02:03+00:00' WHERE uuid = ?\",",
+        "(sys.argv[4],))",
+      ].join(""),
+      "connection.execute('DELETE FROM job_events WHERE job_id = ?', (sys.argv[3],))",
+      [
+        "message = json.dumps({",
+        "'from_status': 'failed', 'resume_stage': 'downloading', ",
+        "'error_code': 'DOWNLOAD_FAILED', 'reason': 'startup_recovery', ",
+        "'input': '<img src=x onerror=TimelineSecret>', ",
+        "'ctx': {'secret': 'TimelineSecret'}",
+        "}, sort_keys=True)",
+      ].join(""),
+      [
+        "events = [(sys.argv[3], 'progress', message, ",
+        "f'2026-08-23T10:00:{index:02d}+00:00') for index in range(55)]",
+      ].join(""),
+      [
+        "connection.executemany(",
+        "'INSERT INTO job_events (job_id, status, message, created_at) VALUES (?, ?, ?, ?)', ",
+        "events)",
+      ].join(""),
+      "connection.commit()",
+      "connection.close()",
+    ].join("; "),
+    database,
+    cancelJobId,
+    retryJobId,
+    deleteJobId,
   ]);
 }
 

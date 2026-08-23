@@ -257,6 +257,12 @@ button.danger {
   color: #c5221f;
 }
 
+button.danger-solid {
+  border-color: #c5221f;
+  background: #c5221f;
+  color: #ffffff;
+}
+
 button:disabled {
   cursor: default;
   opacity: 0.55;
@@ -414,6 +420,184 @@ button:disabled {
   margin-top: 9px;
   color: #5f6368;
   font-size: 11px;
+}
+
+.job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.job-actions button {
+  min-height: 30px;
+  padding: 4px 8px;
+}
+
+.action-message {
+  min-height: 18px;
+  margin-top: 6px;
+  color: #b3261e;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.detail-section {
+  padding-top: 16px;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.detail-job-title {
+  margin: 16px 0 0;
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-job-url {
+  margin-top: 5px;
+  color: #5f6368;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.detail-summary,
+.detail-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin: 14px 0 0;
+}
+
+.detail-options {
+  grid-template-columns: 1fr;
+  border-top: 1px solid #dadce0;
+  padding-top: 12px;
+}
+
+.detail-summary div,
+.detail-options div {
+  min-width: 0;
+}
+
+.detail-summary dt,
+.detail-options dt {
+  color: #5f6368;
+  font-size: 11px;
+}
+
+.detail-summary dd,
+.detail-options dd {
+  margin: 3px 0 0;
+  color: #202124;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.timeline-section {
+  margin-top: 18px;
+  border-top: 1px solid #dadce0;
+  padding-top: 14px;
+}
+
+.timeline-section h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.event-list {
+  display: grid;
+  gap: 0;
+  margin: 8px 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.event-item {
+  position: relative;
+  min-width: 0;
+  border-left: 2px solid #bdc1c6;
+  padding: 0 0 12px 12px;
+}
+
+.event-item::before {
+  position: absolute;
+  top: 3px;
+  left: -5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #185abc;
+  content: "";
+}
+
+.event-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.event-status {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.event-time {
+  flex: 0 0 auto;
+  color: #5f6368;
+  font-size: 10px;
+}
+
+.event-summary {
+  margin-top: 3px;
+  color: #5f6368;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+dialog {
+  width: min(340px, calc(100vw - 32px));
+  border: 1px solid #bdc1c6;
+  border-radius: 6px;
+  padding: 0;
+  color: #202124;
+}
+
+dialog::backdrop {
+  background: rgb(32 33 36 / 45%);
+}
+
+.delete-dialog-content {
+  padding: 18px;
+}
+
+.delete-dialog-content > p {
+  margin-top: 10px;
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.delete-job-title {
+  color: #202124 !important;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
 }
 
 @media (max-width: 340px) {

@@ -1,5 +1,5 @@
 import { LocalApiClient, LocalApiTransport } from "./api/client";
-import type { Job, JobOptions } from "./api/contracts";
+import type { Job, JobEvent, JobOptions } from "./api/contracts";
 import { ApiClientError } from "./api/errors";
 import { VisibilityPoller } from "./state/poller";
 import { ConnectionStore, type ConnectionStatus } from "./state/store";
@@ -15,6 +15,13 @@ import {
   retainedInputAfterSubmission,
   submittedUrls,
 } from "./ui/jobs";
+import {
+  describeActionFailure,
+  type JobAction,
+  JobActionGate,
+  jobActionAvailability,
+} from "./ui/job-actions";
+import { eventMessageSummary, eventStatusLabel, mergeEventPages } from "./ui/events";
 
 document.documentElement.dataset.contractVersion = CONTRACT_VERSION;
 
@@ -41,12 +48,49 @@ const filterTabs = requireElement("#job-filters", HTMLDivElement);
 const jobCount = requireElement("#job-count", HTMLSpanElement);
 const jobsEmpty = requireElement("#jobs-empty", HTMLParagraphElement);
 const jobList = requireElement("#job-list", HTMLDivElement);
+const submissionSection = requireElement(".submission-section", HTMLElement);
+const jobsSection = requireElement(".jobs-section", HTMLElement);
+const jobDetail = requireElement("#job-detail", HTMLElement);
+const detailBack = requireElement("#detail-back", HTMLButtonElement);
+const detailJobTitle = requireElement("#detail-job-title", HTMLHeadingElement);
+const detailJobUrl = requireElement("#detail-job-url", HTMLParagraphElement);
+const detailStatus = requireElement("#detail-status", HTMLElement);
+const detailOverallProgress = requireElement("#detail-overall-progress", HTMLElement);
+const detailStageProgress = requireElement("#detail-stage-progress", HTMLElement);
+const detailLanguage = requireElement("#detail-language", HTMLElement);
+const detailDuration = requireElement("#detail-duration", HTMLElement);
+const detailExecutionCount = requireElement("#detail-execution-count", HTMLElement);
+const detailRetryCycle = requireElement("#detail-retry-cycle", HTMLElement);
+const detailAsrModel = requireElement("#detail-asr-model", HTMLElement);
+const detailTranslateTo = requireElement("#detail-translate-to", HTMLElement);
+const detailDiarization = requireElement("#detail-diarization", HTMLElement);
+const detailActions = requireElement("#detail-actions", HTMLDivElement);
+const detailActionMessage = requireElement("#detail-action-message", HTMLParagraphElement);
+const eventCount = requireElement("#event-count", HTMLSpanElement);
+const timelineMessage = requireElement("#timeline-message", HTMLParagraphElement);
+const eventList = requireElement("#event-list", HTMLOListElement);
+const loadMoreEvents = requireElement("#load-more-events", HTMLButtonElement);
+const deleteDialog = requireElement("#delete-dialog", HTMLDialogElement);
+const deleteJobTitle = requireElement("#delete-job-title", HTMLParagraphElement);
+const deleteCancel = requireElement("#delete-cancel", HTMLButtonElement);
+const deleteConfirm = requireElement("#delete-confirm", HTMLButtonElement);
+const deleteError = requireElement("#delete-error", HTMLParagraphElement);
 let tokenConfigured = false;
 let connected = false;
 let submissionBusy = false;
 let currentFilter: JobFilter = "all";
 let currentBatch = parseBatchInput("");
+let selectedJobId: string | null = null;
+let timelineEvents: JobEvent[] = [];
+let timelineTotal = 0;
+let timelineNextOffset = 0;
+let timelineLoading = false;
+let eventRequestGeneration = 0;
+let eventAbort: AbortController | undefined;
+let deleteTargetJobId: string | null = null;
+let deleteReturnFocus: HTMLButtonElement | null = null;
 const jobRows = new Map<string, HTMLElement>();
+const actionGate = new JobActionGate();
 
 const connectionStorage = new ConnectionSettingsStorage();
 const apiClient = new LocalApiClient(new LocalApiTransport(connectionStorage));
@@ -63,6 +107,14 @@ const unsubscribe = store.subscribe((state) => {
   status.dataset.status = state.connection.status;
   connected = state.connection.status === "healthy";
   renderJobs(state.jobs, state.connection.status);
+  if (selectedJobId !== null) {
+    const selected = state.jobs.find((job) => job.uuid === selectedJobId);
+    if (selected === undefined) {
+      closeJobDetail();
+    } else {
+      renderJobDetail(selected);
+    }
+  }
   updateSubmitState();
 });
 
@@ -109,12 +161,110 @@ filterTabs.addEventListener("click", (event) => {
   renderJobs(state.jobs, state.connection.status);
 });
 
+jobList.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const button = target.closest<HTMLButtonElement>("button[data-target-job-id][data-action]");
+  if (button === null) {
+    return;
+  }
+  const jobId = button.dataset.targetJobId;
+  const action = button.dataset.action;
+  if (jobId === undefined) {
+    return;
+  }
+  if (action === "details") {
+    openJobDetail(jobId);
+    return;
+  }
+  if (!isJobAction(action)) {
+    return;
+  }
+  if (action === "delete") {
+    openDeleteDialog(jobId, button);
+    return;
+  }
+  void runJobAction(action, jobId);
+});
+
+detailActions.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement) || selectedJobId === null) {
+    return;
+  }
+  const action = target.dataset.action;
+  if (!isJobAction(action)) {
+    return;
+  }
+  if (action === "delete") {
+    openDeleteDialog(selectedJobId, target);
+    return;
+  }
+  void runJobAction(action, selectedJobId);
+});
+
+detailBack.addEventListener("click", closeJobDetail);
+
+loadMoreEvents.addEventListener("click", () => {
+  void loadEvents(false);
+});
+
+deleteCancel.addEventListener("click", () => {
+  deleteDialog.close("cancel");
+});
+
+deleteConfirm.addEventListener("click", () => {
+  if (deleteTargetJobId !== null) {
+    void runJobAction("delete", deleteTargetJobId);
+  }
+});
+
+deleteDialog.addEventListener("cancel", (event) => {
+  if (deleteTargetJobId !== null && actionGate.isBusy(deleteTargetJobId)) {
+    event.preventDefault();
+  }
+});
+
+deleteDialog.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab" || deleteCancel.disabled || deleteConfirm.disabled) {
+    return;
+  }
+  if (event.shiftKey && document.activeElement === deleteCancel) {
+    event.preventDefault();
+    deleteConfirm.focus();
+    return;
+  }
+  if (!event.shiftKey && document.activeElement === deleteConfirm) {
+    event.preventDefault();
+    deleteCancel.focus();
+    return;
+  }
+  if (!deleteDialog.contains(document.activeElement)) {
+    event.preventDefault();
+    deleteCancel.focus();
+  }
+});
+
+deleteDialog.addEventListener("close", () => {
+  deleteError.textContent = "";
+  deleteConfirm.disabled = false;
+  deleteCancel.disabled = false;
+  deleteTargetJobId = null;
+  if (deleteReturnFocus?.isConnected === true) {
+    deleteReturnFocus.focus();
+  }
+  deleteReturnFocus = null;
+});
+
 document.addEventListener("visibilitychange", () => {
   poller.setVisible(document.visibilityState === "visible");
 });
 
 window.addEventListener("pagehide", () => {
   poller.stop();
+  eventAbort?.abort();
   unsubscribe();
 });
 
@@ -338,6 +488,16 @@ function createJobRow(uuid: string): HTMLElement {
     fieldElement("span", "", "finished"),
   );
   row.append(meta);
+  const actions = document.createElement("div");
+  actions.className = "job-actions";
+  actions.dataset.field = "actions";
+  actions.append(
+    createActionButton("details", uuid, "查看详情", "secondary"),
+    createActionButton("cancel", uuid, "取消任务", "secondary"),
+    createActionButton("retry", uuid, "重试", "secondary"),
+    createActionButton("delete", uuid, "删除", "danger"),
+  );
+  row.append(actions, fieldElement("p", "action-message", "action-message"));
   jobRows.set(uuid, row);
   return row;
 }
@@ -385,6 +545,294 @@ function updateJobRow(row: HTMLElement, job: Job): void {
   jobField(row, "duration").textContent = `时长 ${formatDuration(job.durationMs)}`;
   jobField(row, "started").textContent = `开始 ${formatTimestamp(job.startedAt)}`;
   jobField(row, "finished").textContent = `完成 ${formatTimestamp(job.finishedAt)}`;
+  updateActionButtons(jobField(row, "actions"), job);
+}
+
+function createActionButton(
+  action: JobAction | "details",
+  jobId: string,
+  label: string,
+  className: string,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.dataset.action = action;
+  button.dataset.targetJobId = jobId;
+  button.textContent = label;
+  return button;
+}
+
+function updateActionButtons(container: HTMLElement, job: Job): void {
+  const availability = jobActionAvailability(job.status);
+  const busy = actionGate.isBusy(job.uuid);
+  const title = jobDisplayTitle(job);
+  for (const button of container.querySelectorAll<HTMLButtonElement>("button[data-action]")) {
+    const action = button.dataset.action;
+    if (action === "details") {
+      button.hidden = false;
+      button.disabled = busy;
+      button.ariaLabel = `查看详情 ${title}`;
+      continue;
+    }
+    if (!isJobAction(action)) {
+      continue;
+    }
+    button.hidden = !availability[action];
+    button.disabled = busy;
+    button.ariaLabel = `${actionLabel(action)} ${title}`;
+  }
+}
+
+function openJobDetail(jobId: string): void {
+  const job = store.getState().jobs.find((candidate) => candidate.uuid === jobId);
+  if (job === undefined) {
+    return;
+  }
+  selectedJobId = jobId;
+  submissionSection.hidden = true;
+  jobsSection.hidden = true;
+  jobDetail.hidden = false;
+  detailActionMessage.textContent = "";
+  renderJobDetail(job);
+  detailBack.focus();
+  void loadEvents(true);
+}
+
+function closeJobDetail(): void {
+  eventAbort?.abort();
+  eventAbort = undefined;
+  eventRequestGeneration += 1;
+  selectedJobId = null;
+  timelineEvents = [];
+  timelineTotal = 0;
+  timelineNextOffset = 0;
+  timelineLoading = false;
+  eventList.replaceChildren();
+  timelineMessage.textContent = "";
+  jobDetail.hidden = true;
+  submissionSection.hidden = false;
+  jobsSection.hidden = false;
+}
+
+function renderJobDetail(job: Job): void {
+  const title = jobDisplayTitle(job);
+  detailJobTitle.textContent = title;
+  detailJobTitle.title = title;
+  detailJobUrl.textContent = job.sanitizedDisplayUrl;
+  detailStatus.textContent = jobStatusLabel(job.status);
+  detailOverallProgress.textContent = `${String(job.overallProgress)}%`;
+  detailStageProgress.textContent = `${String(job.stageProgress)}%`;
+  detailLanguage.textContent = job.detectedLanguage ?? "--";
+  detailDuration.textContent = formatDuration(job.durationMs);
+  detailExecutionCount.textContent = String(job.executionCountTotal);
+  detailRetryCycle.textContent = String(job.retryCycle);
+  detailAsrModel.textContent = job.options.asrModel;
+  detailTranslateTo.textContent = job.options.translateTo;
+  detailDiarization.textContent = job.options.diarization ? "已启用" : "未启用";
+
+  const availability = jobActionAvailability(job.status);
+  const buttons = (["cancel", "retry", "delete"] as const)
+    .filter((action) => availability[action])
+    .map((action) =>
+      createActionButton(action, job.uuid, actionLabel(action), actionClass(action)),
+    );
+  detailActions.replaceChildren(...buttons);
+  updateActionButtons(detailActions, job);
+}
+
+async function runJobAction(action: JobAction, jobId: string): Promise<void> {
+  const job = store.getState().jobs.find((candidate) => candidate.uuid === jobId);
+  if (job === undefined || !jobActionAvailability(job.status)[action]) {
+    return;
+  }
+  const request = actionGate.run<Job | null>(jobId, () => {
+    if (action === "cancel") {
+      return apiClient.cancelJob(jobId);
+    }
+    if (action === "retry") {
+      return apiClient.retryJob(jobId);
+    }
+    return apiClient.deleteJob(jobId).then(() => null);
+  });
+  if (request === undefined) {
+    return;
+  }
+
+  setJobActionBusy(jobId, true);
+  setActionMessage(jobId, "");
+  try {
+    await request;
+    if (action === "delete") {
+      if (deleteDialog.open) {
+        deleteDialog.close("deleted");
+      }
+      if (selectedJobId === jobId) {
+        closeJobDetail();
+      }
+    } else if (selectedJobId === jobId) {
+      void loadEvents(true);
+    }
+    setActionMessage(jobId, "操作成功，正在刷新");
+    startPolling();
+  } catch (error) {
+    const failure = describeActionFailure(error);
+    setActionMessage(jobId, failure.message);
+    if (action === "delete" && deleteDialog.open) {
+      deleteError.textContent = failure.message;
+    }
+    if (failure.refresh) {
+      startPolling();
+    }
+  } finally {
+    setJobActionBusy(jobId, false);
+  }
+}
+
+function setJobActionBusy(jobId: string, busy: boolean): void {
+  const job = store.getState().jobs.find((candidate) => candidate.uuid === jobId);
+  const row = jobRows.get(jobId);
+  if (job !== undefined && row !== undefined) {
+    updateActionButtons(jobField(row, "actions"), job);
+  }
+  if (job !== undefined && selectedJobId === jobId) {
+    updateActionButtons(detailActions, job);
+  }
+  if (deleteTargetJobId === jobId && deleteDialog.open) {
+    deleteConfirm.disabled = busy;
+    deleteCancel.disabled = busy;
+  }
+}
+
+function setActionMessage(jobId: string, message: string): void {
+  const row = jobRows.get(jobId);
+  if (row !== undefined) {
+    jobField(row, "action-message").textContent = message;
+  }
+  if (selectedJobId === jobId) {
+    detailActionMessage.textContent = message;
+  }
+}
+
+function openDeleteDialog(jobId: string, trigger: HTMLButtonElement): void {
+  const job = store.getState().jobs.find((candidate) => candidate.uuid === jobId);
+  if (
+    job === undefined ||
+    !jobActionAvailability(job.status).delete ||
+    actionGate.isBusy(jobId) ||
+    deleteDialog.open
+  ) {
+    return;
+  }
+  deleteTargetJobId = jobId;
+  deleteReturnFocus = trigger;
+  deleteJobTitle.textContent = jobDisplayTitle(job);
+  deleteError.textContent = "";
+  deleteDialog.showModal();
+  deleteCancel.focus();
+}
+
+async function loadEvents(reset: boolean): Promise<void> {
+  const jobId = selectedJobId;
+  if (jobId === null) {
+    return;
+  }
+  if (reset) {
+    eventAbort?.abort();
+    timelineLoading = false;
+    timelineEvents = [];
+    timelineTotal = 0;
+    timelineNextOffset = 0;
+    eventRequestGeneration += 1;
+  } else if (timelineLoading) {
+    return;
+  }
+  const generation = eventRequestGeneration;
+  const controller = new AbortController();
+  eventAbort = controller;
+  timelineLoading = true;
+  timelineMessage.textContent = "正在加载事件";
+  renderTimeline();
+  try {
+    const page = await apiClient.getJobEvents(
+      jobId,
+      reset ? 0 : timelineNextOffset,
+      50,
+      controller.signal,
+    );
+    if (
+      controller.signal.aborted ||
+      selectedJobId !== jobId ||
+      generation !== eventRequestGeneration
+    ) {
+      return;
+    }
+    timelineEvents = mergeEventPages(reset ? [] : timelineEvents, page.items);
+    timelineTotal = page.total;
+    timelineNextOffset = Math.max(timelineNextOffset, page.offset + page.items.length);
+    timelineMessage.textContent = timelineEvents.length === 0 ? "暂无事件" : "";
+  } catch (error) {
+    if (!controller.signal.aborted && selectedJobId === jobId) {
+      timelineMessage.textContent =
+        error instanceof ApiClientError ? error.message : "事件加载失败，请稍后重试";
+    }
+  } finally {
+    if (selectedJobId === jobId && generation === eventRequestGeneration) {
+      timelineLoading = false;
+      eventAbort = undefined;
+      renderTimeline();
+    }
+  }
+}
+
+function renderTimeline(): void {
+  eventCount.textContent = `${String(timelineEvents.length)} / ${String(timelineTotal)} 条`;
+  eventList.replaceChildren(
+    ...timelineEvents.map((event) => {
+      const item = document.createElement("li");
+      item.className = "event-item";
+      item.dataset.eventId = String(event.id);
+      const heading = document.createElement("div");
+      heading.className = "event-heading";
+      const eventStatus = document.createElement("span");
+      eventStatus.className = "event-status";
+      eventStatus.textContent = eventStatusLabel(event.status);
+      const time = document.createElement("time");
+      time.className = "event-time";
+      time.dateTime = event.createdAt;
+      time.textContent = formatTimestamp(event.createdAt);
+      heading.append(eventStatus, time);
+      item.append(heading);
+      const summary = eventMessageSummary(event.message);
+      if (summary.length > 0) {
+        const message = document.createElement("p");
+        message.className = "event-summary";
+        message.textContent = summary;
+        item.append(message);
+      }
+      return item;
+    }),
+  );
+  loadMoreEvents.hidden = timelineLoading || timelineNextOffset >= timelineTotal;
+  loadMoreEvents.disabled = timelineLoading;
+}
+
+function actionLabel(action: JobAction): string {
+  if (action === "cancel") {
+    return "取消任务";
+  }
+  if (action === "retry") {
+    return "重试";
+  }
+  return "删除";
+}
+
+function actionClass(action: JobAction): string {
+  return action === "delete" ? "danger" : "secondary";
+}
+
+function isJobAction(value: string | undefined): value is JobAction {
+  return value === "cancel" || value === "retry" || value === "delete";
 }
 
 function fieldElement<K extends keyof HTMLElementTagNameMap>(

@@ -10,6 +10,7 @@ import {
   parseCapabilitiesResponse,
   parseCreateJobsResponse,
   parseHealthResponse,
+  parseJobEventsResponse,
   parseJobsResponse,
   parseSettingsResponse,
 } from "../../src/api/contracts";
@@ -151,6 +152,38 @@ describe("frozen public DTOs", () => {
     ]);
   });
 
+  it("parses paginated job events", () => {
+    const parsed = parseJobEventsResponse({
+      items: [
+        {
+          id: 7,
+          job_id: "4c50ff38-9cca-4f91-bae0-f3fe4bc18b6f",
+          status: "manual_retry",
+          message: '{"from_status":"failed"}',
+          created_at: CHECKED_AT,
+        },
+      ],
+      offset: 0,
+      limit: 50,
+      total: 1,
+    });
+
+    expect(parsed).toEqual({
+      items: [
+        {
+          id: 7,
+          jobId: "4c50ff38-9cca-4f91-bae0-f3fe4bc18b6f",
+          status: "manual_retry",
+          message: '{"from_status":"failed"}',
+          createdAt: CHECKED_AT,
+        },
+      ],
+      offset: 0,
+      limit: 50,
+      total: 1,
+    });
+  });
+
   it("locks every Job status and public error code", () => {
     expect(JOB_STATUSES).toHaveLength(12);
     expect(new Set(JOB_STATUSES).size).toBe(JOB_STATUSES.length);
@@ -208,6 +241,24 @@ describe("frozen public DTOs", () => {
         parseCreateJobsResponse({
           accepted: [],
           rejected: [{ url: "https://example.test", error_code: "INTERNAL_ERROR", message: "x" }],
+        }),
+    ],
+    [
+      "unknown event status",
+      () =>
+        parseJobEventsResponse({
+          items: [
+            {
+              id: 1,
+              job_id: "4c50ff38-9cca-4f91-bae0-f3fe4bc18b6f",
+              status: "private_internal_event",
+              message: null,
+              created_at: CHECKED_AT,
+            },
+          ],
+          offset: 0,
+          limit: 50,
+          total: 1,
         }),
     ],
   ])("rejects %s", (_label, parseInvalid) => {

@@ -121,7 +121,82 @@
         <p id="jobs-empty" class="empty-state">尚未提交任务</p>
         <div id="job-list" class="job-list" aria-live="polite"></div>
       </section>
+      <section id="job-detail" class="detail-section" aria-labelledby="detail-title" hidden>
+        <div class="detail-header">
+          <button id="detail-back" type="button" class="secondary">返回任务</button>
+          <h2 id="detail-title">任务详情</h2>
+        </div>
+        <h3 id="detail-job-title" class="detail-job-title"></h3>
+        <p id="detail-job-url" class="detail-job-url"></p>
+        <dl class="detail-summary">
+          <div>
+            <dt>状态</dt>
+            <dd id="detail-status"></dd>
+          </div>
+          <div>
+            <dt>总进度</dt>
+            <dd id="detail-overall-progress"></dd>
+          </div>
+          <div>
+            <dt>阶段进度</dt>
+            <dd id="detail-stage-progress"></dd>
+          </div>
+          <div>
+            <dt>语言</dt>
+            <dd id="detail-language"></dd>
+          </div>
+          <div>
+            <dt>媒体时长</dt>
+            <dd id="detail-duration"></dd>
+          </div>
+          <div>
+            <dt>执行次数</dt>
+            <dd id="detail-execution-count"></dd>
+          </div>
+          <div>
+            <dt>Retry cycle</dt>
+            <dd id="detail-retry-cycle"></dd>
+          </div>
+        </dl>
+        <dl class="detail-options">
+          <div>
+            <dt>ASR 模型</dt>
+            <dd id="detail-asr-model"></dd>
+          </div>
+          <div>
+            <dt>目标语言</dt>
+            <dd id="detail-translate-to"></dd>
+          </div>
+          <div>
+            <dt>说话人识别</dt>
+            <dd id="detail-diarization"></dd>
+          </div>
+        </dl>
+        <div id="detail-actions" class="job-actions" aria-label="任务操作"></div>
+        <p id="detail-action-message" class="action-message" role="status"></p>
+        <section class="timeline-section" aria-labelledby="timeline-title">
+          <div class="section-heading">
+            <h3 id="timeline-title">事件时间线</h3>
+            <span id="event-count" class="input-summary">0 条</span>
+          </div>
+          <p id="timeline-message" class="form-message" role="status"></p>
+          <ol id="event-list" class="event-list"></ol>
+          <button id="load-more-events" type="button" class="secondary" hidden>加载更多</button>
+        </section>
+      </section>
     </main>
+    <dialog id="delete-dialog" aria-labelledby="delete-dialog-title">
+      <div class="delete-dialog-content">
+        <h2 id="delete-dialog-title">确认删除任务</h2>
+        <p>删除后无法恢复：</p>
+        <p id="delete-job-title" class="delete-job-title"></p>
+        <p id="delete-error" class="action-message" role="status"></p>
+        <div class="dialog-actions">
+          <button id="delete-cancel" type="button" class="secondary">取消</button>
+          <button id="delete-confirm" type="button" class="danger-solid">确认删除</button>
+        </div>
+      </div>
+    </dialog>
     <script type="module" src="/src/sidepanel.ts"></script>
   </body>
 </html>

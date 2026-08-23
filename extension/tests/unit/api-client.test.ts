@@ -205,6 +205,103 @@ describe("typed API client", () => {
     });
   });
 
+  it("uses fixed Job control and event routes with strict response parsing", async () => {
+    const jobId = "4c50ff38-9cca-4f91-bae0-f3fe4bc18b6f";
+    const requests: { method: string; url: string }[] = [];
+    const fetcher = vi.fn<typeof fetch>((input, init) => {
+      const url = requestUrl(input);
+      const method = init?.method ?? "GET";
+      requests.push({ method, url });
+      if (method === "DELETE") {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      if (url.includes("/events?")) {
+        return Promise.resolve(
+          jsonResponse({
+            items: [
+              {
+                id: 1,
+                job_id: jobId,
+                status: "queued",
+                message: null,
+                created_at: CHECKED_AT,
+              },
+            ],
+            offset: 0,
+            limit: 50,
+            total: 1,
+          }),
+        );
+      }
+      return Promise.resolve(jsonResponse(jobPayload(jobId)));
+    });
+    const client = new LocalApiClient(
+      new LocalApiTransport(new MutableConnectionSource(), fetcher),
+    );
+
+    await expect(client.getJob(jobId)).resolves.toMatchObject({ uuid: jobId });
+    await expect(client.retryJob(jobId)).resolves.toMatchObject({ uuid: jobId });
+    await expect(client.cancelJob(jobId)).resolves.toMatchObject({ uuid: jobId });
+    await expect(client.getJobEvents(jobId, 0)).resolves.toMatchObject({
+      offset: 0,
+      limit: 50,
+      total: 1,
+    });
+    await expect(client.deleteJob(jobId)).resolves.toBeUndefined();
+
+    expect(requests).toEqual([
+      { method: "GET", url: `http://127.0.0.1:9123/api/v1/jobs/${jobId}` },
+      { method: "POST", url: `http://127.0.0.1:9123/api/v1/jobs/${jobId}/retry` },
+      { method: "POST", url: `http://127.0.0.1:9123/api/v1/jobs/${jobId}/cancel` },
+      {
+        method: "GET",
+        url: `http://127.0.0.1:9123/api/v1/jobs/${jobId}/events?offset=0&limit=50`,
+      },
+      { method: "DELETE", url: `http://127.0.0.1:9123/api/v1/jobs/${jobId}?confirm=true` },
+    ]);
+  });
+
+  it("rejects non-UUID Job route input before fetch", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const client = new LocalApiClient(
+      new LocalApiTransport(new MutableConnectionSource(), fetcher),
+    );
+
+    await expect(client.cancelJob("../health")).rejects.toMatchObject({
+      kind: "invalidResponse",
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects events attributed to a different Job", async () => {
+    const jobId = "4c50ff38-9cca-4f91-bae0-f3fe4bc18b6f";
+    const fetcher = vi.fn<typeof fetch>(() =>
+      Promise.resolve(
+        jsonResponse({
+          items: [
+            {
+              id: 1,
+              job_id: "25274279-9f3f-45f1-8352-79bc38f11cf6",
+              status: "queued",
+              message: null,
+              created_at: CHECKED_AT,
+            },
+          ],
+          offset: 0,
+          limit: 50,
+          total: 1,
+        }),
+      ),
+    );
+    const client = new LocalApiClient(
+      new LocalApiTransport(new MutableConnectionSource(), fetcher),
+    );
+
+    await expect(client.getJobEvents(jobId, 0)).rejects.toMatchObject({
+      kind: "invalidResponse",
+    });
+  });
+
   it("parses a complete connection snapshot from frozen contracts", async () => {
     const connection = new MutableConnectionSource();
     const payloads: Record<string, unknown> = {
@@ -290,6 +387,7 @@ describe("safe HTTP error normalization", () => {
     [404, "notFound"],
     [409, "conflict"],
     [500, "server"],
+    [503, "server"],
   ] as const)("maps HTTP %i to %s", async (status, kind) => {
     const error = await normalizeHttpError(
       jsonResponse(
@@ -386,6 +484,36 @@ function requestUrl(input: URL | RequestInfo): string {
     return input;
   }
   return input instanceof URL ? input.href : input.url;
+}
+
+function jobPayload(uuid: string): Record<string, unknown> {
+  return {
+    uuid,
+    sanitized_display_url: "https://example.test/video",
+    title: "",
+    status: "queued",
+    stage_progress: 0,
+    overall_progress: 0,
+    detected_language: null,
+    attempts: 0,
+    error_code: null,
+    error_message: null,
+    created_at: CHECKED_AT,
+    updated_at: CHECKED_AT,
+    started_at: null,
+    finished_at: null,
+    duration_ms: null,
+    options: {
+      asr_model: "mlx-community/whisper-small-mlx",
+      translate_to: "zh-CN",
+      diarization: true,
+    },
+    execution_count_total: 0,
+    retry_cycle: 0,
+    automatic_requeue_count_in_cycle: 0,
+    next_attempt_at: null,
+    cancel_requested_at: null,
+  };
 }
 
 function capabilities(): Record<string, unknown> {
