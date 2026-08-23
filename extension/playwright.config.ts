@@ -6,6 +6,7 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 60_000,
+  outputDir: "./dist/test-results",
   reporter: [["line"]],
   use: {
     trace: "retain-on-failure",
