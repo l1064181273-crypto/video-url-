@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from lvt.core.jobs import ErrorCode, JobStatus
-from lvt.db.repository import ArtifactRegistrationResult, JobRepository
+from lvt.db.repository import (
+    ArtifactRegistrationResult,
+    AutomaticRequeueResult,
+    JobRepository,
+)
 
 
 def _repository(tmp_path: Path) -> JobRepository:
@@ -139,14 +143,17 @@ def test_reclaimed_job_gets_new_run_id_and_preserves_first_started_at(tmp_path: 
     first = _claim(repository, job_id, now=first_time)
     first_run_id = str(first["active_run_id"])
 
-    assert repository.automatic_requeue(
-        job_id=job_id,
-        run_id=first_run_id,
-        expected_status=JobStatus.DOWNLOADING,
-        error_code=ErrorCode.DOWNLOAD_FAILED,
-        error_message="temporary",
-        next_attempt_at=first_time,
-        now=first_time,
+    assert (
+        repository.automatic_requeue(
+            job_id=job_id,
+            run_id=first_run_id,
+            expected_status=JobStatus.DOWNLOADING,
+            error_code=ErrorCode.DOWNLOAD_FAILED,
+            error_message="temporary",
+            next_attempt_at=first_time,
+            now=first_time,
+        )
+        is AutomaticRequeueResult.REQUEUED
     )
     second = _claim(repository, job_id, now=first_time + timedelta(seconds=1))
 
@@ -161,17 +168,31 @@ def test_stale_run_cannot_update_any_worker_owned_data(tmp_path: Path) -> None:
     first = _claim(repository, job_id)
     stale_run_id = str(first["active_run_id"])
     now = datetime.now(UTC)
-    assert repository.automatic_requeue(
-        job_id=job_id,
-        run_id=stale_run_id,
-        expected_status=JobStatus.DOWNLOADING,
-        error_code=ErrorCode.DOWNLOAD_FAILED,
-        error_message="temporary",
-        next_attempt_at=now,
+    assert (
+        repository.automatic_requeue(
+            job_id=job_id,
+            run_id=stale_run_id,
+            expected_status=JobStatus.DOWNLOADING,
+            error_code=ErrorCode.DOWNLOAD_FAILED,
+            error_message="temporary",
+            next_attempt_at=now,
+        )
+        is AutomaticRequeueResult.REQUEUED
     )
     current = _claim(repository, job_id, now=now + timedelta(seconds=1))
     current_run_id = str(current["active_run_id"])
 
+    assert (
+        repository.automatic_requeue(
+            job_id=job_id,
+            run_id=stale_run_id,
+            expected_status=JobStatus.DOWNLOADING,
+            error_code=ErrorCode.DOWNLOAD_FAILED,
+            error_message="stale",
+            next_attempt_at=now,
+        )
+        is AutomaticRequeueResult.STALE
+    )
     assert not repository.advance_stage(
         job_id,
         stale_run_id,
@@ -213,12 +234,6 @@ def test_stale_run_cannot_update_any_worker_owned_data(tmp_path: Path) -> None:
         )
         is ArtifactRegistrationResult.STALE
     )
-    assert not repository.complete_job(
-        job_id,
-        stale_run_id,
-        JobStatus.EXPORTING,
-    )
-
     persisted = repository.get(job_id)
     assert persisted is not None
     assert persisted["active_run_id"] == current_run_id
@@ -339,33 +354,44 @@ def test_automatic_requeue_is_limited_to_two_per_cycle(tmp_path: Path) -> None:
 
     for expected_count in (1, 2):
         claimed = _claim(repository, job_id, now=now)
-        assert repository.automatic_requeue(
-            job_id=job_id,
-            run_id=str(claimed["active_run_id"]),
-            expected_status=JobStatus.DOWNLOADING,
-            error_code=ErrorCode.DOWNLOAD_FAILED,
-            error_message="temporary",
-            next_attempt_at=now,
-            now=now,
+        assert (
+            repository.automatic_requeue(
+                job_id=job_id,
+                run_id=str(claimed["active_run_id"]),
+                expected_status=JobStatus.DOWNLOADING,
+                error_code=ErrorCode.DOWNLOAD_FAILED,
+                error_message="temporary",
+                next_attempt_at=now,
+                now=now,
+            )
+            is AutomaticRequeueResult.REQUEUED
         )
         persisted = repository.get(job_id)
         assert persisted is not None
         assert persisted["automatic_requeue_count_in_cycle"] == expected_count
 
     third = _claim(repository, job_id, now=now)
-    assert not repository.automatic_requeue(
-        job_id=job_id,
-        run_id=str(third["active_run_id"]),
-        expected_status=JobStatus.DOWNLOADING,
-        error_code=ErrorCode.DOWNLOAD_FAILED,
-        error_message="temporary",
-        next_attempt_at=now,
-        now=now,
+    assert (
+        repository.automatic_requeue(
+            job_id=job_id,
+            run_id=str(third["active_run_id"]),
+            expected_status=JobStatus.DOWNLOADING,
+            error_code=ErrorCode.DOWNLOAD_FAILED,
+            error_message="final automatic failure",
+            next_attempt_at=now,
+            now=now,
+        )
+        is AutomaticRequeueResult.BUDGET_EXHAUSTED_AND_FAILED
     )
     persisted = repository.get(job_id)
     assert persisted is not None
-    assert persisted["status"] == JobStatus.DOWNLOADING.value
+    assert persisted["status"] == JobStatus.FAILED.value
     assert persisted["automatic_requeue_count_in_cycle"] == 2
+    assert persisted["active_run_id"] is None
+    assert persisted["error_code"] == ErrorCode.DOWNLOAD_FAILED.value
+    assert persisted["error_message"] == "final automatic failure"
+    assert persisted["finished_at"] == now.isoformat()
+    assert repository.list_events(job_id)[-1]["status"] == JobStatus.FAILED.value
 
 
 def test_manual_retry_starts_new_cycle_without_resetting_total_execution(
@@ -377,14 +403,17 @@ def test_manual_retry_starts_new_cycle_without_resetting_total_execution(
 
     for _ in range(2):
         claimed = _claim(repository, job_id, now=now)
-        assert repository.automatic_requeue(
-            job_id=job_id,
-            run_id=str(claimed["active_run_id"]),
-            expected_status=JobStatus.DOWNLOADING,
-            error_code=ErrorCode.DOWNLOAD_FAILED,
-            error_message="temporary",
-            next_attempt_at=now,
-            now=now,
+        assert (
+            repository.automatic_requeue(
+                job_id=job_id,
+                run_id=str(claimed["active_run_id"]),
+                expected_status=JobStatus.DOWNLOADING,
+                error_code=ErrorCode.DOWNLOAD_FAILED,
+                error_message="temporary",
+                next_attempt_at=now,
+                now=now,
+            )
+            is AutomaticRequeueResult.REQUEUED
         )
     third = _claim(repository, job_id, now=now)
     assert repository.fail_job(

@@ -4,8 +4,9 @@ import builtins
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -26,6 +27,18 @@ SCHEMA_VERSION = 3
 BUSY_TIMEOUT_MS = 5_000
 DEFAULT_WORKER_CONCURRENCY = 1
 MAX_AUTOMATIC_REQUEUES_PER_CYCLE = 2
+REQUIRED_ARTIFACT_KINDS = frozenset(
+    {
+        "source.txt",
+        "source.srt",
+        "source.vtt",
+        "source.json",
+        "zh-CN.txt",
+        "zh-CN.srt",
+        "zh-CN.vtt",
+        "zh-CN.json",
+    }
+)
 
 _CREATE_V3_TABLES = (
     """
@@ -122,6 +135,25 @@ class ArtifactRegistrationResult(StrEnum):
     STALE = "stale"
 
 
+class ArtifactCompletionResult(StrEnum):
+    COMPLETED = "completed"
+    CONFLICT = "conflict"
+    STALE = "stale"
+
+
+class AutomaticRequeueResult(StrEnum):
+    REQUEUED = "requeued"
+    BUDGET_EXHAUSTED_AND_FAILED = "budget_exhausted_and_failed"
+    STALE = "stale"
+
+
+@dataclass(frozen=True)
+class ArtifactSpec:
+    artifact_id: str
+    kind: str
+    path: str
+
+
 class JobRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -154,8 +186,14 @@ class JobRepository:
         finally:
             connection.close()
 
-    def create(self, url: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
-        now = datetime.now(UTC).isoformat()
+    def create(
+        self,
+        url: str,
+        options: dict[str, Any] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        timestamp = self._timestamp(now)
         job_id = str(uuid.uuid4())
         with self._connect() as connection:
             connection.execute(
@@ -169,15 +207,15 @@ class JobRepository:
                     job_id,
                     url,
                     sanitize_display_url(url),
-                    now,
-                    now,
-                    now,
+                    timestamp,
+                    timestamp,
+                    timestamp,
                     json.dumps(options or {}, ensure_ascii=False, sort_keys=True),
                 ),
             )
             connection.execute(
                 "INSERT INTO job_events (job_id, status, created_at) VALUES (?, 'queued', ?)",
-                (job_id, now),
+                (job_id, timestamp),
             )
         result = self.get(job_id)
         if result is None:
@@ -468,20 +506,66 @@ class JobRepository:
             )
         return True
 
-    def complete_job(
+    def complete_job_with_artifacts(
         self,
+        *,
         job_id: str,
         run_id: str,
-        expected_status: JobStatus,
-        *,
+        artifacts: Sequence[ArtifactSpec],
         now: datetime | None = None,
-    ) -> bool:
-        self._require_status(expected_status)
-        if not can_transition(expected_status, JobStatus.COMPLETED):
-            raise ValueError("expected_status cannot transition to completed")
+    ) -> ArtifactCompletionResult:
+        self._validate_completion_artifacts(artifacts)
         timestamp = self._timestamp(now)
 
         with self._write_transaction() as connection:
+            owner = connection.execute(
+                """
+                SELECT 1
+                FROM jobs
+                WHERE uuid = ? AND active_run_id = ? AND status = ?
+                """,
+                (job_id, run_id, JobStatus.EXPORTING.value),
+            ).fetchone()
+            if owner is None:
+                return ArtifactCompletionResult.STALE
+
+            existing_ids: set[str] = set()
+            for artifact in artifacts:
+                rows = connection.execute(
+                    """
+                    SELECT id, job_id, kind, path
+                    FROM artifacts
+                    WHERE id = ? OR (job_id = ? AND kind = ?)
+                    """,
+                    (artifact.artifact_id, job_id, artifact.kind),
+                ).fetchall()
+                for existing in rows:
+                    if (
+                        existing["id"] != artifact.artifact_id
+                        or existing["job_id"] != job_id
+                        or existing["kind"] != artifact.kind
+                        or existing["path"] != artifact.path
+                    ):
+                        return ArtifactCompletionResult.CONFLICT
+                    existing_ids.add(artifact.artifact_id)
+
+            for artifact in artifacts:
+                if artifact.artifact_id in existing_ids:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO artifacts (id, job_id, kind, path, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        artifact.artifact_id,
+                        job_id,
+                        artifact.kind,
+                        artifact.path,
+                        timestamp,
+                    ),
+                )
+
             cursor = connection.execute(
                 """
                 UPDATE jobs
@@ -501,19 +585,19 @@ class JobRepository:
                     timestamp,
                     job_id,
                     run_id,
-                    expected_status.value,
+                    JobStatus.EXPORTING.value,
                 ),
             )
             if cursor.rowcount != 1:
-                return False
+                raise RuntimeError("artifact completion lost its exporting CAS")
             self._insert_event(
                 connection,
                 job_id,
                 JobEventType.COMPLETED.value,
                 timestamp,
-                {"run_id": run_id},
+                {"run_id": run_id, "artifact_count": len(artifacts)},
             )
-        return True
+        return ArtifactCompletionResult.COMPLETED
 
     def automatic_requeue(
         self,
@@ -525,7 +609,7 @@ class JobRepository:
         error_message: str,
         next_attempt_at: datetime,
         now: datetime | None = None,
-    ) -> bool:
+    ) -> AutomaticRequeueResult:
         self._require_active_status(expected_status)
         self._require_error_code(error_code)
         if not ERROR_POLICIES[error_code].auto_requeue:
@@ -534,6 +618,58 @@ class JobRepository:
         next_timestamp = self._timestamp(next_attempt_at)
 
         with self._write_transaction() as connection:
+            current = connection.execute(
+                """
+                SELECT automatic_requeue_count_in_cycle
+                FROM jobs
+                WHERE uuid = ?
+                  AND active_run_id = ?
+                  AND status = ?
+                """,
+                (job_id, run_id, expected_status.value),
+            ).fetchone()
+            if current is None:
+                return AutomaticRequeueResult.STALE
+
+            if current["automatic_requeue_count_in_cycle"] >= MAX_AUTOMATIC_REQUEUES_PER_CYCLE:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        active_run_id = NULL,
+                        next_attempt_at = NULL,
+                        error_code = ?,
+                        error_message = ?,
+                        updated_at = ?,
+                        finished_at = ?
+                    WHERE uuid = ? AND active_run_id = ? AND status = ?
+                    """,
+                    (
+                        JobStatus.FAILED.value,
+                        error_code.value,
+                        error_message,
+                        timestamp,
+                        timestamp,
+                        job_id,
+                        run_id,
+                        expected_status.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("automatic retry exhaustion lost its run CAS")
+                self._insert_event(
+                    connection,
+                    job_id,
+                    JobEventType.FAILED.value,
+                    timestamp,
+                    {
+                        "run_id": run_id,
+                        "error_code": error_code.value,
+                        "reason": "automatic_requeue_budget_exhausted",
+                    },
+                )
+                return AutomaticRequeueResult.BUDGET_EXHAUSTED_AND_FAILED
+
             cursor = connection.execute(
                 """
                 UPDATE jobs
@@ -547,10 +683,7 @@ class JobRepository:
                     finished_at = NULL,
                     error_code = NULL,
                     error_message = NULL
-                WHERE uuid = ?
-                  AND active_run_id = ?
-                  AND status = ?
-                  AND automatic_requeue_count_in_cycle < ?
+                WHERE uuid = ? AND active_run_id = ? AND status = ?
                 """,
                 (
                     JobStatus.QUEUED.value,
@@ -559,11 +692,10 @@ class JobRepository:
                     job_id,
                     run_id,
                     expected_status.value,
-                    MAX_AUTOMATIC_REQUEUES_PER_CYCLE,
                 ),
             )
             if cursor.rowcount != 1:
-                return False
+                raise RuntimeError("automatic requeue lost its run CAS")
             self._insert_event(
                 connection,
                 job_id,
@@ -575,7 +707,7 @@ class JobRepository:
                     "error_message": error_message,
                 },
             )
-        return True
+        return AutomaticRequeueResult.REQUEUED
 
     def manual_retry(
         self,
@@ -881,11 +1013,29 @@ class JobRepository:
             raise ValueError(f"{field} must be an integer from 0 to 100")
 
     @staticmethod
+    def _validate_completion_artifacts(artifacts: Sequence[ArtifactSpec]) -> None:
+        if len(artifacts) != len(REQUIRED_ARTIFACT_KINDS):
+            raise ValueError("completion requires exactly eight artifacts")
+        kinds = [artifact.kind for artifact in artifacts]
+        if len(set(kinds)) != len(kinds) or set(kinds) != REQUIRED_ARTIFACT_KINDS:
+            raise ValueError("completion requires the exact artifact kinds")
+        artifact_ids = [artifact.artifact_id for artifact in artifacts]
+        if len(set(artifact_ids)) != len(artifact_ids):
+            raise ValueError("completion requires unique artifact ids")
+        if any(
+            not artifact.artifact_id.strip()
+            or not artifact.kind.strip()
+            or not artifact.path.strip()
+            for artifact in artifacts
+        ):
+            raise ValueError("completion artifacts require non-empty fields")
+
+    @staticmethod
     def _timestamp(value: datetime | None = None) -> str:
         timestamp = value or datetime.now(UTC)
         if timestamp.tzinfo is None:
             raise ValueError("timestamps must include timezone information")
-        return timestamp.isoformat()
+        return timestamp.astimezone(UTC).isoformat()
 
     @staticmethod
     def _decode_row(row: sqlite3.Row) -> dict[str, Any]:
