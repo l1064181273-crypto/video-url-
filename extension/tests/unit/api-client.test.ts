@@ -158,6 +158,53 @@ describe("local API transport security", () => {
 });
 
 describe("typed API client", () => {
+  it("submits batch URLs and JobOptions as authenticated JSON", async () => {
+    const requests: { init: RequestInit; url: string }[] = [];
+    const fetcher = vi.fn<typeof fetch>((input, init) => {
+      requests.push({ url: requestUrl(input), init: init ?? {} });
+      return Promise.resolve(
+        jsonResponse({
+          accepted: [],
+          rejected: [
+            {
+              url: "http://127.0.0.1/private",
+              error_code: "INVALID_URL",
+              message: "local targets are not allowed",
+            },
+          ],
+        }),
+      );
+    });
+    const client = new LocalApiClient(
+      new LocalApiTransport(new MutableConnectionSource(), fetcher),
+    );
+
+    const result = await client.createJobs(
+      ["https://example.test/video", "http://127.0.0.1/private"],
+      {
+        asrModel: "mlx-community/whisper-small-mlx",
+        translateTo: "zh-CN",
+        diarization: false,
+      },
+    );
+
+    expect(result.rejected[0]?.url).toBe("http://127.0.0.1/private");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("http://127.0.0.1:9123/api/v1/jobs");
+    expect(requests[0]?.init.method).toBe("POST");
+    expect(new Headers(requests[0]?.init.headers).get("Content-Type")).toBe("application/json");
+    const requestBody = requests[0]?.init.body;
+    expect(typeof requestBody).toBe("string");
+    expect(JSON.parse(requestBody as string)).toEqual({
+      urls: ["https://example.test/video", "http://127.0.0.1/private"],
+      options: {
+        asr_model: "mlx-community/whisper-small-mlx",
+        translate_to: "zh-CN",
+        diarization: false,
+      },
+    });
+  });
+
   it("parses a complete connection snapshot from frozen contracts", async () => {
     const connection = new MutableConnectionSource();
     const payloads: Record<string, unknown> = {

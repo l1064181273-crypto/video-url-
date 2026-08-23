@@ -1,4 +1,4 @@
-export const CONTRACT_VERSION = "phase-3-checkpoint-2";
+export const CONTRACT_VERSION = "phase-3-checkpoint-3";
 
 export const JOB_STATUSES = [
   "queued",
@@ -103,6 +103,17 @@ export type Job = {
   automaticRequeueCountInCycle: number;
   nextAttemptAt: string | null;
   cancelRequestedAt: string | null;
+};
+
+export type RejectedJob = {
+  url: string;
+  errorCode: "INVALID_URL";
+  message: string;
+};
+
+export type CreateJobsResponse = {
+  accepted: Job[];
+  rejected: RejectedJob[];
 };
 
 export const CAPABILITY_COMPONENTS = [
@@ -246,6 +257,30 @@ export function parseJobsResponse(value: unknown): Job[] {
     throw new ContractError("$", "expected an array");
   }
   return value.map((job, index) => parseJob(job, `$[${String(index)}]`));
+}
+
+export function parseCreateJobsResponse(value: unknown): CreateJobsResponse {
+  const root = expectRecord(value, "$");
+  expectExactKeys(root, "$", ["accepted", "rejected"]);
+  if (!Array.isArray(root.accepted) || !Array.isArray(root.rejected)) {
+    throw new ContractError("$", "expected accepted and rejected arrays");
+  }
+  return {
+    accepted: root.accepted.map((job, index) => parseJob(job, `$.accepted[${String(index)}]`)),
+    rejected: root.rejected.map((value, index) => {
+      const path = `$.rejected[${String(index)}]`;
+      const rejected = expectRecord(value, path);
+      expectExactKeys(rejected, path, ["url", "error_code", "message"]);
+      if (rejected.error_code !== "INVALID_URL") {
+        throw new ContractError(`${path}.error_code`, "expected INVALID_URL");
+      }
+      return {
+        url: expectNonEmptyString(rejected.url, `${path}.url`),
+        errorCode: "INVALID_URL",
+        message: expectNonEmptyString(rejected.message, `${path}.message`),
+      };
+    }),
+  };
 }
 
 export function parseApiErrorResponse(value: unknown): ApiErrorResponse {

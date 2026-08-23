@@ -59,11 +59,67 @@
           </div>
         </form>
       </section>
-      <section aria-labelledby="workspace-title">
-        <h2 id="workspace-title">任务</h2>
-        <div class="empty-state">
-          <p>暂无任务</p>
+      <section class="submission-section" aria-labelledby="submission-title">
+        <div class="section-heading">
+          <h2 id="submission-title">批量提交</h2>
+          <span id="url-count" class="input-summary">有效 0 / 无效 0</span>
         </div>
+        <form id="job-form" novalidate>
+          <label for="job-urls">
+            <span>视频 URL</span>
+            <textarea
+              id="job-urls"
+              name="urls"
+              rows="5"
+              spellcheck="false"
+              placeholder="一行一个 HTTP 或 HTTPS URL"
+            ></textarea>
+          </label>
+          <p id="url-limit" class="form-message" role="status"></p>
+          <ol id="invalid-urls" class="validation-list" aria-label="无效 URL"></ol>
+          <div class="job-options">
+            <label for="asr-model">
+              <span>ASR 模型</span>
+              <input
+                id="asr-model"
+                name="asrModel"
+                value="mlx-community/whisper-small-mlx"
+                required
+              />
+            </label>
+            <label>
+              <span>目标语言</span>
+              <span class="fixed-value">zh-CN</span>
+            </label>
+          </div>
+          <label class="toggle-field" for="diarization">
+            <input id="diarization" name="diarization" type="checkbox" checked />
+            <span>识别说话人</span>
+          </label>
+          <div class="submission-actions">
+            <button id="submit-jobs" type="submit" disabled>提交任务</button>
+            <p id="submission-result" class="form-message" role="status"></p>
+          </div>
+          <ol id="server-rejections" class="validation-list" aria-label="后端拒绝的 URL"></ol>
+        </form>
+      </section>
+      <section class="jobs-section" aria-labelledby="workspace-title">
+        <div class="section-heading">
+          <h2 id="workspace-title">任务</h2>
+          <span id="job-count" class="input-summary">0 个</span>
+        </div>
+        <div id="job-filters" class="filter-tabs" role="tablist" aria-label="任务筛选">
+          <button type="button" role="tab" data-filter="all" aria-selected="true">全部</button>
+          <button type="button" role="tab" data-filter="processing" aria-selected="false">
+            处理中
+          </button>
+          <button type="button" role="tab" data-filter="completed" aria-selected="false">
+            已完成
+          </button>
+          <button type="button" role="tab" data-filter="failed" aria-selected="false">失败</button>
+        </div>
+        <p id="jobs-empty" class="empty-state">尚未提交任务</p>
+        <div id="job-list" class="job-list" aria-live="polite"></div>
       </section>
     </main>
     <script type="module" src="/src/sidepanel.ts"></script>

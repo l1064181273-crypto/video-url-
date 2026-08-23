@@ -8,6 +8,7 @@ import {
   JOB_STATUSES,
   parseApiErrorResponse,
   parseCapabilitiesResponse,
+  parseCreateJobsResponse,
   parseHealthResponse,
   parseJobsResponse,
   parseSettingsResponse,
@@ -128,6 +129,28 @@ describe("frozen public DTOs", () => {
     expect(parsed[0]).not.toHaveProperty("active_run_id");
   });
 
+  it("parses accepted and rejected batch submission results", () => {
+    const parsed = parseCreateJobsResponse({
+      accepted: [validJob()],
+      rejected: [
+        {
+          url: "http://127.0.0.1/private",
+          error_code: "INVALID_URL",
+          message: "local targets are not allowed",
+        },
+      ],
+    });
+
+    expect(parsed.accepted[0]?.uuid).toBe("4c50ff38-9cca-4f91-bae0-f3fe4bc18b6f");
+    expect(parsed.rejected).toEqual([
+      {
+        url: "http://127.0.0.1/private",
+        errorCode: "INVALID_URL",
+        message: "local targets are not allowed",
+      },
+    ]);
+  });
+
   it("locks every Job status and public error code", () => {
     expect(JOB_STATUSES).toHaveLength(12);
     expect(new Set(JOB_STATUSES).size).toBe(JOB_STATUSES.length);
@@ -177,6 +200,14 @@ describe("frozen public DTOs", () => {
             error_code: "SECRET_BACKEND_ERROR",
             message: "bad",
           },
+        }),
+    ],
+    [
+      "unknown rejected code",
+      () =>
+        parseCreateJobsResponse({
+          accepted: [],
+          rejected: [{ url: "https://example.test", error_code: "INTERNAL_ERROR", message: "x" }],
         }),
     ],
   ])("rejects %s", (_label, parseInvalid) => {

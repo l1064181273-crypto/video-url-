@@ -1,9 +1,12 @@
 import {
   type CapabilitiesResponse,
+  type CreateJobsResponse,
   type HealthResponse,
   type Job,
+  type JobOptions,
   type SettingsResponse,
   parseCapabilitiesResponse,
+  parseCreateJobsResponse,
   parseHealthResponse,
   parseJobsResponse,
   parseSettingsResponse,
@@ -33,6 +36,7 @@ export type ConnectionSnapshot = {
 
 type RequestOptions = {
   authenticated?: boolean;
+  body?: unknown;
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   signal?: AbortSignal | undefined;
 };
@@ -106,6 +110,9 @@ export class LocalApiTransport {
       }
       headers.set("X-LVT-Token", connection.token);
     }
+    if (options.body !== undefined) {
+      headers.set("Content-Type", "application/json");
+    }
     let response: Response;
     try {
       const requestInit: RequestInit = {
@@ -113,6 +120,9 @@ export class LocalApiTransport {
         headers,
         redirect: "error",
       };
+      if (options.body !== undefined) {
+        requestInit.body = JSON.stringify(options.body);
+      }
       if (options.signal !== undefined) {
         requestInit.signal = options.signal;
       }
@@ -161,6 +171,28 @@ export class LocalApiClient {
     return parseContract(
       await this.transport.requestJson("/api/v1/jobs", "jobs", { signal }),
       parseJobsResponse,
+    );
+  }
+
+  async createJobs(
+    urls: readonly string[],
+    options: JobOptions,
+    signal?: AbortSignal,
+  ): Promise<CreateJobsResponse> {
+    return parseContract(
+      await this.transport.requestJson("/api/v1/jobs", "jobs", {
+        method: "POST",
+        body: {
+          urls,
+          options: {
+            asr_model: options.asrModel,
+            translate_to: options.translateTo,
+            diarization: options.diarization,
+          },
+        },
+        signal,
+      }),
+      parseCreateJobsResponse,
     );
   }
 
