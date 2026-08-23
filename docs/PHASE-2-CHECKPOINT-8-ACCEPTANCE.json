@@ -1,0 +1,1281 @@
+{
+  "schema_version": 1,
+  "checkpoint": "phase-2-checkpoint-8",
+  "started_at": "2026-08-23T10:05:36.955849+00:00",
+  "status": "passed",
+  "environment": {
+    "python": "3.11.15 (main, Jul 23 2026, 14:34:23) [Clang 22.1.3 ]",
+    "platform": "darwin",
+    "worker_process_model": "single-uvicorn-process",
+    "asr_model": "mlx-community/whisper-tiny",
+    "ollama_url": "http://127.0.0.1:11434",
+    "ollama_models": [
+      "hf.co/tencent/Hy-MT2-1.8B-GGUF:Q4_K_M",
+      "hy-mt2:1.8b-q4km-fixed",
+      "qwen2.5:1.5b"
+    ]
+  },
+  "scenarios": {
+    "concurrency_1": {
+      "configured": 1,
+      "observed_active": 1,
+      "job_ids": [
+        "a366c908-41a9-4e09-9bc5-83cd2d0c4f43",
+        "9f078184-40f8-4bf5-b7fb-330d6c44059f"
+      ],
+      "final_statuses": [
+        "cancelled",
+        "cancelled"
+      ]
+    },
+    "concurrency_2": {
+      "settings_response": {
+        "worker_concurrency": 2,
+        "runtime_effect": "new_claims_only"
+      },
+      "configured": 2,
+      "observed_active": 2,
+      "job_ids": [
+        "ad72f54a-5474-4dda-8b82-9a9c19213810",
+        "bd402b6e-c45a-4d3a-9d86-299fc17bc432"
+      ],
+      "final_statuses": [
+        "cancelled",
+        "cancelled"
+      ]
+    },
+    "cancel": {
+      "job_ids": [
+        "a366c908-41a9-4e09-9bc5-83cd2d0c4f43",
+        "9f078184-40f8-4bf5-b7fb-330d6c44059f",
+        "ad72f54a-5474-4dda-8b82-9a9c19213810",
+        "bd402b6e-c45a-4d3a-9d86-299fc17bc432"
+      ],
+      "all_cancelled": true,
+      "events": {
+        "a366c908-41a9-4e09-9bc5-83cd2d0c4f43": [
+          {
+            "id": 1,
+            "job_id": "a366c908-41a9-4e09-9bc5-83cd2d0c4f43",
+            "status": "queued",
+            "message": null,
+            "created_at": "2026-08-23T10:05:38.614822+00:00"
+          },
+          {
+            "id": 3,
+            "job_id": "a366c908-41a9-4e09-9bc5-83cd2d0c4f43",
+            "status": "claimed",
+            "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"44d646ae-80f4-483c-b460-92f9bf893f07\"}",
+            "created_at": "2026-08-23T10:05:38.621503+00:00"
+          },
+          {
+            "id": 4,
+            "job_id": "a366c908-41a9-4e09-9bc5-83cd2d0c4f43",
+            "status": "cancel_requested",
+            "message": "{\"from_status\": \"downloading\"}",
+            "created_at": "2026-08-23T10:05:39.379493+00:00"
+          },
+          {
+            "id": 6,
+            "job_id": "a366c908-41a9-4e09-9bc5-83cd2d0c4f43",
+            "status": "cancelled",
+            "message": "{\"run_id\": \"44d646ae-80f4-483c-b460-92f9bf893f07\"}",
+            "created_at": "2026-08-23T10:05:39.452688+00:00"
+          }
+        ],
+        "9f078184-40f8-4bf5-b7fb-330d6c44059f": [
+          {
+            "id": 2,
+            "job_id": "9f078184-40f8-4bf5-b7fb-330d6c44059f",
+            "status": "queued",
+            "message": null,
+            "created_at": "2026-08-23T10:05:38.618806+00:00"
+          },
+          {
+            "id": 5,
+            "job_id": "9f078184-40f8-4bf5-b7fb-330d6c44059f",
+            "status": "cancelled",
+            "message": "{\"from_status\": \"queued\"}",
+            "created_at": "2026-08-23T10:05:39.387903+00:00"
+          }
+        ],
+        "ad72f54a-5474-4dda-8b82-9a9c19213810": [
+          {
+            "id": 7,
+            "job_id": "ad72f54a-5474-4dda-8b82-9a9c19213810",
+            "status": "queued",
+            "message": null,
+            "created_at": "2026-08-23T10:05:39.649949+00:00"
+          },
+          {
+            "id": 9,
+            "job_id": "ad72f54a-5474-4dda-8b82-9a9c19213810",
+            "status": "claimed",
+            "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"0b9c8d45-e028-48c2-93c8-b34b0b67cff7\"}",
+            "created_at": "2026-08-23T10:05:39.660776+00:00"
+          },
+          {
+            "id": 11,
+            "job_id": "ad72f54a-5474-4dda-8b82-9a9c19213810",
+            "status": "cancel_requested",
+            "message": "{\"from_status\": \"downloading\"}",
+            "created_at": "2026-08-23T10:05:40.247325+00:00"
+          },
+          {
+            "id": 13,
+            "job_id": "ad72f54a-5474-4dda-8b82-9a9c19213810",
+            "status": "cancelled",
+            "message": "{\"run_id\": \"0b9c8d45-e028-48c2-93c8-b34b0b67cff7\"}",
+            "created_at": "2026-08-23T10:05:40.295649+00:00"
+          }
+        ],
+        "bd402b6e-c45a-4d3a-9d86-299fc17bc432": [
+          {
+            "id": 8,
+            "job_id": "bd402b6e-c45a-4d3a-9d86-299fc17bc432",
+            "status": "queued",
+            "message": null,
+            "created_at": "2026-08-23T10:05:39.655691+00:00"
+          },
+          {
+            "id": 10,
+            "job_id": "bd402b6e-c45a-4d3a-9d86-299fc17bc432",
+            "status": "claimed",
+            "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"7ef007e0-918e-47ae-b988-0b9a28c3d784\"}",
+            "created_at": "2026-08-23T10:05:39.924939+00:00"
+          },
+          {
+            "id": 12,
+            "job_id": "bd402b6e-c45a-4d3a-9d86-299fc17bc432",
+            "status": "cancel_requested",
+            "message": "{\"from_status\": \"downloading\"}",
+            "created_at": "2026-08-23T10:05:40.256749+00:00"
+          },
+          {
+            "id": 14,
+            "job_id": "bd402b6e-c45a-4d3a-9d86-299fc17bc432",
+            "status": "cancelled",
+            "message": "{\"run_id\": \"7ef007e0-918e-47ae-b988-0b9a28c3d784\"}",
+            "created_at": "2026-08-23T10:05:40.362483+00:00"
+          }
+        ]
+      }
+    },
+    "recovery": {
+      "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+      "before_restart_status": "downloading",
+      "first_service_stop_return_code": -15,
+      "final_status": "completed",
+      "execution_count_total": 2,
+      "interrupted_event_count": 1,
+      "events": [
+        {
+          "id": 15,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "queued",
+          "message": null,
+          "created_at": "2026-08-23T10:05:40.501690+00:00"
+        },
+        {
+          "id": 16,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"a86de723-b808-4b68-a374-dbd47d490ba5\"}",
+          "created_at": "2026-08-23T10:05:40.512498+00:00"
+        },
+        {
+          "id": 17,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "interrupted",
+          "message": "{\"from_status\": \"downloading\", \"old_run_id\": \"a86de723-b808-4b68-a374-dbd47d490ba5\", \"reason\": \"startup_recovery\"}",
+          "created_at": "2026-08-23T10:05:47.410452+00:00"
+        },
+        {
+          "id": 18,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"95b77707-1f65-4739-befc-09f44f99d716\"}",
+          "created_at": "2026-08-23T10:05:47.478337+00:00"
+        },
+        {
+          "id": 19,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "extracting",
+          "message": "{\"from_status\": \"downloading\", \"run_id\": \"95b77707-1f65-4739-befc-09f44f99d716\"}",
+          "created_at": "2026-08-23T10:05:48.231965+00:00"
+        },
+        {
+          "id": 20,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "transcribing",
+          "message": "{\"from_status\": \"extracting\", \"run_id\": \"95b77707-1f65-4739-befc-09f44f99d716\"}",
+          "created_at": "2026-08-23T10:05:48.332288+00:00"
+        },
+        {
+          "id": 21,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "diarizing",
+          "message": "{\"from_status\": \"transcribing\", \"run_id\": \"95b77707-1f65-4739-befc-09f44f99d716\"}",
+          "created_at": "2026-08-23T10:05:52.786307+00:00"
+        },
+        {
+          "id": 22,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "segmenting",
+          "message": "{\"from_status\": \"diarizing\", \"run_id\": \"95b77707-1f65-4739-befc-09f44f99d716\"}",
+          "created_at": "2026-08-23T10:05:53.338787+00:00"
+        },
+        {
+          "id": 23,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "translating",
+          "message": "{\"from_status\": \"segmenting\", \"run_id\": \"95b77707-1f65-4739-befc-09f44f99d716\"}",
+          "created_at": "2026-08-23T10:05:53.363964+00:00"
+        },
+        {
+          "id": 24,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "exporting",
+          "message": "{\"from_status\": \"translating\", \"run_id\": \"95b77707-1f65-4739-befc-09f44f99d716\"}",
+          "created_at": "2026-08-23T10:05:55.245590+00:00"
+        },
+        {
+          "id": 25,
+          "job_id": "bd5304b2-a088-4c05-a594-ab31c4e14273",
+          "status": "completed",
+          "message": "{\"artifact_count\": 8, \"run_id\": \"95b77707-1f65-4739-befc-09f44f99d716\"}",
+          "created_at": "2026-08-23T10:05:55.303851+00:00"
+        }
+      ]
+    },
+    "batch_retry": {
+      "submitted_together": [
+        "207fa2f9-0209-4a90-9388-6608178448a6",
+        "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f"
+      ],
+      "initial_results": {
+        "207fa2f9-0209-4a90-9388-6608178448a6": "completed",
+        "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f": "failed"
+      },
+      "failure_error_code": "DOWNLOAD_FAILED",
+      "automatic_requeues": 2,
+      "execution_count_before_manual_retry": 3,
+      "manual_retry_response_status": "queued",
+      "final_status": "completed",
+      "final_retry_cycle": 1,
+      "final_execution_count_total": 4,
+      "events": [
+        {
+          "id": 27,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "queued",
+          "message": null,
+          "created_at": "2026-08-23T10:05:55.489613+00:00"
+        },
+        {
+          "id": 29,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"0c79988e-5e6a-4b21-ac7b-f0415f4c447b\"}",
+          "created_at": "2026-08-23T10:05:55.754971+00:00"
+        },
+        {
+          "id": 32,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "automatic_requeued",
+          "message": "{\"error_code\": \"DOWNLOAD_FAILED\", \"error_message\": \"媒体下载失败：ERROR: [generic] flaky: Unable to download webpage: HTTP Error 503: controlled retry failure (caused by <HTTPError 503: controlled retry failure>)\\n\", \"run_id\": \"0c79988e-5e6a-4b21-ac7b-f0415f4c447b\"}",
+          "created_at": "2026-08-23T10:05:56.142882+00:00"
+        },
+        {
+          "id": 38,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"bc41c618-8e04-4ad8-a697-64ac41e5d331\"}",
+          "created_at": "2026-08-23T10:05:58.206100+00:00"
+        },
+        {
+          "id": 39,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "automatic_requeued",
+          "message": "{\"error_code\": \"DOWNLOAD_FAILED\", \"error_message\": \"媒体下载失败：ERROR: [generic] flaky: Unable to download webpage: HTTP Error 503: controlled retry failure (caused by <HTTPError 503: controlled retry failure>)\\n\", \"run_id\": \"bc41c618-8e04-4ad8-a697-64ac41e5d331\"}",
+          "created_at": "2026-08-23T10:05:58.917766+00:00"
+        },
+        {
+          "id": 40,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"7959856a-43eb-40a4-9c77-88874e35e2b1\"}",
+          "created_at": "2026-08-23T10:06:08.940634+00:00"
+        },
+        {
+          "id": 41,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "failed",
+          "message": "{\"error_code\": \"DOWNLOAD_FAILED\", \"reason\": \"automatic_requeue_budget_exhausted\", \"run_id\": \"7959856a-43eb-40a4-9c77-88874e35e2b1\"}",
+          "created_at": "2026-08-23T10:06:09.675910+00:00"
+        },
+        {
+          "id": 42,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "manual_retry",
+          "message": "{\"from_status\": \"failed\"}",
+          "created_at": "2026-08-23T10:06:09.778496+00:00"
+        },
+        {
+          "id": 43,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"faa8200b-d82b-4d56-a588-a5005e6100c0\"}",
+          "created_at": "2026-08-23T10:06:09.778939+00:00"
+        },
+        {
+          "id": 44,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "extracting",
+          "message": "{\"from_status\": \"downloading\", \"run_id\": \"faa8200b-d82b-4d56-a588-a5005e6100c0\"}",
+          "created_at": "2026-08-23T10:06:10.496729+00:00"
+        },
+        {
+          "id": 45,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "transcribing",
+          "message": "{\"from_status\": \"extracting\", \"run_id\": \"faa8200b-d82b-4d56-a588-a5005e6100c0\"}",
+          "created_at": "2026-08-23T10:06:10.577649+00:00"
+        },
+        {
+          "id": 46,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "diarizing",
+          "message": "{\"from_status\": \"transcribing\", \"run_id\": \"faa8200b-d82b-4d56-a588-a5005e6100c0\"}",
+          "created_at": "2026-08-23T10:06:10.726015+00:00"
+        },
+        {
+          "id": 47,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "segmenting",
+          "message": "{\"from_status\": \"diarizing\", \"run_id\": \"faa8200b-d82b-4d56-a588-a5005e6100c0\"}",
+          "created_at": "2026-08-23T10:06:11.094277+00:00"
+        },
+        {
+          "id": 48,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "translating",
+          "message": "{\"from_status\": \"segmenting\", \"run_id\": \"faa8200b-d82b-4d56-a588-a5005e6100c0\"}",
+          "created_at": "2026-08-23T10:06:11.132826+00:00"
+        },
+        {
+          "id": 49,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "exporting",
+          "message": "{\"from_status\": \"translating\", \"run_id\": \"faa8200b-d82b-4d56-a588-a5005e6100c0\"}",
+          "created_at": "2026-08-23T10:06:11.852834+00:00"
+        },
+        {
+          "id": 50,
+          "job_id": "9bcb5da9-fc19-4303-99bf-0e7e2e02ff5f",
+          "status": "completed",
+          "message": "{\"artifact_count\": 8, \"run_id\": \"faa8200b-d82b-4d56-a588-a5005e6100c0\"}",
+          "created_at": "2026-08-23T10:06:11.908528+00:00"
+        }
+      ]
+    },
+    "same_title_isolation": {
+      "title": "Same Title",
+      "job_ids": [
+        "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+        "15ed7f99-211e-4614-8b5b-dad8e8e97960"
+      ],
+      "relative_job_roots": [
+        "work/27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+        "work/15ed7f99-211e-4614-8b5b-dad8e8e97960"
+      ],
+      "isolated": true
+    }
+  },
+  "samples": [
+    {
+      "label": "english",
+      "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+      "title": "English Single",
+      "duration_ms": 14016,
+      "detected_language": "en",
+      "segment_count": 5,
+      "speakers": [
+        "Speaker 1"
+      ],
+      "engine_versions": {
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+      },
+      "warnings": [],
+      "execution_count_total": 1,
+      "retry_cycle": 0,
+      "automatic_requeue_count_in_cycle": 0,
+      "events": [
+        {
+          "id": 26,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "queued",
+          "message": null,
+          "created_at": "2026-08-23T10:05:55.483021+00:00"
+        },
+        {
+          "id": 28,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"934b9a27-2f61-4422-b119-24ac13b28d54\"}",
+          "created_at": "2026-08-23T10:05:55.494864+00:00"
+        },
+        {
+          "id": 30,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "extracting",
+          "message": "{\"from_status\": \"downloading\", \"run_id\": \"934b9a27-2f61-4422-b119-24ac13b28d54\"}",
+          "created_at": "2026-08-23T10:05:56.063667+00:00"
+        },
+        {
+          "id": 31,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "transcribing",
+          "message": "{\"from_status\": \"extracting\", \"run_id\": \"934b9a27-2f61-4422-b119-24ac13b28d54\"}",
+          "created_at": "2026-08-23T10:05:56.121911+00:00"
+        },
+        {
+          "id": 33,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "diarizing",
+          "message": "{\"from_status\": \"transcribing\", \"run_id\": \"934b9a27-2f61-4422-b119-24ac13b28d54\"}",
+          "created_at": "2026-08-23T10:05:56.264836+00:00"
+        },
+        {
+          "id": 34,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "segmenting",
+          "message": "{\"from_status\": \"diarizing\", \"run_id\": \"934b9a27-2f61-4422-b119-24ac13b28d54\"}",
+          "created_at": "2026-08-23T10:05:56.698078+00:00"
+        },
+        {
+          "id": 35,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "translating",
+          "message": "{\"from_status\": \"segmenting\", \"run_id\": \"934b9a27-2f61-4422-b119-24ac13b28d54\"}",
+          "created_at": "2026-08-23T10:05:56.721193+00:00"
+        },
+        {
+          "id": 36,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "exporting",
+          "message": "{\"from_status\": \"translating\", \"run_id\": \"934b9a27-2f61-4422-b119-24ac13b28d54\"}",
+          "created_at": "2026-08-23T10:05:57.443813+00:00"
+        },
+        {
+          "id": 37,
+          "job_id": "207fa2f9-0209-4a90-9388-6608178448a6",
+          "status": "completed",
+          "message": "{\"artifact_count\": 8, \"run_id\": \"934b9a27-2f61-4422-b119-24ac13b28d54\"}",
+          "created_at": "2026-08-23T10:05:57.487096+00:00"
+        }
+      ],
+      "artifacts": [
+        {
+          "id": "c5d51769-7eba-54dd-ae55-97bbd4557230",
+          "kind": "source.json",
+          "byte_size": 1939,
+          "sha256": "6527fd919520f2b74c1cbdee65f418f6ca4e3df10699fd2979bf79c68fb1917c",
+          "content_disposition": null
+        },
+        {
+          "id": "b901534f-e8e7-55ca-8743-4d1cae92ef9e",
+          "kind": "source.srt",
+          "byte_size": 454,
+          "sha256": "7a8fa5f372f63409dd7ed86456643b9914f853833884a0a2ffa9b1b66220ad39",
+          "content_disposition": null
+        },
+        {
+          "id": "2dab213b-b611-516e-ac65-c3ebb0d1cd21",
+          "kind": "source.txt",
+          "byte_size": 449,
+          "sha256": "cf7c2b3e238ece2317bd6b59152e7c92f6123f502e484b613e6abaacb0e46cf3",
+          "content_disposition": null
+        },
+        {
+          "id": "b080dccf-207c-5463-b071-2760b8284d18",
+          "kind": "source.vtt",
+          "byte_size": 451,
+          "sha256": "a3a43727d4c0f9b79af188daebc35737eec0db3efddfea542eaa1bd7057e0da7",
+          "content_disposition": null
+        },
+        {
+          "id": "cbb4dcb3-b650-5ef3-84b8-02ec22e44804",
+          "kind": "zh-CN.json",
+          "byte_size": 2149,
+          "sha256": "f6d8693e73b0d3342807972c02ea060a02857104a0b821bf08a0b49eb010a034",
+          "content_disposition": null
+        },
+        {
+          "id": "d4f2869f-6acf-5ac7-b64f-48e309d486ec",
+          "kind": "zh-CN.srt",
+          "byte_size": 435,
+          "sha256": "a186cc523b6c621937e56319deb83cf47b1e5dbd4c20067c3b604579b310f37a",
+          "content_disposition": null
+        },
+        {
+          "id": "9130d43c-f011-5c74-95f7-c4bc367d853c",
+          "kind": "zh-CN.txt",
+          "byte_size": 430,
+          "sha256": "697261116d5e1379927b115c7e7d5671b29a6acedc488614ce0c56dd01cbf35d",
+          "content_disposition": null
+        },
+        {
+          "id": "75183493-5c96-58a6-b4ef-3f37379d57a4",
+          "kind": "zh-CN.vtt",
+          "byte_size": 432,
+          "sha256": "058ab2c10eef929b54a6b638898cb5c50a5d31b3f16827218c36eff23d88423c",
+          "content_disposition": null
+        }
+      ],
+      "invariants": {
+        "segment_count_equal": true,
+        "ids_contiguous": true,
+        "timestamps_equal": true,
+        "speakers_equal": true,
+        "source_language_equal": true,
+        "source_text_equal": true,
+        "metadata_equal": true,
+        "order_equal": true,
+        "source_text_preserved": true
+      }
+    },
+    {
+      "label": "russian",
+      "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+      "title": "Русский single",
+      "duration_ms": 11328,
+      "detected_language": "ru",
+      "segment_count": 4,
+      "speakers": [
+        "Speaker 1"
+      ],
+      "engine_versions": {
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "translation": "ollama:qwen2.5:1.5b"
+      },
+      "warnings": [
+        "Translation fallback used: hy-mt2:1.8b-q4km-fixed failed; used qwen2.5:1.5b. Primary error: TRANSLATION_FAILED: hy-mt2:1.8b-q4km-fixed failed after 3 attempts: Unterminated string starting at: line 1 column 73 (char 72)"
+      ],
+      "execution_count_total": 1,
+      "retry_cycle": 0,
+      "automatic_requeue_count_in_cycle": 0,
+      "events": [
+        {
+          "id": 51,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "queued",
+          "message": null,
+          "created_at": "2026-08-23T10:06:11.923021+00:00"
+        },
+        {
+          "id": 55,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"8abec0ea-b7be-4e8a-8051-64ff67d36a69\"}",
+          "created_at": "2026-08-23T10:06:11.940590+00:00"
+        },
+        {
+          "id": 56,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "extracting",
+          "message": "{\"from_status\": \"downloading\", \"run_id\": \"8abec0ea-b7be-4e8a-8051-64ff67d36a69\"}",
+          "created_at": "2026-08-23T10:06:12.596559+00:00"
+        },
+        {
+          "id": 57,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "transcribing",
+          "message": "{\"from_status\": \"extracting\", \"run_id\": \"8abec0ea-b7be-4e8a-8051-64ff67d36a69\"}",
+          "created_at": "2026-08-23T10:06:12.661717+00:00"
+        },
+        {
+          "id": 58,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "diarizing",
+          "message": "{\"from_status\": \"transcribing\", \"run_id\": \"8abec0ea-b7be-4e8a-8051-64ff67d36a69\"}",
+          "created_at": "2026-08-23T10:06:12.823469+00:00"
+        },
+        {
+          "id": 59,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "segmenting",
+          "message": "{\"from_status\": \"diarizing\", \"run_id\": \"8abec0ea-b7be-4e8a-8051-64ff67d36a69\"}",
+          "created_at": "2026-08-23T10:06:13.036085+00:00"
+        },
+        {
+          "id": 60,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "translating",
+          "message": "{\"from_status\": \"segmenting\", \"run_id\": \"8abec0ea-b7be-4e8a-8051-64ff67d36a69\"}",
+          "created_at": "2026-08-23T10:06:13.050633+00:00"
+        },
+        {
+          "id": 61,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "exporting",
+          "message": "{\"from_status\": \"translating\", \"run_id\": \"8abec0ea-b7be-4e8a-8051-64ff67d36a69\"}",
+          "created_at": "2026-08-23T10:06:47.863182+00:00"
+        },
+        {
+          "id": 62,
+          "job_id": "e363c44d-2a11-47f7-af36-b05fe3e94082",
+          "status": "completed",
+          "message": "{\"artifact_count\": 8, \"run_id\": \"8abec0ea-b7be-4e8a-8051-64ff67d36a69\"}",
+          "created_at": "2026-08-23T10:06:47.915348+00:00"
+        }
+      ],
+      "artifacts": [
+        {
+          "id": "b00b9e48-6e07-5b67-841b-51e9b779539c",
+          "kind": "source.json",
+          "byte_size": 2084,
+          "sha256": "3aaae9ef9f5c9b0332d9f0ffd7e0c0e9a9162c1ed1585a701323cf7b9b534868",
+          "content_disposition": null
+        },
+        {
+          "id": "0fabbd00-52ed-500a-beee-fdd2015f2f81",
+          "kind": "source.srt",
+          "byte_size": 505,
+          "sha256": "87161ef4d1d030b6f5020bd37ff037e66f9f4985ee61a11a592f495a25a35f5d",
+          "content_disposition": null
+        },
+        {
+          "id": "1b97d0a9-3591-5805-a10b-96597794881e",
+          "kind": "source.txt",
+          "byte_size": 501,
+          "sha256": "2ef85392aa91a4ab7c5c8bd9efb22bd09462310044e2e0b1a900d4e9f6a5264b",
+          "content_disposition": null
+        },
+        {
+          "id": "9eaab6c1-25d0-5cd5-b89d-a1d1f863a92d",
+          "kind": "source.vtt",
+          "byte_size": 504,
+          "sha256": "a0ceb5390a53af8345902e399e895de1139c2d2a5cf15d515786da2639486497",
+          "content_disposition": null
+        },
+        {
+          "id": "c10b07db-0934-5e5f-aab0-877d3713cfdf",
+          "kind": "zh-CN.json",
+          "byte_size": 2243,
+          "sha256": "e7bdbde5fc5122b7bd53965051859d453f0433e28dea1e5b1ec1d1131255674a",
+          "content_disposition": null
+        },
+        {
+          "id": "fa0eb409-bb9b-52cf-ae7c-d9ccd6d23d08",
+          "kind": "zh-CN.srt",
+          "byte_size": 339,
+          "sha256": "457381f9ef68fcfb52c9750ae93657c4f380bfa7313cb808bc01948844051874",
+          "content_disposition": null
+        },
+        {
+          "id": "53ab06fc-16da-5e6c-954d-ad8784a160dc",
+          "kind": "zh-CN.txt",
+          "byte_size": 335,
+          "sha256": "688328ebe551676106d65a8c4300360a48d74a064f1418b6565f9c0c77e4d2ea",
+          "content_disposition": null
+        },
+        {
+          "id": "f893f119-c5c6-5c20-a1e7-e23d2c9ca6f3",
+          "kind": "zh-CN.vtt",
+          "byte_size": 338,
+          "sha256": "abf08e5c8d427aa200a01090a3dc9c2fd184dd00bf3a5929d74adfc1f33a2b66",
+          "content_disposition": null
+        }
+      ],
+      "invariants": {
+        "segment_count_equal": true,
+        "ids_contiguous": true,
+        "timestamps_equal": true,
+        "speakers_equal": true,
+        "source_language_equal": true,
+        "source_text_equal": true,
+        "metadata_equal": true,
+        "order_equal": true,
+        "source_text_preserved": true
+      }
+    },
+    {
+      "label": "two_speakers",
+      "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+      "title": "中文 双人 video",
+      "duration_ms": 16256,
+      "detected_language": "en",
+      "segment_count": 7,
+      "speakers": [
+        "Speaker 1",
+        "Speaker 2"
+      ],
+      "engine_versions": {
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+      },
+      "warnings": [],
+      "execution_count_total": 1,
+      "retry_cycle": 0,
+      "automatic_requeue_count_in_cycle": 0,
+      "events": [
+        {
+          "id": 52,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "queued",
+          "message": null,
+          "created_at": "2026-08-23T10:06:11.927715+00:00"
+        },
+        {
+          "id": 63,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"d204b1a1-1ca9-4455-9a94-10ba99445d2d\"}",
+          "created_at": "2026-08-23T10:06:47.918792+00:00"
+        },
+        {
+          "id": 64,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "extracting",
+          "message": "{\"from_status\": \"downloading\", \"run_id\": \"d204b1a1-1ca9-4455-9a94-10ba99445d2d\"}",
+          "created_at": "2026-08-23T10:06:48.643111+00:00"
+        },
+        {
+          "id": 65,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "transcribing",
+          "message": "{\"from_status\": \"extracting\", \"run_id\": \"d204b1a1-1ca9-4455-9a94-10ba99445d2d\"}",
+          "created_at": "2026-08-23T10:06:48.746021+00:00"
+        },
+        {
+          "id": 66,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "diarizing",
+          "message": "{\"from_status\": \"transcribing\", \"run_id\": \"d204b1a1-1ca9-4455-9a94-10ba99445d2d\"}",
+          "created_at": "2026-08-23T10:06:48.936818+00:00"
+        },
+        {
+          "id": 67,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "segmenting",
+          "message": "{\"from_status\": \"diarizing\", \"run_id\": \"d204b1a1-1ca9-4455-9a94-10ba99445d2d\"}",
+          "created_at": "2026-08-23T10:06:49.456408+00:00"
+        },
+        {
+          "id": 68,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "translating",
+          "message": "{\"from_status\": \"segmenting\", \"run_id\": \"d204b1a1-1ca9-4455-9a94-10ba99445d2d\"}",
+          "created_at": "2026-08-23T10:06:49.479874+00:00"
+        },
+        {
+          "id": 69,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "exporting",
+          "message": "{\"from_status\": \"translating\", \"run_id\": \"d204b1a1-1ca9-4455-9a94-10ba99445d2d\"}",
+          "created_at": "2026-08-23T10:06:50.475887+00:00"
+        },
+        {
+          "id": 70,
+          "job_id": "1995b240-4997-47cb-bc7a-8f44d3a99359",
+          "status": "completed",
+          "message": "{\"artifact_count\": 8, \"run_id\": \"d204b1a1-1ca9-4455-9a94-10ba99445d2d\"}",
+          "created_at": "2026-08-23T10:06:50.527794+00:00"
+        }
+      ],
+      "artifacts": [
+        {
+          "id": "a98b86d5-9e30-55a0-8675-b8dcdfc6b240",
+          "kind": "source.json",
+          "byte_size": 2433,
+          "sha256": "b858fbda1b5f50af58fff708c3937013e0cae3097d4b88d6f0a2fd6acc2d789d",
+          "content_disposition": null
+        },
+        {
+          "id": "f8d877b7-6f6b-5c4b-97d2-14d695e81308",
+          "kind": "source.srt",
+          "byte_size": 582,
+          "sha256": "a44826ae9a4a03713828685da2988a161a1b3e62a987fde0b443211a4e30cf56",
+          "content_disposition": null
+        },
+        {
+          "id": "a980a59d-4d36-5783-9bf6-9a85ed9cc408",
+          "kind": "source.txt",
+          "byte_size": 575,
+          "sha256": "6352b8464df575e7927ba711f53e965b91c4486b2e1fcf86551fdc94bac2edcc",
+          "content_disposition": null
+        },
+        {
+          "id": "b1ebad86-c7b4-50e6-be11-7e130e6b22e9",
+          "kind": "source.vtt",
+          "byte_size": 575,
+          "sha256": "e0aca7151356f5d987b5d303f318d44bdd3658e8384f8ec50c407a20376c963f",
+          "content_disposition": null
+        },
+        {
+          "id": "99d3af96-4ddd-525e-b873-33caeb2c0d7d",
+          "kind": "zh-CN.json",
+          "byte_size": 2709,
+          "sha256": "6ae75ec3774461422b8aaeb43416370677fc6c202f2bfe4fc7f39a5bcd82adaf",
+          "content_disposition": null
+        },
+        {
+          "id": "01b49388-de8f-5c7d-96a4-9cf946689d19",
+          "kind": "zh-CN.srt",
+          "byte_size": 591,
+          "sha256": "d37a574f27273f3423e9ba77765c3c1011bee7f684add425aca2e24a97e00396",
+          "content_disposition": null
+        },
+        {
+          "id": "fa117f46-fd6f-58a9-ac64-4e113113260c",
+          "kind": "zh-CN.txt",
+          "byte_size": 584,
+          "sha256": "2b5e2ea7e9c29544c5bbe6d12cd3cffb443c74c6650b2bfac031ef373b74a466",
+          "content_disposition": null
+        },
+        {
+          "id": "38d6527a-990b-53dc-b515-69bb1d9a89f2",
+          "kind": "zh-CN.vtt",
+          "byte_size": 584,
+          "sha256": "8d303d57ba41dbcac21790feb25174e935ebb4931c05224395f92adb95b32959",
+          "content_disposition": null
+        }
+      ],
+      "invariants": {
+        "segment_count_equal": true,
+        "ids_contiguous": true,
+        "timestamps_equal": true,
+        "speakers_equal": true,
+        "source_language_equal": true,
+        "source_text_equal": true,
+        "metadata_equal": true,
+        "order_equal": true,
+        "source_text_preserved": true
+      }
+    },
+    {
+      "label": "same_title_a",
+      "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+      "title": "Same Title",
+      "duration_ms": 14016,
+      "detected_language": "en",
+      "segment_count": 5,
+      "speakers": [
+        "Speaker 1"
+      ],
+      "engine_versions": {
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+      },
+      "warnings": [],
+      "execution_count_total": 1,
+      "retry_cycle": 0,
+      "automatic_requeue_count_in_cycle": 0,
+      "events": [
+        {
+          "id": 53,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "queued",
+          "message": null,
+          "created_at": "2026-08-23T10:06:11.931983+00:00"
+        },
+        {
+          "id": 71,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"ca9f4814-6801-47ae-b58b-a00e35d8e754\"}",
+          "created_at": "2026-08-23T10:06:50.536038+00:00"
+        },
+        {
+          "id": 72,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "extracting",
+          "message": "{\"from_status\": \"downloading\", \"run_id\": \"ca9f4814-6801-47ae-b58b-a00e35d8e754\"}",
+          "created_at": "2026-08-23T10:06:51.189471+00:00"
+        },
+        {
+          "id": 73,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "transcribing",
+          "message": "{\"from_status\": \"extracting\", \"run_id\": \"ca9f4814-6801-47ae-b58b-a00e35d8e754\"}",
+          "created_at": "2026-08-23T10:06:51.268529+00:00"
+        },
+        {
+          "id": 74,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "diarizing",
+          "message": "{\"from_status\": \"transcribing\", \"run_id\": \"ca9f4814-6801-47ae-b58b-a00e35d8e754\"}",
+          "created_at": "2026-08-23T10:06:51.419288+00:00"
+        },
+        {
+          "id": 75,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "segmenting",
+          "message": "{\"from_status\": \"diarizing\", \"run_id\": \"ca9f4814-6801-47ae-b58b-a00e35d8e754\"}",
+          "created_at": "2026-08-23T10:06:51.794084+00:00"
+        },
+        {
+          "id": 76,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "translating",
+          "message": "{\"from_status\": \"segmenting\", \"run_id\": \"ca9f4814-6801-47ae-b58b-a00e35d8e754\"}",
+          "created_at": "2026-08-23T10:06:51.819052+00:00"
+        },
+        {
+          "id": 77,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "exporting",
+          "message": "{\"from_status\": \"translating\", \"run_id\": \"ca9f4814-6801-47ae-b58b-a00e35d8e754\"}",
+          "created_at": "2026-08-23T10:06:52.634782+00:00"
+        },
+        {
+          "id": 78,
+          "job_id": "27362be0-2ec2-4f40-ac6e-eda0b58f5366",
+          "status": "completed",
+          "message": "{\"artifact_count\": 8, \"run_id\": \"ca9f4814-6801-47ae-b58b-a00e35d8e754\"}",
+          "created_at": "2026-08-23T10:06:52.675505+00:00"
+        }
+      ],
+      "artifacts": [
+        {
+          "id": "ad8be92d-1b3a-55df-94ea-757de5a62324",
+          "kind": "source.json",
+          "byte_size": 1938,
+          "sha256": "144fbb68a7ee9a0a7d8f7a551d5de7c5a5e43ccbf8f2c7a9fd49b3e4856ae2e2",
+          "content_disposition": null
+        },
+        {
+          "id": "2c51b664-8b6f-560d-8245-3e55afd60cd4",
+          "kind": "source.srt",
+          "byte_size": 454,
+          "sha256": "7a8fa5f372f63409dd7ed86456643b9914f853833884a0a2ffa9b1b66220ad39",
+          "content_disposition": null
+        },
+        {
+          "id": "1b2411fe-fbed-5a2d-a8e2-146d91af6040",
+          "kind": "source.txt",
+          "byte_size": 449,
+          "sha256": "cf7c2b3e238ece2317bd6b59152e7c92f6123f502e484b613e6abaacb0e46cf3",
+          "content_disposition": null
+        },
+        {
+          "id": "aa7deaa6-c7cc-594b-8c42-ac73f6cdf9c5",
+          "kind": "source.vtt",
+          "byte_size": 451,
+          "sha256": "a3a43727d4c0f9b79af188daebc35737eec0db3efddfea542eaa1bd7057e0da7",
+          "content_disposition": null
+        },
+        {
+          "id": "f754dd86-92a9-5057-a9fa-33e97e0ad637",
+          "kind": "zh-CN.json",
+          "byte_size": 2148,
+          "sha256": "01af97cdf878312170da95ffa7a2ec35636e091feaa37f69f25abc85eca03df0",
+          "content_disposition": null
+        },
+        {
+          "id": "d530c02f-a75c-564a-8139-ba79a5aefabb",
+          "kind": "zh-CN.srt",
+          "byte_size": 435,
+          "sha256": "a186cc523b6c621937e56319deb83cf47b1e5dbd4c20067c3b604579b310f37a",
+          "content_disposition": null
+        },
+        {
+          "id": "105d6678-5fb9-5fd8-918e-59215c7451a2",
+          "kind": "zh-CN.txt",
+          "byte_size": 430,
+          "sha256": "697261116d5e1379927b115c7e7d5671b29a6acedc488614ce0c56dd01cbf35d",
+          "content_disposition": null
+        },
+        {
+          "id": "7c8949d6-97ea-5334-b0be-17c11b04e39b",
+          "kind": "zh-CN.vtt",
+          "byte_size": 432,
+          "sha256": "058ab2c10eef929b54a6b638898cb5c50a5d31b3f16827218c36eff23d88423c",
+          "content_disposition": null
+        }
+      ],
+      "invariants": {
+        "segment_count_equal": true,
+        "ids_contiguous": true,
+        "timestamps_equal": true,
+        "speakers_equal": true,
+        "source_language_equal": true,
+        "source_text_equal": true,
+        "metadata_equal": true,
+        "order_equal": true,
+        "source_text_preserved": true
+      }
+    },
+    {
+      "label": "same_title_b",
+      "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+      "title": "Same Title",
+      "duration_ms": 14016,
+      "detected_language": "en",
+      "segment_count": 5,
+      "speakers": [
+        "Speaker 1"
+      ],
+      "engine_versions": {
+        "asr": "mlx-whisper:0.4.3;model=mlx-community/whisper-tiny",
+        "diarization": "sherpa-onnx:1.13.6;clusters=threshold=0.5",
+        "downloader": "yt-dlp:2026.08.19;ffmpeg:7.0",
+        "translation": "ollama:hy-mt2:1.8b-q4km-fixed"
+      },
+      "warnings": [],
+      "execution_count_total": 1,
+      "retry_cycle": 0,
+      "automatic_requeue_count_in_cycle": 0,
+      "events": [
+        {
+          "id": 54,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "queued",
+          "message": null,
+          "created_at": "2026-08-23T10:06:11.936219+00:00"
+        },
+        {
+          "id": 79,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "claimed",
+          "message": "{\"resume_stage\": \"downloading\", \"run_id\": \"167ef952-22ed-43e1-a903-09f5289478cc\"}",
+          "created_at": "2026-08-23T10:06:52.682895+00:00"
+        },
+        {
+          "id": 80,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "extracting",
+          "message": "{\"from_status\": \"downloading\", \"run_id\": \"167ef952-22ed-43e1-a903-09f5289478cc\"}",
+          "created_at": "2026-08-23T10:06:53.238933+00:00"
+        },
+        {
+          "id": 81,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "transcribing",
+          "message": "{\"from_status\": \"extracting\", \"run_id\": \"167ef952-22ed-43e1-a903-09f5289478cc\"}",
+          "created_at": "2026-08-23T10:06:53.294056+00:00"
+        },
+        {
+          "id": 82,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "diarizing",
+          "message": "{\"from_status\": \"transcribing\", \"run_id\": \"167ef952-22ed-43e1-a903-09f5289478cc\"}",
+          "created_at": "2026-08-23T10:06:53.450841+00:00"
+        },
+        {
+          "id": 83,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "segmenting",
+          "message": "{\"from_status\": \"diarizing\", \"run_id\": \"167ef952-22ed-43e1-a903-09f5289478cc\"}",
+          "created_at": "2026-08-23T10:06:53.813300+00:00"
+        },
+        {
+          "id": 84,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "translating",
+          "message": "{\"from_status\": \"segmenting\", \"run_id\": \"167ef952-22ed-43e1-a903-09f5289478cc\"}",
+          "created_at": "2026-08-23T10:06:53.844800+00:00"
+        },
+        {
+          "id": 85,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "exporting",
+          "message": "{\"from_status\": \"translating\", \"run_id\": \"167ef952-22ed-43e1-a903-09f5289478cc\"}",
+          "created_at": "2026-08-23T10:06:54.585749+00:00"
+        },
+        {
+          "id": 86,
+          "job_id": "15ed7f99-211e-4614-8b5b-dad8e8e97960",
+          "status": "completed",
+          "message": "{\"artifact_count\": 8, \"run_id\": \"167ef952-22ed-43e1-a903-09f5289478cc\"}",
+          "created_at": "2026-08-23T10:06:54.628970+00:00"
+        }
+      ],
+      "artifacts": [
+        {
+          "id": "9635b796-568f-5c7c-a027-a035971003cf",
+          "kind": "source.json",
+          "byte_size": 1938,
+          "sha256": "e201c817c54205d2a8415c9ea62e4adc5d12a7933224e08cc6f7da3cfd4a1cb8",
+          "content_disposition": null
+        },
+        {
+          "id": "cab1d192-8f44-534a-98ed-1b6d95b0bcb6",
+          "kind": "source.srt",
+          "byte_size": 454,
+          "sha256": "7a8fa5f372f63409dd7ed86456643b9914f853833884a0a2ffa9b1b66220ad39",
+          "content_disposition": null
+        },
+        {
+          "id": "82d757d1-b739-595a-8670-831ce4fc1847",
+          "kind": "source.txt",
+          "byte_size": 449,
+          "sha256": "cf7c2b3e238ece2317bd6b59152e7c92f6123f502e484b613e6abaacb0e46cf3",
+          "content_disposition": null
+        },
+        {
+          "id": "8184ac4b-4d5f-5a9d-bebe-2cfe9c1bd05f",
+          "kind": "source.vtt",
+          "byte_size": 451,
+          "sha256": "a3a43727d4c0f9b79af188daebc35737eec0db3efddfea542eaa1bd7057e0da7",
+          "content_disposition": null
+        },
+        {
+          "id": "5ea8ff63-9d76-542e-9f2d-14e08969616a",
+          "kind": "zh-CN.json",
+          "byte_size": 2148,
+          "sha256": "e8f6f0873e350117fe89924b7930e198e2f5ff430ad1f26027e92f5157f214e3",
+          "content_disposition": null
+        },
+        {
+          "id": "507c107c-63a5-5bb3-a6dc-75c95f2a358d",
+          "kind": "zh-CN.srt",
+          "byte_size": 435,
+          "sha256": "a186cc523b6c621937e56319deb83cf47b1e5dbd4c20067c3b604579b310f37a",
+          "content_disposition": null
+        },
+        {
+          "id": "a3d59ae2-4ceb-531d-bb2a-69d650c8be70",
+          "kind": "zh-CN.txt",
+          "byte_size": 430,
+          "sha256": "697261116d5e1379927b115c7e7d5671b29a6acedc488614ce0c56dd01cbf35d",
+          "content_disposition": null
+        },
+        {
+          "id": "169d6e7e-bd20-5196-9f4f-38bfdb1fb396",
+          "kind": "zh-CN.vtt",
+          "byte_size": 432,
+          "sha256": "058ab2c10eef929b54a6b638898cb5c50a5d31b3f16827218c36eff23d88423c",
+          "content_disposition": null
+        }
+      ],
+      "invariants": {
+        "segment_count_equal": true,
+        "ids_contiguous": true,
+        "timestamps_equal": true,
+        "speakers_equal": true,
+        "source_language_equal": true,
+        "source_text_equal": true,
+        "metadata_equal": true,
+        "order_equal": true,
+        "source_text_preserved": true
+      }
+    }
+  ],
+  "summary": {
+    "real_api_worker_samples_completed": 5,
+    "artifacts_downloaded_and_read_back": 40,
+    "all_segment_invariants_passed": true,
+    "concurrency_values_verified": [
+      1,
+      2
+    ],
+    "automatic_retry_budget_verified": 2,
+    "manual_retry_verified": true,
+    "cancel_verified": true,
+    "restart_recovery_verified": true,
+    "batch_mixed_outcome_then_retry_verified": true
+  },
+  "quality_gates": [
+    {
+      "command": ".venv-smoke/bin/python scripts/run-phase2-acceptance.py --output-root \"$PWD/.tmp-phase2-checkpoint8\" --report \"$PWD/docs/PHASE-2-CHECKPOINT-8-ACCEPTANCE.json\"",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber",
+      "exit_code": 0,
+      "result": "5 real API worker samples completed; 40 artifacts downloaded and read back"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m pytest",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/backend",
+      "exit_code": 1,
+      "result": "553 passed, 1 failed, 1 warning; process-control child received SIGTERM before installing its ignore handler while quality gates ran in parallel"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m pytest tests/unit/test_process_control.py::test_ignored_term_is_killed_and_reaped -vv",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/backend",
+      "exit_code": 0,
+      "result": "1 passed"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m pytest",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/backend",
+      "exit_code": 0,
+      "result": "554 passed, 1 third-party StarletteDeprecationWarning"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m ruff check src tests ../scripts",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/backend",
+      "exit_code": 0,
+      "result": "All checks passed"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m ruff format --check src tests ../scripts",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/backend",
+      "exit_code": 0,
+      "result": "68 files already formatted"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m mypy src/lvt",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/backend",
+      "exit_code": 0,
+      "result": "Success: no issues found in 36 source files"
+    },
+    {
+      "command": "git diff --check",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber",
+      "exit_code": 0,
+      "result": "no output"
+    },
+    {
+      "command": "git diff 872c42d614a77056c1e9510425955a53ffe40361 -- backend/src/lvt/engines/translation.py backend/src/lvt/engines/ollama.py",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber",
+      "exit_code": 0,
+      "result": "no output"
+    },
+    {
+      "command": "git status --short --ignored | rg '(\\.env|hf_token|api-token|\\.token|credentials|secret)'",
+      "cwd": "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber",
+      "exit_code": 1,
+      "result": "no matching sensitive files"
+    }
+  ],
+  "final_service_stop_return_code": -15,
+  "uvicorn_starts": [
+    {
+      "sequence": 1,
+      "pid": 23571,
+      "started_at": "2026-08-23T10:05:36.966356+00:00",
+      "command": [
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.venv-smoke/bin/python",
+        "-m",
+        "lvt.main"
+      ],
+      "log": "uvicorn-1.log",
+      "stopped_at": "2026-08-23T10:05:46.434933+00:00",
+      "return_code": -15
+    },
+    {
+      "sequence": 2,
+      "pid": 23606,
+      "started_at": "2026-08-23T10:05:46.436643+00:00",
+      "command": [
+        "/Users/bytedance/Desktop/Batydance/Public/YYY/local-video-transcriber/.venv-smoke/bin/python",
+        "-m",
+        "lvt.main"
+      ],
+      "log": "uvicorn-2.log",
+      "stopped_at": "2026-08-23T10:06:55.344742+00:00",
+      "return_code": -15
+    }
+  ],
+  "finished_at": "2026-08-23T10:06:55.695275+00:00"
+}

@@ -1093,6 +1093,84 @@ cd backend
 # 552 passed，1 条第三方 StarletteDeprecationWarning
 ```
 
+## Phase 2 Checkpoint 8：最终验收
+
+机器报告：`docs/PHASE-2-CHECKPOINT-8-ACCEPTANCE.json`。
+
+验收驱动 `scripts/run-phase2-acceptance.py` 启动受控本地媒体 HTTP 服务，并在任意
+时刻只运行一个真实 Uvicorn 服务进程。所有任务均通过 `/api/v1/jobs` 提交，由
+lifespan `JobWorkerPool` 执行；结果通过 artifact list/download API 回读，不直接调用
+同步 Pipeline 代替队列。
+
+真实引擎：
+
+- yt-dlp 2026.08.19、FFmpeg 7.0；
+- mlx-whisper 0.4.3，验收模型 `mlx-community/whisper-tiny`；
+- sherpa-onnx 1.13.6；
+- Ollama 主模型 `hy-mt2:1.8b-q4km-fixed`，fallback `qwen2.5:1.5b`。
+
+五样本全部 completed，共下载并回读 40 个非空 artifact：
+
+| 样本 | 时长 | 语言 | Segment | Speaker | 翻译 |
+|---|---:|---|---:|---:|---|
+| English Single | 14.016 秒 | en | 5 | 1 | Hy-MT2 |
+| Русский single | 11.328 秒 | ru | 4 | 1 | qwen fallback |
+| 中文 双人 video | 16.256 秒 | en | 7 | 2 | Hy-MT2 |
+| Same Title A | 14.016 秒 | en | 5 | 1 | Hy-MT2 |
+| Same Title B | 14.016 秒 | en | 5 | 1 | Hy-MT2 |
+
+每个任务通过 API 返回 source/zh-CN 的 TXT/SRT/VTT/JSON 各一份。JSON 逐 Segment
+验证数量、连续 ID、时间戳、Speaker、source_language、顺序、source_text 和 metadata；
+source 的 translated_text 为空，zh-CN 的 translated_text 非空。SRT/VTT cue 数量、
+时间和 Speaker 一致。两个 `Same Title` 使用不同 Job 根目录。
+
+状态机真实验收：
+
+- concurrency=1 时两个阻塞下载只有 1 个 active、另一个 queued；
+  concurrency=2 时同时观察到 2 个 active。四个任务均经 API cancel 收敛 cancelled。
+- 在 downloading 阶段终止 Uvicorn，重启后写入唯一 interrupted 事件，以新 run
+  completed；`execution_count_total=2`。
+- 同一批 API 提交中，英语任务 completed，受控 HTTP 503 任务先后执行 3 次；
+  前两次 automatic_requeued，第三次以 DOWNLOAD_FAILED 失败。开放媒体端点后手工
+  retry，`retry_cycle=1`、`execution_count_total=4` 并 completed。
+- 俄语样本主模型三次返回不完整 JSON，严格校验后使用 qwen fallback；
+  warning 和实际 translation engine version 均写入 artifact。
+
+执行记录：
+
+```bash
+.venv-smoke/bin/python scripts/run-phase2-acceptance.py \
+  --output-root "$PWD/.tmp-phase2-checkpoint8" \
+  --report "$PWD/docs/PHASE-2-CHECKPOINT-8-ACCEPTANCE.json"
+# exit 0
+
+cd backend
+../.venv-smoke/bin/python -m pytest
+# 首次与其他质量门并行：exit 1，553 passed、1 failed、1 warning
+# 失败为 test_ignored_term_is_killed_and_reaped：
+# 子 Python 在 0.1 秒 timeout 前尚未安装 SIGTERM ignore handler。
+
+../.venv-smoke/bin/python -m pytest \
+  tests/unit/test_process_control.py::test_ignored_term_is_killed_and_reaped -vv
+# exit 0，1 passed
+
+../.venv-smoke/bin/python -m pytest
+# 无并行负载最终复跑：exit 0，554 passed、1 条第三方 warning
+
+../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# exit 0，All checks passed!
+
+../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# exit 0，68 files already formatted
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# exit 0，Success: no issues found in 36 source files
+```
+
+`git diff --check` 和 Phase 1 strict-token 冻结检查均 exit 0、无输出。敏感文件状态
+扫描无匹配；验收结束后无 Uvicorn、LVT server、yt-dlp、FFmpeg 或 ffprobe 遗留。
+本轮未发现生产功能回归，因此未修改 Checkpoint 7 或其他生产代码。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：

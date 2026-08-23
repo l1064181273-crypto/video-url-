@@ -289,7 +289,21 @@
   - ✅ 20 次 Barrier 快速 2→1→2、同 Job private/其他 run/downloaded_media、
     manifest 后目录替换、下载/delete 固定 fd 并发均通过。修复后专项 34 passed，
     全量 `pytest` 552 passed（1 条第三方警告）。
-  - ⏭️ 下一步：Checkpoint 7 最终修复独立复审；未开始 Checkpoint 8 最终验收。
+  - ✅ Checkpoint 7 最终判断顺序修复已由独立审查通过，冻结 commit：
+    `b85042d74cd96a2cdf963a27db4c421761b96b60`。
+  - ✅ Phase 2 Checkpoint 8 最终验收：使用单个真实 Uvicorn 服务、真实 lifespan
+    worker、yt-dlp/FFmpeg、MLX Whisper、sherpa-onnx 和 Ollama，通过 HTTP API
+    提交五个媒体样本并下载回读 40 个 artifact。
+  - ✅ 五样本 Segment 数量、连续 ID、时间戳、Speaker、source language、顺序、
+    source_text 和 metadata 均在 source/zh-CN 间保持一致；同标题任务 Job 目录隔离。
+  - ✅ 受控真实 HTTP 下载验证 concurrency 1/2、running/queued cancel；崩溃式
+    Uvicorn 重启产生唯一 interrupted 事件并以新 run 完成。
+  - ✅ 同批次一条 completed、一条 DOWNLOAD_FAILED；失败任务完成 2 次自动 requeue、
+    第 3 次执行失败，手工 retry 后第 4 次执行成功。
+  - ✅ 机器报告：`docs/PHASE-2-CHECKPOINT-8-ACCEPTANCE.json`。最终全量
+    `pytest` 554 passed（1 条第三方警告）；Ruff、format、mypy、diff、冻结文件和
+    敏感文件检查通过，无 Uvicorn、worker、yt-dlp、FFmpeg 或 ffprobe 遗留。
+  - ✅ Phase 2 八个 Checkpoint 的实现与最终验收完成；等待独立最终审查。
 
 ## 已知阻塞
 
