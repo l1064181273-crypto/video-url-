@@ -120,6 +120,12 @@ class ErrorPolicy:
     user_advice: str
 
 
+@dataclass(frozen=True)
+class ClassifiedError:
+    code: ErrorCode
+    policy: ErrorPolicy
+
+
 class HasErrorCode(Protocol):
     code: str
 
@@ -228,13 +234,21 @@ ERROR_POLICIES: Final[Mapping[ErrorCode, ErrorPolicy]] = MappingProxyType(
 )
 
 
-def error_policy_for(code: str | ErrorCode) -> ErrorPolicy:
+def classify_error_code(code: str | ErrorCode) -> ClassifiedError:
     try:
         normalized = ErrorCode(code)
     except ValueError:
         normalized = ErrorCode.INTERNAL_ERROR
-    return ERROR_POLICIES[normalized]
+    return ClassifiedError(code=normalized, policy=ERROR_POLICIES[normalized])
+
+
+def classify_exception(error: HasErrorCode) -> ClassifiedError:
+    return classify_error_code(error.code)
+
+
+def error_policy_for(code: str | ErrorCode) -> ErrorPolicy:
+    return classify_error_code(code).policy
 
 
 def error_policy_for_exception(error: HasErrorCode) -> ErrorPolicy:
-    return error_policy_for(error.code)
+    return classify_exception(error).policy

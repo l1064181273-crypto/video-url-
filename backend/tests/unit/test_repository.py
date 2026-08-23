@@ -1,5 +1,8 @@
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -150,6 +153,44 @@ def test_initialize_is_idempotent(tmp_path: Path) -> None:
     assert repository.schema_version() == 3
     assert repository.get(created["uuid"]) == created
     assert repository.get_worker_concurrency() == 1
+
+
+def test_two_connections_initialize_v2_database_without_stale_version_race(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "concurrent-v2.sqlite3"
+    _create_v2_database(db_path)
+    version_read_barrier = threading.Barrier(2)
+
+    class CoordinatedRepository(JobRepository):
+        @staticmethod
+        def _read_schema_version(connection: sqlite3.Connection) -> int | None:
+            version = JobRepository._read_schema_version(connection)
+            with suppress(threading.BrokenBarrierError):
+                version_read_barrier.wait(timeout=0.2)
+            return version
+
+    def initialize() -> Exception | None:
+        try:
+            CoordinatedRepository(db_path).initialize()
+        except Exception as exc:
+            return exc
+        return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: initialize(), range(2)))
+
+    assert results == [None, None]
+    repository = JobRepository(db_path)
+    assert repository.schema_version() == SCHEMA_VERSION
+    with repository._connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM settings WHERE key = 'worker_concurrency'"
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_failed_migration_rolls_back_all_schema_changes(tmp_path: Path) -> None:

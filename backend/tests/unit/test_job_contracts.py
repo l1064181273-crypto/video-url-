@@ -3,18 +3,28 @@ from itertools import product
 import pytest
 
 from lvt.core.jobs import (
-    ACTIVE_JOB_STATUSES,
     ERROR_POLICIES,
     LEGAL_TRANSITIONS,
+    ClassifiedError,
     ErrorCode,
     JobEventType,
     JobStatus,
     can_transition,
+    classify_exception,
     error_policy_for_exception,
 )
 
 EXPECTED_TRANSITIONS = {
-    JobStatus.QUEUED: ACTIVE_JOB_STATUSES | {JobStatus.CANCELLED},
+    JobStatus.QUEUED: {
+        JobStatus.DOWNLOADING,
+        JobStatus.EXTRACTING,
+        JobStatus.TRANSCRIBING,
+        JobStatus.DIARIZING,
+        JobStatus.SEGMENTING,
+        JobStatus.TRANSLATING,
+        JobStatus.EXPORTING,
+        JobStatus.CANCELLED,
+    },
     JobStatus.DOWNLOADING: {
         JobStatus.EXTRACTING,
         JobStatus.QUEUED,
@@ -93,7 +103,6 @@ def test_queued_can_resume_at_every_active_stage() -> None:
     assert {status: set(targets) for status, targets in LEGAL_TRANSITIONS.items()} == (
         EXPECTED_TRANSITIONS
     )
-    assert LEGAL_TRANSITIONS[JobStatus.QUEUED].issuperset(ACTIVE_JOB_STATUSES)
 
 
 def test_interrupted_is_an_event_not_a_persisted_job_status() -> None:
@@ -136,3 +145,28 @@ def test_error_adapter_uses_structured_code_not_exception_message() -> None:
     policy = error_policy_for_exception(error)
 
     assert not policy.auto_requeue
+
+
+def test_error_classification_returns_normalized_code_and_policy() -> None:
+    class StructuredEngineError(RuntimeError):
+        code = "DOWNLOAD_FAILED"
+
+    classified = classify_exception(StructuredEngineError("unrelated"))
+
+    assert classified == ClassifiedError(
+        code=ErrorCode.DOWNLOAD_FAILED,
+        policy=ERROR_POLICIES[ErrorCode.DOWNLOAD_FAILED],
+    )
+
+
+def test_unknown_structured_error_code_classifies_as_internal_error() -> None:
+    class UnknownStructuredError(RuntimeError):
+        code = "NOT_A_PUBLIC_CODE"
+
+    classified = classify_exception(
+        UnknownStructuredError("DOWNLOAD_FAILED OLLAMA_UNAVAILABLE appear only in the message")
+    )
+
+    assert classified.code is ErrorCode.INTERNAL_ERROR
+    assert classified.policy == ERROR_POLICIES[ErrorCode.INTERNAL_ERROR]
+    assert not classified.policy.auto_requeue

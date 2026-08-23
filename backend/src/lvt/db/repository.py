@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 from lvt.security.urls import sanitize_display_url
@@ -109,13 +110,13 @@ class JobRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = self._connect()
         try:
+            connection.execute("BEGIN IMMEDIATE")
             version = self._read_schema_version(connection)
             if version is not None and version > SCHEMA_VERSION:
                 raise UnsupportedSchemaVersionError(
                     f"database schema {version} is newer than supported {SCHEMA_VERSION}"
                 )
 
-            connection.execute("BEGIN IMMEDIATE")
             if version is None:
                 self._create_v3_schema(connection)
             elif version == 2:
@@ -285,5 +286,20 @@ class JobRepository:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-        connection.execute("PRAGMA journal_mode = WAL")
+        self._enable_wal(connection)
         return connection
+
+    @staticmethod
+    def _enable_wal(connection: sqlite3.Connection) -> None:
+        deadline = monotonic() + BUSY_TIMEOUT_MS / 1_000
+        while True:
+            try:
+                connection.execute("PRAGMA journal_mode = WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if (
+                    exc.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                    or monotonic() >= deadline
+                ):
+                    raise
+                sleep(0.01)
