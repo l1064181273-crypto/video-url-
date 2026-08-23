@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -24,6 +25,18 @@ from lvt.core.capabilities import (
 PRIMARY_MODEL = "primary:model"
 FALLBACK_MODEL = "fallback:model"
 ASR_MODEL = "organization/asr-model"
+
+
+def _component_names() -> tuple[str, ...]:
+    return (
+        "ffmpeg",
+        "ollama",
+        "asr_package",
+        "asr_model",
+        "diarization",
+        "translation_primary",
+        "translation_fallback",
+    )
 
 
 class FakeClock:
@@ -517,26 +530,88 @@ def test_probe_exceptions_are_recursively_sanitized(tmp_path: Path) -> None:
     assert "traceback" not in serialized.lower()
 
 
-def test_successful_probe_metadata_is_recursively_sanitized(tmp_path: Path) -> None:
-    secret = f"/Users/private/{tmp_path.name}/token=secret-value"
-    snapshot = _provider(
-        _probes(
-            ffmpeg=lambda _timeout: _result(version=secret),
-            asr_model=lambda _timeout: _result(model=secret),
+@pytest.mark.parametrize(
+    ("component", "metadata_field"),
+    [
+        ("ffmpeg", "version"),
+        ("ollama", "version"),
+        ("asr_package", "version"),
+        ("asr_model", "model"),
+        ("diarization", "version"),
+    ],
+)
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "EnvironmentSecret456",
+        "ollama-pull-private-model",
+    ],
+)
+def test_successful_probe_metadata_is_never_reflected(
+    component: str,
+    metadata_field: str,
+    secret: str,
+) -> None:
+    probes = {
+        "ffmpeg": lambda _timeout: _result(),
+        "ollama": lambda _timeout: _ollama(),
+        "asr_package": lambda _timeout: _result(),
+        "asr_model": lambda _timeout: _result(),
+        "diarization": lambda _timeout: _result(),
+    }
+    if component == "ollama":
+        probes[component] = lambda _timeout: OllamaProbeResult(
+            capability=_result(version=secret),
+            models=frozenset({PRIMARY_MODEL, FALLBACK_MODEL}),
         )
-    ).get_capabilities()
+    else:
+        probes[component] = lambda _timeout: _result(**{metadata_field: secret})
+
+    snapshot = _provider(CapabilityProbes(**probes)).get_capabilities()
     serialized = json.dumps(snapshot, ensure_ascii=False)
 
-    assert snapshot["ffmpeg"] == {
-        "status": "available",
-        "checked_at": snapshot["checked_at"],
-    }
-    assert snapshot["asr_model"] == {
-        "status": "available",
-        "checked_at": snapshot["checked_at"],
-    }
-    assert "secret-value" not in serialized
-    assert "/Users/private" not in serialized
+    assert secret not in serialized
+    assert all("version" not in snapshot[name] for name in _component_names())
+    assert snapshot["asr_model"]["model"] == ASR_MODEL
+    assert snapshot["translation_primary"]["model"] == PRIMARY_MODEL
+    assert snapshot["translation_fallback"]["model"] == FALLBACK_MODEL
+
+
+def test_current_alphanumeric_environment_secret_is_never_reflected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "CurrentEnvironmentSecret789"
+    monkeypatch.setenv("LVT_CAPABILITIES_TEST_SECRET", secret)
+    probe_metadata = os.environ["LVT_CAPABILITIES_TEST_SECRET"]
+
+    snapshot = _provider(
+        _probes(
+            ffmpeg=lambda _timeout: _result(version=probe_metadata),
+            ollama=lambda _timeout: OllamaProbeResult(
+                capability=_result(version=probe_metadata),
+                models=frozenset({PRIMARY_MODEL, FALLBACK_MODEL}),
+            ),
+            asr_package=lambda _timeout: _result(version=probe_metadata),
+            asr_model=lambda _timeout: _result(model=probe_metadata),
+            diarization=lambda _timeout: _result(version=probe_metadata),
+        )
+    ).get_capabilities()
+
+    assert secret not in json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_successful_probe_absolute_path_metadata_is_never_reflected(
+    tmp_path: Path,
+) -> None:
+    absolute_path = str(tmp_path / "private" / "model-cache")
+    snapshot = _provider(
+        _probes(
+            ffmpeg=lambda _timeout: _result(version=absolute_path),
+            asr_model=lambda _timeout: _result(model=absolute_path),
+        )
+    ).get_capabilities()
+
+    assert absolute_path not in json.dumps(snapshot, ensure_ascii=False)
 
 
 def test_local_probes_never_call_download_or_engine_entrypoints(

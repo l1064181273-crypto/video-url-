@@ -19,8 +19,6 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 MAX_OLLAMA_RESPONSE_BYTES = 1_000_000
-_SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
-_SAFE_MODEL = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?(?::[A-Za-z0-9._-]+)?")
 
 
 class CapabilityStatus(StrEnum):
@@ -386,8 +384,17 @@ class CapabilitiesProvider:
             "checked_at": checked_at,
             "ttl_seconds": _public_duration(self._ttl_seconds),
         }
+        configured_models = {
+            "asr_model": self._asr_model,
+            "translation_primary": self._primary_translation_model,
+            "translation_fallback": self._fallback_translation_model,
+        }
         for name, component in components.items():
-            snapshot[name] = _component_payload(component, checked_at)
+            snapshot[name] = _component_payload(
+                component,
+                checked_at,
+                model=configured_models.get(name),
+            )
         return snapshot
 
 
@@ -544,21 +551,16 @@ def _checked_at(utcnow: Callable[[], datetime]) -> str:
         return datetime.now(UTC).isoformat()
 
 
-def _component_payload(component: CapabilityProbeResult, checked_at: str) -> dict[str, str]:
+def _component_payload(
+    component: CapabilityProbeResult,
+    checked_at: str,
+    *,
+    model: str | None,
+) -> dict[str, str]:
     payload = {"status": component.status.value, "checked_at": checked_at}
-    version = _safe_public_value(component.version, pattern=_SAFE_VERSION)
-    model = _safe_public_value(component.model, pattern=_SAFE_MODEL)
-    if version is not None:
-        payload["version"] = version
     if model is not None:
         payload["model"] = model
     return payload
-
-
-def _safe_public_value(value: str | None, *, pattern: re.Pattern[str]) -> str | None:
-    if value is None or pattern.fullmatch(value) is None:
-        return None
-    return value
 
 
 def _public_duration(value: float) -> int | float:

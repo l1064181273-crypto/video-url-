@@ -10,7 +10,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lvt.api.app import create_app
-from lvt.core.capabilities import CapabilitiesProvider
+from lvt.core.capabilities import (
+    CapabilitiesProvider,
+    CapabilityProbeResult,
+    CapabilityProbes,
+    CapabilityStatus,
+    OllamaProbeResult,
+)
+
+ASR_MODEL = "organization/asr-model"
+PRIMARY_MODEL = "primary:model"
+FALLBACK_MODEL = "fallback:model"
 
 
 class RecordingProvider:
@@ -28,6 +38,52 @@ class FailingProvider:
         raise RuntimeError(
             "token=secret-value path=/Users/private/cache command=ollama pull secret-model"
         )
+
+
+def test_http_response_never_reflects_alphanumeric_api_token_metadata(
+    tmp_path: Path,
+) -> None:
+    api_token = "LVTSecretToken123"
+    malicious = CapabilityProbeResult(
+        CapabilityStatus.AVAILABLE,
+        version=api_token,
+        model=api_token,
+    )
+    provider = CapabilitiesProvider(
+        probes=CapabilityProbes(
+            ffmpeg=lambda _timeout: malicious,
+            ollama=lambda _timeout: OllamaProbeResult(
+                capability=malicious,
+                models=frozenset({PRIMARY_MODEL, FALLBACK_MODEL}),
+            ),
+            asr_package=lambda _timeout: malicious,
+            asr_model=lambda _timeout: malicious,
+            diarization=lambda _timeout: malicious,
+        ),
+        asr_model=ASR_MODEL,
+        primary_translation_model=PRIMARY_MODEL,
+        fallback_translation_model=FALLBACK_MODEL,
+    )
+    app = create_app(
+        db_path=tmp_path / "lvt.sqlite3",
+        api_token=api_token,
+        capabilities_provider=provider,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/capabilities",
+            headers={"X-LVT-Token": api_token},
+        )
+
+    body = response.json()
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert response.status_code == 200
+    assert api_token not in serialized
+    assert all("version" not in body[name] for name in _component_names())
+    assert body["asr_model"]["model"] == ASR_MODEL
+    assert body["translation_primary"]["model"] == PRIMARY_MODEL
+    assert body["translation_fallback"]["model"] == FALLBACK_MODEL
 
 
 def test_capabilities_requires_valid_token_before_calling_provider(tmp_path: Path) -> None:
@@ -122,3 +178,15 @@ def test_production_main_injects_dynamic_provider(
         assert main_module.app.state.capabilities_provider is main_module.capabilities_provider
     finally:
         sys.modules.pop("lvt.main", None)
+
+
+def _component_names() -> tuple[str, ...]:
+    return (
+        "ffmpeg",
+        "ollama",
+        "asr_package",
+        "asr_model",
+        "diarization",
+        "translation_primary",
+        "translation_fallback",
+    )
