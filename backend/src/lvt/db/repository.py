@@ -154,6 +154,12 @@ class ArtifactSpec:
     path: str
 
 
+@dataclass(frozen=True)
+class StartupRecoverySummary:
+    interrupted_requeued: int
+    cancelling_cancelled: int
+
+
 class JobRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -258,6 +264,112 @@ class JobRepository:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("worker concurrency setting is missing")
+
+    def recover_startup(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> StartupRecoverySummary:
+        timestamp = self._timestamp(now)
+        interrupted_requeued = 0
+        cancelling_cancelled = 0
+        recoverable = tuple(status.value for status in (*ACTIVE_JOB_STATUSES, JobStatus.CANCELLING))
+        placeholders = ", ".join("?" for _ in recoverable)
+
+        with self._write_transaction() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT uuid, status, active_run_id
+                FROM jobs
+                WHERE status IN ({placeholders})
+                ORDER BY uuid
+                """,
+                recoverable,
+            ).fetchall()
+            for row in rows:
+                job_id = str(row["uuid"])
+                old_status = JobStatus(str(row["status"]))
+                old_run_id = str(row["active_run_id"]) if row["active_run_id"] is not None else None
+                if old_status in ACTIVE_JOB_STATUSES:
+                    cursor = connection.execute(
+                        """
+                        UPDATE jobs
+                        SET status = ?,
+                            stage_progress = 0,
+                            active_run_id = NULL,
+                            next_attempt_at = ?,
+                            cancel_requested_at = NULL,
+                            error_code = NULL,
+                            error_message = NULL,
+                            updated_at = ?,
+                            finished_at = NULL
+                        WHERE uuid = ? AND status = ? AND active_run_id = ?
+                        """,
+                        (
+                            JobStatus.QUEUED.value,
+                            timestamp,
+                            timestamp,
+                            job_id,
+                            old_status.value,
+                            old_run_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("startup recovery lost active run ownership")
+                    self._insert_event(
+                        connection,
+                        job_id,
+                        JobEventType.INTERRUPTED.value,
+                        timestamp,
+                        {
+                            "from_status": old_status.value,
+                            "old_run_id": old_run_id,
+                            "reason": "startup_recovery",
+                        },
+                    )
+                    interrupted_requeued += 1
+                    continue
+
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        active_run_id = NULL,
+                        next_attempt_at = NULL,
+                        error_code = ?,
+                        error_message = ?,
+                        updated_at = ?,
+                        finished_at = ?
+                    WHERE uuid = ? AND status = ?
+                    """,
+                    (
+                        JobStatus.CANCELLED.value,
+                        ErrorCode.CANCELLED_BY_USER.value,
+                        "任务已由用户取消",
+                        timestamp,
+                        timestamp,
+                        job_id,
+                        JobStatus.CANCELLING.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("startup recovery lost cancelling job")
+                self._insert_event(
+                    connection,
+                    job_id,
+                    JobEventType.CANCELLED.value,
+                    timestamp,
+                    {
+                        "old_run_id": old_run_id,
+                        "reason": "startup_recovery",
+                    },
+                )
+                cancelling_cancelled += 1
+
+        return StartupRecoverySummary(
+            interrupted_requeued=interrupted_requeued,
+            cancelling_cancelled=cancelling_cancelled,
+        )
 
     def peek_next_queued(self, *, now: datetime | None = None) -> dict[str, Any] | None:
         timestamp = self._timestamp(now)

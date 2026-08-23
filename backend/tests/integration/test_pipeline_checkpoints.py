@@ -15,7 +15,13 @@ import webvtt
 from lvt.core.jobs import ErrorCode, JobStatus
 from lvt.core.models import DEFAULT_ASR_MODEL
 from lvt.core.processes import CancellationToken, ProcessCancelledError
-from lvt.db.repository import AutomaticRequeueResult, JobRepository
+from lvt.db.repository import (
+    ArtifactCompletionResult,
+    ArtifactRegistrationResult,
+    ArtifactSpec,
+    AutomaticRequeueResult,
+    JobRepository,
+)
 from lvt.engines.base import (
     ASRResult,
     ASRSegment,
@@ -32,6 +38,7 @@ from lvt.pipeline.checkpoints import (
 )
 from lvt.pipeline.runner import Pipeline
 from lvt.pipeline.segmenter import assign_speakers
+from lvt.workers.progress import ProgressReporter
 
 
 class CountingDownloader:
@@ -423,6 +430,153 @@ def test_valid_checkpoint_chain_reuses_every_engine_and_exporter(tmp_path: Path)
     assert calls == before
     assert len(result.artifacts) == 8
     assert repository.get(job_id)["status"] == JobStatus.COMPLETED.value  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("crash_stage", "resume_status"),
+    [
+        (CheckpointStage.DOWNLOADED_MEDIA, JobStatus.EXTRACTING),
+        (CheckpointStage.NORMALIZED_AUDIO, JobStatus.TRANSCRIBING),
+        (CheckpointStage.ASR_RESULT, JobStatus.DIARIZING),
+        (CheckpointStage.DIARIZATION_RESULT, JobStatus.SEGMENTING),
+        (CheckpointStage.SOURCE_TRANSCRIPT, JobStatus.TRANSLATING),
+        (CheckpointStage.TRANSLATED_TRANSCRIPT, JobStatus.EXPORTING),
+        (CheckpointStage.EXPORT_MANIFEST, JobStatus.EXPORTING),
+    ],
+)
+def test_startup_recovery_resumes_each_published_checkpoint_with_new_run(
+    tmp_path: Path,
+    crash_stage: CheckpointStage,
+    resume_status: JobStatus,
+) -> None:
+    repository = JobRepository(tmp_path / crash_stage.value / "lvt.sqlite3")
+    repository.initialize()
+    calls: Counter[str] = Counter()
+    pipeline = _build_pipeline(tmp_path / crash_stage.value, repository, calls)
+    job_id = _create_job(repository)
+    claimed = repository.claim_next(
+        expected_job_id=job_id,
+        first_required_stage=JobStatus.DOWNLOADING,
+    )
+    assert claimed is not None
+    old_run_id = str(claimed["active_run_id"])
+    reporter = ProgressReporter(repository, job_id, old_run_id, high_water=0)
+
+    def crash_after_publish(status: JobStatus, progress: int) -> None:
+        reporter(status, progress)
+        if status is pipeline.status_for_stage(crash_stage) and progress == 100:
+            raise RuntimeError(f"simulated crash after {crash_stage.value}")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        pipeline.run_claimed(
+            job_id=job_id,
+            run_id=old_run_id,
+            progress_callback=crash_after_publish,
+        )
+    before_resume = calls.copy()
+    interrupted = repository.get(job_id)
+    assert interrupted is not None
+    previous_high_water = int(interrupted["overall_progress"])
+    assert interrupted["status"] == pipeline.status_for_stage(crash_stage).value
+
+    summary = repository.recover_startup()
+
+    assert summary.interrupted_requeued == 1
+    recovered = repository.get(job_id)
+    assert recovered is not None
+    assert recovered["status"] == JobStatus.QUEUED.value
+    assert recovered["active_run_id"] is None
+    assert recovered["overall_progress"] == previous_high_water
+    assert pipeline.resolve_first_required_stage(job_id) is resume_status
+
+    second_claim = repository.claim_next(
+        expected_job_id=job_id,
+        first_required_stage=resume_status,
+    )
+    assert second_claim is not None
+    new_run_id = str(second_claim["active_run_id"])
+    assert new_run_id != old_run_id
+    result = pipeline.run_claimed(job_id=job_id, run_id=new_run_id)
+
+    crash_index = CHECKPOINT_STAGE_ORDER.index(crash_stage)
+    for index, stage in enumerate(CHECKPOINT_STAGE_ORDER):
+        expected_increment = 1 if index > crash_index else 0
+        assert calls[stage.value] == before_resume[stage.value] + expected_increment
+    assert len(result.artifacts) == 8
+    assert len(repository.list_artifacts(job_id)) == 8
+    assert repository.get(job_id)["status"] == JobStatus.COMPLETED.value  # type: ignore[index]
+    artifact_paths = {path.name: path for path in result.artifacts}
+    source_payload = json.loads(artifact_paths["source.json"].read_text(encoding="utf-8"))
+    translated_payload = json.loads(artifact_paths["zh-CN.json"].read_text(encoding="utf-8"))
+    immutable_fields = (
+        "id",
+        "start_ms",
+        "end_ms",
+        "speaker",
+        "source_language",
+        "source_text",
+        "metadata",
+    )
+    for source_segment, translated_segment in zip(
+        source_payload["segments"],
+        translated_payload["segments"],
+        strict=True,
+    ):
+        assert {field: source_segment[field] for field in immutable_fields} == {
+            field: translated_segment[field] for field in immutable_fields
+        }
+        assert source_segment["translated_text"] == ""
+        assert translated_segment["translated_text"]
+
+    assert not repository.update_progress(
+        job_id,
+        old_run_id,
+        pipeline.status_for_stage(crash_stage),
+        stage_progress=100,
+        overall_progress=100,
+    )
+    assert not repository.update_worker_metadata(
+        job_id,
+        old_run_id,
+        pipeline.status_for_stage(crash_stage),
+        title="stale",
+    )
+    assert not repository.fail_job(
+        job_id,
+        old_run_id,
+        pipeline.status_for_stage(crash_stage),
+        ErrorCode.INTERNAL_ERROR,
+        "stale",
+    )
+    assert (
+        repository.register_artifact(
+            job_id=job_id,
+            run_id=old_run_id,
+            expected_status=pipeline.status_for_stage(crash_stage),
+            artifact_id="stale-artifact",
+            kind="source.txt",
+            path="stale/source.txt",
+        )
+        is ArtifactRegistrationResult.STALE
+    )
+    completed_artifacts = [
+        ArtifactSpec(
+            artifact_id=str(item["id"]),
+            kind=str(item["kind"]),
+            path=str(item["path"]),
+        )
+        for item in repository.list_artifacts(job_id)
+    ]
+    assert (
+        repository.complete_job_with_artifacts(
+            job_id=job_id,
+            run_id=old_run_id,
+            artifacts=completed_artifacts,
+        )
+        is ArtifactCompletionResult.STALE
+    )
+    pipeline.checkpoints.cleanup_unpublished_run(job_id, old_run_id)
+    assert all(path.is_file() for path in result.artifacts)
 
 
 @pytest.mark.parametrize("stage", CHECKPOINT_STAGE_ORDER)

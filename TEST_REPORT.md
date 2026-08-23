@@ -793,6 +793,105 @@ cd backend
   `WorkerShutdownError` 会明确报告未停止线程，不会谎报干净退出。
 - 本轮使用确定性 Fake Pipeline 验证 worker 编排，没有执行真实五样本 API+worker E2E。
 
+## Phase 2 Checkpoint 6：cancel / recovery
+
+实现：
+
+- `JobRepository.recover_startup()` 在单个 `BEGIN IMMEDIATE` 事务中完成启动恢复：
+  - queued 保持不变；
+  - downloading 至 exporting 写一次 `interrupted` event，清除旧 run 后回 queued；
+  - cancelling 写恢复原因的 cancelled event，清除旧 run 并设置
+    `CANCELLED_BY_USER`；
+  - completed、failed、cancelled 保持不变。
+- FastAPI lifespan 必须在 Pipeline factory、worker start 和任何 claim 之前提交恢复事务。
+- 重复恢复幂等；两连接并发恢复由 SQLite 写事务串行化，只有一个连接写 interrupted。
+- queued cancel 原子进入 cancelled，不生成 run；重复 cancel 返回稳定结果。
+- running cancel 原子进入 cancelling 并保留 active run；token 使用
+  `(job_id, run_id)` 定位，worker 清理完成后使用原 run 和 expected cancelling CAS
+  收敛 cancelled。
+- `JobCancellationToken` 同时观察内存取消和持久化 cancelling；第二个 Repository
+  连接发起的取消可在 MLX/sherpa/Ollama 类进程内调用返回后的安全边界生效。
+- 纯 shutdown cancellation 不写 `CANCELLED_BY_USER`；若用户取消与 shutdown 清理
+  交错，只有已确认完成清理的同一 run 可直接收敛 cancelled。
+- 已发布 checkpoint、overall high-water 和 JobOptions/engine fingerprint 规则保持；
+  新 claim 生成新 run，旧 run 的所有 CAS 和未发布目录清理权限失效。
+
+恢复调用次数矩阵：
+
+- downloaded_media：download 0 次；normalize、ASR、diarization、segment、
+  translate、export 各 1 次。
+- normalized_audio：download/normalize 0 次；ASR 至 export 各 1 次。
+- asr_result：download/normalize/ASR 0 次；diarization 至 export 各 1 次。
+- diarization_result：前四阶段 0 次；segment、translate、export 各 1 次。
+- source_transcript：至 segment 均 0 次；translate、export 各 1 次。
+- translated_transcript：至 translate 均 0 次；仅 export 1 次。
+- export_manifest：全部引擎和 exporter 0 次，直接校验并原子注册 8 个 artifact。
+
+测试：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest tests/integration/test_cancellation.py
+# 33 passed
+
+../.venv-smoke/bin/python -m pytest \
+  tests/unit/test_repository_recovery.py \
+  tests/integration/test_cancellation.py \
+  tests/integration/test_startup_recovery.py \
+  tests/integration/test_pipeline_checkpoints.py \
+  -k 'recovery or cancel'
+# 55 passed, 32 deselected，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest \
+  tests/integration/test_worker.py \
+  tests/integration/test_worker_lifecycle.py
+# 23 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest
+# 523 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# All checks passed!
+
+../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# 63 files already formatted
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# Success: no issues found in 34 source files
+```
+
+已验证：
+
+- queued cancel 与 claim 使用 Barrier 竞争 20 次，每次仅一方成功；取消胜出时
+  execution count 为 0，Job 永不被 claim。
+- 七个 active status 均执行 `active → cancelling → cancelled`，最终清 run，
+  error code 为 `CANCELLED_BY_USER`，且无 failed/automatic retry event。
+- claim 已提交但 token 尚在 admission 临界区时，cancel 等待同一同步门，注册后精确
+  取消该 run，不存在漏 token 窗口。
+- cancel/progress、Repository 既有 cancel/complete 和 cancel/automatic retry
+  多连接竞争均只有一个事务胜出，失败方零写入。
+- stop/user cancel 竞争参数化重复 20 次；无论先后顺序，用户已请求取消时最终均为
+  cancelled，纯 shutdown 路径仍留给启动恢复。
+- 真实 Python 父进程、child、grandchild 关闭管道后仍由既有 PGID TERM/KILL/wait
+  清理；cancelled 发布前全部 PID 已消失。
+- 七个 active 阶段崩溃均由启动恢复回 queued；resolver 只复用完整、连续且验证通过
+  的 checkpoint 前缀。
+- 每条恢复路径完成后 source/zh-CN 八文件可回读，Segment 的 ID、时间、Speaker、
+  source_language、source_text、metadata、顺序和数量保持不变。
+- stale old run 的进度、metadata、artifact、fail、complete 及 cleanup 均不能修改
+  新 run 或已发布产物。
+- lifespan 顺序为 recovery commit → Pipeline factory → worker claim；重复 lifespan
+  不重复恢复 terminal Job。
+
+范围限制：
+
+- 未新增 Checkpoint 7 的 retry/cancel/delete/artifact/settings HTTP 控制路由；
+  Checkpoint 6 测试直接调用 Repository 或 worker cancel service。
+- MLX/sherpa/Ollama 仍是协作式安全边界取消，最坏延迟为当前不可中断调用的剩余时间。
+- 未实现 Chrome UI、WebSocket、分布式队列、安装或打包。
+- 未重跑真实五样本媒体 E2E；本轮恢复使用已发布 checkpoint 和确定性引擎调用计数，
+  外部取消使用真实本地进程树。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：

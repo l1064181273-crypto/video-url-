@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Protocol
 
 from lvt.core.errors import LVTError
@@ -51,12 +52,43 @@ class WorkerStartupError(RuntimeError):
     pass
 
 
+class CancelRequestResult(StrEnum):
+    CANCELLED = "cancelled"
+    CANCELLING = "cancelling"
+    ALREADY_CANCELLING = "already_cancelling"
+    ALREADY_CANCELLED = "already_cancelled"
+    CONFLICT = "conflict"
+    NOT_FOUND = "not_found"
+    STALE = "stale"
+
+
 @dataclass(frozen=True)
 class WorkerFatalError:
     worker_index: int | None
     phase: str
     error_type: str
     message: str
+
+
+class JobCancellationToken(CancellationToken):
+    def __init__(self, repository: JobRepository, job_id: str, run_id: str) -> None:
+        super().__init__()
+        self.repository = repository
+        self.job_id = job_id
+        self.run_id = run_id
+
+    @property
+    def cancelled(self) -> bool:
+        if super().cancelled:
+            return True
+        current = self.repository.get(self.job_id)
+        if (
+            current is not None
+            and current["status"] == JobStatus.CANCELLING.value
+            and current["active_run_id"] == self.run_id
+        ):
+            self.cancel()
+        return super().cancelled
 
 
 class JobWorkerPool:
@@ -82,7 +114,8 @@ class JobWorkerPool:
         self._wake = threading.Event()
         self._threads: list[threading.Thread] = []
         self._pipelines: list[WorkerPipeline] = []
-        self._active_tokens: dict[int, CancellationToken] = {}
+        self._active_tokens: dict[tuple[str, str], JobCancellationToken] = {}
+        self._shutdown_cleaned_runs: set[tuple[str, str]] = set()
         self._admission_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._fatal_errors: list[WorkerFatalError] = []
@@ -124,6 +157,7 @@ class JobWorkerPool:
         if self._started:
             return
         self._stop.clear()
+        self._shutdown_cleaned_runs.clear()
         self._fatal_event.clear()
         with self._state_lock:
             self._fatal_errors.clear()
@@ -164,6 +198,59 @@ class JobWorkerPool:
 
     def notify(self) -> None:
         self._wake.set()
+
+    def request_cancel(self, job_id: str) -> CancelRequestResult:
+        with self._admission_lock:
+            current = self.repository.get(job_id)
+            if current is None:
+                return CancelRequestResult.NOT_FOUND
+            status = JobStatus(str(current["status"]))
+            run_id = str(current["active_run_id"]) if current["active_run_id"] is not None else None
+            if status is JobStatus.QUEUED:
+                if self.repository.request_cancel(job_id, JobStatus.QUEUED):
+                    return CancelRequestResult.CANCELLED
+                return self._cancel_result_after_race(job_id)
+            if status in ACTIVE_JOB_STATUSES:
+                if not self.repository.request_cancel(job_id, status):
+                    return self._cancel_result_after_race(job_id)
+                if run_id is not None:
+                    token_key = (job_id, run_id)
+                    token = self._active_tokens.get(token_key)
+                    if token is not None:
+                        token.cancel()
+                    elif (
+                        token_key in self._shutdown_cleaned_runs
+                        and self.repository.mark_cancelled(
+                            job_id,
+                            run_id,
+                            JobStatus.CANCELLING,
+                            now=self.clock.now(),
+                        )
+                    ):
+                        self._shutdown_cleaned_runs.discard(token_key)
+                        return CancelRequestResult.CANCELLED
+                return CancelRequestResult.CANCELLING
+            if status is JobStatus.CANCELLING:
+                if run_id is not None:
+                    token_key = (job_id, run_id)
+                    token = self._active_tokens.get(token_key)
+                    if token is not None:
+                        token.cancel()
+                    elif (
+                        token_key in self._shutdown_cleaned_runs
+                        and self.repository.mark_cancelled(
+                            job_id,
+                            run_id,
+                            JobStatus.CANCELLING,
+                            now=self.clock.now(),
+                        )
+                    ):
+                        self._shutdown_cleaned_runs.discard(token_key)
+                        return CancelRequestResult.CANCELLED
+                return CancelRequestResult.ALREADY_CANCELLING
+            if status is JobStatus.CANCELLED:
+                return CancelRequestResult.ALREADY_CANCELLED
+            return CancelRequestResult.CONFLICT
 
     def stop(
         self,
@@ -212,7 +299,6 @@ class JobWorkerPool:
         first_stage = selected_pipeline.resolve_first_required_stage(job_id)
         if before_claim is not None:
             before_claim()
-        worker_key = threading.get_ident()
         with self._admission_lock:
             if self._stop.is_set():
                 return False
@@ -224,8 +310,9 @@ class JobWorkerPool:
             if claimed is None:
                 return False
             run_id = str(claimed["active_run_id"])
-            token = CancellationToken()
-            self._active_tokens[worker_key] = token
+            token = JobCancellationToken(self.repository, job_id, run_id)
+            token_key = (job_id, run_id)
+            self._active_tokens[token_key] = token
         try:
             reporter = ProgressReporter(
                 self.repository,
@@ -239,21 +326,31 @@ class JobWorkerPool:
                 cancellation=token,
                 progress_callback=reporter,
             )
+            token.raise_if_cancelled()
         except ProcessCancelledError:
-            if not self._stop.is_set():
-                self._record_failure(
-                    job_id,
-                    run_id,
-                    ErrorCode.INTERNAL_ERROR,
-                    "任务执行被意外中断",
-                )
+            if not self._converge_cancelled(job_id, run_id):
+                if self._stop.is_set():
+                    with self._admission_lock:
+                        self._shutdown_cleaned_runs.add((job_id, run_id))
+                else:
+                    self._record_failure(
+                        job_id,
+                        run_id,
+                        ErrorCode.INTERNAL_ERROR,
+                        "任务执行被意外中断",
+                    )
         except StaleWorkerProgressError:
-            pass
+            self._converge_cancelled(job_id, run_id)
         except Exception as exc:
-            self._handle_exception(job_id, run_id, exc)
+            if not self._converge_cancelled(job_id, run_id):
+                self._handle_exception(job_id, run_id, exc)
         finally:
             with self._admission_lock:
-                self._active_tokens.pop(worker_key, None)
+                if token_key in self._shutdown_cleaned_runs and self._converge_cancelled(
+                    job_id, run_id
+                ):
+                    self._shutdown_cleaned_runs.discard(token_key)
+                self._active_tokens.pop(token_key, None)
         return True
 
     def _worker_main(self, worker_index: int, pipeline: WorkerPipeline) -> None:
@@ -333,6 +430,34 @@ class JobWorkerPool:
             message,
             now=self.clock.now(),
         )
+
+    def _converge_cancelled(self, job_id: str, run_id: str) -> bool:
+        current = self.repository.get(job_id)
+        if (
+            current is None
+            or current["status"] != JobStatus.CANCELLING.value
+            or current["active_run_id"] != run_id
+        ):
+            return False
+        return self.repository.mark_cancelled(
+            job_id,
+            run_id,
+            JobStatus.CANCELLING,
+            now=self.clock.now(),
+        )
+
+    def _cancel_result_after_race(self, job_id: str) -> CancelRequestResult:
+        current = self.repository.get(job_id)
+        if current is None:
+            return CancelRequestResult.NOT_FOUND
+        status = JobStatus(str(current["status"]))
+        if status is JobStatus.CANCELLED:
+            return CancelRequestResult.ALREADY_CANCELLED
+        if status is JobStatus.CANCELLING:
+            return CancelRequestResult.ALREADY_CANCELLING
+        if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            return CancelRequestResult.CONFLICT
+        return CancelRequestResult.STALE
 
     def _join_until(self, deadline: float) -> None:
         for thread in self._threads:

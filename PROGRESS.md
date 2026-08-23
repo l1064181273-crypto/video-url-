@@ -232,8 +232,25 @@
     fatal 后 stop 可重复调用且线程数归零。
   - ✅ Checkpoint 5 后全量 `pytest` 471 passed（1 条第三方警告）；worker 专项
     23 passed；Ruff lint/format 通过；mypy 34 个源码文件通过。
-  - ⏭️ 下一步：等待 Checkpoint 5 独立审查；未实现 Checkpoint 6 启动恢复和完整取消
-    编排，也未实现 Checkpoint 7 控制 API。
+  - ✅ Phase 2 Checkpoint 6 完成：应用 lifespan 在 worker factory/start/claim 前执行
+    单个 `BEGIN IMMEDIATE` 启动恢复事务；active Job 写 `interrupted` 后回 queued，
+    cancelling Job 收敛为 cancelled，queued 和 terminal Job 保持不变。
+  - ✅ 恢复清除旧 `active_run_id`，保留 checkpoint pointer 和 overall high-water；
+    重复恢复幂等，两连接并发恢复只写一次 interrupted event。
+  - ✅ queued cancel 原子进入 cancelled 且不生成 run；running cancel 保留 run_id
+    进入 cancelling，活动 token 以 `(job_id, run_id)` 精确定位，worker 清理后用原
+    run CAS 进入 cancelled。
+  - ✅ 持久化 `cancelling` 可由另一 Repository 连接发起，并由 worker 在进程内调用
+    返回后的安全边界观察；纯 shutdown 不伪造 `CANCELLED_BY_USER`。
+  - ✅ cancel/claim、cancel/progress、stop/cancel 各类竞态确定性覆盖；stop/cancel
+    重复 20 次，外部父/子/grandchild 在 cancelled 发布前全部消失。
+  - ✅ 七个 checkpoint 崩溃恢复起点均验证：只调用下游阶段；完整 export manifest
+    零引擎调用并原子注册恰好 8 个 artifact；旧 run 的状态、进度、metadata、
+    artifact、完成、失败和清理全部失效。
+  - ✅ Checkpoint 6 后全量 `pytest` 523 passed（1 条第三方警告）；专项
+    55 passed（32 deselected）；worker 回归 23 passed；Ruff lint/format 通过；
+    mypy 34 个源码文件通过。
+  - ⏭️ 下一步：等待 Checkpoint 6 独立审查；未实现 Checkpoint 7 控制 API。
 
 ## 已知阻塞
 

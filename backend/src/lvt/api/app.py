@@ -51,6 +51,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> Any:
+        recovery = repository.recover_startup()
+        _app.state.startup_recovery = recovery
         if worker_pool is not None:
             worker_pool.start()
         try:
