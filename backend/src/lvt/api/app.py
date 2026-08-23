@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
 from lvt.api.control import JobFileStore, UnsafeJobPathError
+from lvt.core.capabilities import CapabilitiesSource
 from lvt.core.instance_lock import ProcessInstanceLock
 from lvt.core.jobs import (
     ACTIVE_JOB_STATUSES,
@@ -49,7 +50,7 @@ def create_app(
     *,
     db_path: Path,
     api_token: str,
-    capabilities: dict[str, Any] | None = None,
+    capabilities_provider: CapabilitiesSource | None = None,
     work_root: Path | None = None,
     pipeline_builder: Callable[[JobRepository], WorkerPipeline] | None = None,
     worker_concurrency: int | None = None,
@@ -104,6 +105,7 @@ def create_app(
     app.state.worker_pool = worker_pool
     app.state.instance_lock = instance_lock
     app.state.file_store = file_store
+    app.state.capabilities_provider = capabilities_provider
 
     def require_token(
         supplied_token: Annotated[str | None, Header(alias="X-LVT-Token")] = None,
@@ -128,7 +130,20 @@ def create_app(
 
     @app.get("/api/v1/capabilities", dependencies=[Depends(require_token)])
     def get_capabilities() -> dict[str, Any]:
-        return capabilities or {}
+        if capabilities_provider is None:
+            _raise_api_error(
+                503,
+                "CAPABILITIES_UNAVAILABLE",
+                "本地能力探测暂时不可用",
+            )
+        try:
+            return capabilities_provider.get_capabilities()
+        except Exception:
+            _raise_api_error(
+                503,
+                "CAPABILITIES_UNAVAILABLE",
+                "本地能力探测暂时不可用",
+            )
 
     @app.post("/api/v1/jobs", dependencies=[Depends(require_token)])
     def create_jobs(payload: CreateJobsRequest) -> dict[str, list[dict[str, Any]]]:
