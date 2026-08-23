@@ -13,6 +13,7 @@ import {
   parseJobsResponse,
   parseSettingsResponse,
 } from "../../src/api/contracts";
+import { cleanupE2eResources } from "../support/e2e-resources";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "../../..");
 const BACKEND_ROOT = resolve(PROJECT_ROOT, "backend");
@@ -20,8 +21,8 @@ const PYTHON = resolve(PROJECT_ROOT, ".venv-smoke/bin/python");
 const EXTENSION_PATH = resolve(PROJECT_ROOT, "extension/dist");
 const TOKEN = "CheckpointOneRuntimeToken";
 
-let backend: ChildProcessWithoutNullStreams;
-let dataRoot: string;
+let backend: ChildProcessWithoutNullStreams | undefined;
+let dataRoot: string | undefined;
 let baseUrl: string;
 
 test.beforeAll(async () => {
@@ -46,8 +47,7 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await stopProcess(backend);
-  await rm(dataRoot, { force: true, recursive: true });
+  await cleanupE2eResources({ backend, dataRoot });
 });
 
 test("unpacked extension reads frozen local API contracts without leaking its token", async () => {
@@ -198,24 +198,4 @@ async function waitForOutput(child: ChildProcessWithoutNullStreams, marker: stri
     child.stderr.on("data", onData);
     child.once("exit", onExit);
   });
-}
-
-async function stopProcess(child: ChildProcessWithoutNullStreams | undefined): Promise<void> {
-  if (child?.exitCode !== null) {
-    return;
-  }
-  const exited = new Promise<void>((resolvePromise) => {
-    child.once("exit", () => resolvePromise());
-  });
-  child.kill("SIGTERM");
-  const stopped = await Promise.race([
-    exited.then(() => true),
-    new Promise<false>((resolvePromise) => {
-      setTimeout(() => resolvePromise(false), 10_000);
-    }),
-  ]);
-  if (!stopped) {
-    child.kill("SIGKILL");
-    await exited;
-  }
 }

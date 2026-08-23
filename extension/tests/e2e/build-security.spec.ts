@@ -1,5 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { extname, relative, resolve } from "node:path";
 
 import { expect, test } from "@playwright/test";
 
@@ -7,10 +7,25 @@ const DIST = resolve(import.meta.dirname, "../../dist");
 
 test("built extension contains no remote or executable inline code", async () => {
   const files = await listFiles(DIST);
+  const relativeFiles = files.map((file) => relative(DIST, file)).sort();
   expect(files).toContain(resolve(DIST, "manifest.json"));
   expect(files).toContain(resolve(DIST, "background.js"));
   expect(files).toContain(resolve(DIST, "sidepanel.html"));
-  expect(files.some((file) => file.endsWith(".map"))).toBe(false);
+  expect(
+    relativeFiles.every(
+      (file) =>
+        ["background.js", "manifest.json", "sidepanel.html", "sidepanel.js"].includes(file) ||
+        (file.startsWith("assets/") && [".css", ".js"].includes(extname(file))),
+    ),
+  ).toBe(true);
+  expect(
+    relativeFiles.some(
+      (file) =>
+        file.includes("test-results") ||
+        ["error-context.md", "trace.zip"].includes(file) ||
+        [".map", ".md", ".zip"].includes(extname(file)),
+    ),
+  ).toBe(false);
 
   for (const file of files.filter((path) => /\.(?:css|html|js|json)$/u.test(path))) {
     const content = await readFile(file, "utf8");
