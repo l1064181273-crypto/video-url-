@@ -221,8 +221,17 @@
     原子进入 failed。仅结构化 auto-requeue 错误重试，消息文本不能开启重试。
   - ✅ shutdown 先停止 claim，有限等待后取消协作式执行并再次有限等待；测试结束
     worker thread 数为 0，第二个 queued Job 未被 claim。
-  - ✅ Checkpoint 5 后全量 `pytest` 461 passed（1 条第三方警告）；worker 专项
-    13 passed；Ruff lint/format 通过；mypy 34 个源码文件通过。
+  - ✅ Checkpoint 5 生命周期审查修复：stop 标志、claim 和 token 注册通过统一
+    admission barrier 同步；stop 前未进入 admission 的 worker 零 claim，已进入的
+    claim 必须先注册 token，shutdown 才能继续。
+  - ✅ factory 在 start/lifespan 返回前同步构造全部 Pipeline；首次或第二次构造失败
+    均阻止启动且无线程残留。
+  - ✅ resolver、Repository peek/claim 等未捕获异常统一记录 fatal 并退出当前线程；
+    任一 fatal 或 live worker 少于配置数均使 `/health` 返回 503 unhealthy。
+  - ✅ admission 两类竞态各重复 20 次，无漏取消、WorkerShutdownError 或额外 claim；
+    fatal 后 stop 可重复调用且线程数归零。
+  - ✅ Checkpoint 5 后全量 `pytest` 471 passed（1 条第三方警告）；worker 专项
+    23 passed；Ruff lint/format 通过；mypy 34 个源码文件通过。
   - ⏭️ 下一步：等待 Checkpoint 5 独立审查；未实现 Checkpoint 6 启动恢复和完整取消
     编排，也未实现 Checkpoint 7 控制 API。
 

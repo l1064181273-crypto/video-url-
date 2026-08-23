@@ -728,16 +728,26 @@ cd backend
 - 第三次执行失败由 Repository 原子进入 failed；工具内部 retry 不增加 Job execution。
 - shutdown 先设置 stop，禁止新 claim；等待 graceful deadline 后取消活动 token，再有限
   等待 worker 退出。测试中的协作式 Pipeline 全部退出且无后台线程。
+- stop 设置停止标志后穿过与 claim/token 注册共用的 admission lock；已进入 admission
+  的 claim 必须在 stop 快照前注册 token，尚未进入者看到 stop 后不得 claim。
+- Pipeline factory 在 `start()` 内按 concurrency 同步预构造；任意一次失败均抛出
+  `WorkerStartupError`，lifespan 启动失败且不会创建部分 worker。
+- worker loop 捕获 resolver、Repository 和其他基础设施异常，记录结构化 fatal 后退出；
+  不重试基础设施异常，因此不会形成无界热循环。
+- 健康策略为严格 all-workers：存在任意 fatal、live worker 少于配置数量、尚未启动或
+  正在停止时均为 unhealthy；FastAPI `/health` 返回 HTTP 503。
 
 测试：
 
 ```bash
 cd backend
-../.venv-smoke/bin/python -m pytest tests/integration/test_worker.py
-# 13 passed，1 条第三方 StarletteDeprecationWarning
+../.venv-smoke/bin/python -m pytest \
+  tests/integration/test_worker.py \
+  tests/integration/test_worker_lifecycle.py
+# 23 passed，1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m pytest
-# 461 passed，1 条第三方 StarletteDeprecationWarning
+# 471 passed，1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m ruff check src tests ../scripts
 # All checks passed!
@@ -763,6 +773,17 @@ cd backend
 - 模拟工具内部三次尝试时 `execution_count_total` 只增加一次。
 - 手工 retry 仍只增加 retry_cycle、重置周期自动次数并保留总执行数。
 - shutdown 期间第二个 queued Job 不被 claim；协作取消后 live worker thread 为 0。
+- stop 在 peek/resolver 后但 admission 前发生的竞态重复 20 次，全部保持
+  `execution_count_total=0`。
+- stop 与 admission 内阻塞 claim 竞争重复 20 次，全部在 shutdown token 快照前完成
+  token 注册并被取消，无 WorkerShutdownError 或线程残留。
+- concurrency=2 的 factory 第一次/第二次构造失败均同步终止 start，未创建线程；
+  TestClient lifespan 同样将失败返回给启动方。
+- resolver、peek、claim 分别抛 RuntimeError 时只执行一次，fatal 可读取，worker 无
+  未捕获线程异常且不会热循环。
+- concurrency=2 时一个 worker fatal、另一个仍存活也返回 unhealthy，不将降级容量
+  误报为全部健康。
+- fatal 后 `stop()` 可重复调用，调用有限且 live worker thread 为 0。
 
 范围限制：
 

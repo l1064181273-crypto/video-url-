@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -46,6 +47,18 @@ class WorkerShutdownError(RuntimeError):
     pass
 
 
+class WorkerStartupError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class WorkerFatalError:
+    worker_index: int | None
+    phase: str
+    error_type: str
+    message: str
+
+
 class JobWorkerPool:
     def __init__(
         self,
@@ -68,29 +81,86 @@ class JobWorkerPool:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._pipelines: list[WorkerPipeline] = []
         self._active_tokens: dict[int, CancellationToken] = {}
-        self._active_lock = threading.Lock()
+        self._admission_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._fatal_errors: list[WorkerFatalError] = []
+        self._fatal_event = threading.Event()
+        self._started = False
 
     @property
     def live_thread_count(self) -> int:
         return sum(thread.is_alive() for thread in self._threads)
 
+    @property
+    def fatal_errors(self) -> tuple[WorkerFatalError, ...]:
+        with self._state_lock:
+            return tuple(self._fatal_errors)
+
+    def wait_for_fatal(self, timeout: float | None = None) -> bool:
+        return self._fatal_event.wait(timeout)
+
+    def wait_until_stopping(self, timeout: float | None = None) -> bool:
+        return self._stop.wait(timeout)
+
+    def health_snapshot(self) -> dict[str, int | str]:
+        fatal_count = len(self.fatal_errors)
+        live_workers = self.live_thread_count
+        healthy = (
+            self._started
+            and not self._stop.is_set()
+            and fatal_count == 0
+            and live_workers == self.concurrency
+        )
+        return {
+            "status": "healthy" if healthy else "unhealthy",
+            "configured_workers": self.concurrency,
+            "live_workers": live_workers,
+            "fatal_count": fatal_count,
+        }
+
     def start(self) -> None:
-        if self.live_thread_count:
+        if self._started:
             return
-        self.repository.set_worker_concurrency(self.concurrency)
         self._stop.clear()
+        self._fatal_event.clear()
+        with self._state_lock:
+            self._fatal_errors.clear()
+        pipelines: list[WorkerPipeline] = []
+        try:
+            for _ in range(self.concurrency):
+                pipelines.append(self.pipeline_factory())
+        except BaseException as exc:
+            self._stop.set()
+            self._record_fatal(None, "pipeline_factory", exc)
+            raise WorkerStartupError("worker pipeline factory failed") from exc
+
+        self.repository.set_worker_concurrency(self.concurrency)
+        self._pipelines = pipelines
         self._threads = [
             threading.Thread(
                 target=self._worker_main,
-                args=(index,),
+                args=(index, pipelines[index]),
                 name=f"lvt-worker-{index + 1}",
                 daemon=False,
             )
             for index in range(self.concurrency)
         ]
-        for thread in self._threads:
-            thread.start()
+        self._started = True
+        started_threads: list[threading.Thread] = []
+        try:
+            for thread in self._threads:
+                thread.start()
+                started_threads.append(thread)
+        except BaseException as exc:
+            self._stop.set()
+            self._wake.set()
+            self._threads = started_threads
+            self._join_until(time.monotonic() + 5)
+            self._started = False
+            self._record_fatal(None, "thread_start", exc)
+            raise WorkerStartupError("worker thread failed to start") from exc
 
     def notify(self) -> None:
         self._wake.set()
@@ -103,11 +173,16 @@ class JobWorkerPool:
     ) -> None:
         if graceful_timeout < 0 or cancel_timeout <= 0:
             raise ValueError("worker shutdown timeouts are invalid")
+        graceful_deadline = time.monotonic() + graceful_timeout
         self._stop.set()
         self._wake.set()
-        self._join_until(time.monotonic() + graceful_timeout)
+        # Admission is a barrier: any claim already inside must register its token
+        # before shutdown can proceed, while later callers observe _stop and exit.
+        with self._admission_lock:
+            pass
+        self._join_until(graceful_deadline)
         if self.live_thread_count:
-            with self._active_lock:
+            with self._admission_lock:
                 tokens = list(self._active_tokens.values())
             for token in tokens:
                 token.cancel()
@@ -117,6 +192,8 @@ class JobWorkerPool:
                 f"{self.live_thread_count} worker thread(s) did not stop in time"
             )
         self._threads = []
+        self._pipelines = []
+        self._started = False
 
     def run_once(
         self,
@@ -135,28 +212,27 @@ class JobWorkerPool:
         first_stage = selected_pipeline.resolve_first_required_stage(job_id)
         if before_claim is not None:
             before_claim()
-        if self._stop.is_set():
-            return False
-        claimed = self.repository.claim_next(
-            expected_job_id=job_id,
-            first_required_stage=first_stage,
-            now=now,
-        )
-        if claimed is None:
-            return False
-
-        run_id = str(claimed["active_run_id"])
-        token = CancellationToken()
         worker_key = threading.get_ident()
-        with self._active_lock:
+        with self._admission_lock:
+            if self._stop.is_set():
+                return False
+            claimed = self.repository.claim_next(
+                expected_job_id=job_id,
+                first_required_stage=first_stage,
+                now=now,
+            )
+            if claimed is None:
+                return False
+            run_id = str(claimed["active_run_id"])
+            token = CancellationToken()
             self._active_tokens[worker_key] = token
-        reporter = ProgressReporter(
-            self.repository,
-            job_id,
-            run_id,
-            high_water=int(claimed["overall_progress"]),
-        )
         try:
+            reporter = ProgressReporter(
+                self.repository,
+                job_id,
+                run_id,
+                high_water=int(claimed["overall_progress"]),
+            )
             selected_pipeline.run_claimed(
                 job_id=job_id,
                 run_id=run_id,
@@ -176,17 +252,19 @@ class JobWorkerPool:
         except Exception as exc:
             self._handle_exception(job_id, run_id, exc)
         finally:
-            with self._active_lock:
+            with self._admission_lock:
                 self._active_tokens.pop(worker_key, None)
         return True
 
-    def _worker_main(self, _worker_index: int) -> None:
-        pipeline = self.pipeline_factory()
-        while not self._stop.is_set():
-            if self.run_once(pipeline):
-                continue
-            self._wake.wait(self.poll_interval)
-            self._wake.clear()
+    def _worker_main(self, worker_index: int, pipeline: WorkerPipeline) -> None:
+        try:
+            while not self._stop.is_set():
+                if self.run_once(pipeline):
+                    continue
+                self._wake.wait(self.poll_interval)
+                self._wake.clear()
+        except BaseException as exc:
+            self._record_fatal(worker_index, "worker_loop", exc)
 
     def _handle_exception(self, job_id: str, run_id: str, error: Exception) -> None:
         if isinstance(error, LVTError):
@@ -262,3 +340,19 @@ class JobWorkerPool:
             if remaining <= 0:
                 return
             thread.join(remaining)
+
+    def _record_fatal(
+        self,
+        worker_index: int | None,
+        phase: str,
+        error: BaseException,
+    ) -> None:
+        fatal = WorkerFatalError(
+            worker_index=worker_index,
+            phase=phase,
+            error_type=type(error).__name__,
+            message=str(error),
+        )
+        with self._state_lock:
+            self._fatal_errors.append(fatal)
+        self._fatal_event.set()

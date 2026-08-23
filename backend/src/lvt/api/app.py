@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from lvt.core.models import JobOptions
@@ -71,9 +72,17 @@ def create_app(
                 detail={"error_code": "UNAUTHORIZED", "message": "配对 Token 无效"},
             )
 
-    @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "healthy", "version": "0.1.0"}
+    @app.get("/health", response_model=None)
+    def health() -> Any:
+        payload: dict[str, Any] = {"status": "healthy", "version": "0.1.0"}
+        if worker_pool is None:
+            return payload
+        worker_health = worker_pool.health_snapshot()
+        payload["worker"] = worker_health
+        if worker_health["status"] == "healthy":
+            return payload
+        payload["status"] = "unhealthy"
+        return JSONResponse(status_code=503, content=payload)
 
     @app.get("/api/v1/capabilities", dependencies=[Depends(require_token)])
     def get_capabilities() -> dict[str, Any]:
