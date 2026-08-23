@@ -7,14 +7,9 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from lvt.core.models import JobOptions
 from lvt.db.repository import JobRepository
 from lvt.security.urls import validate_public_media_url
-
-
-class JobOptions(BaseModel):
-    asr_model: str = "default"
-    translate_to: str = "zh-CN"
-    diarization: bool = True
 
 
 class CreateJobsRequest(BaseModel):

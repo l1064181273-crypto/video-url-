@@ -6,6 +6,12 @@ from typing import Protocol
 
 
 @dataclass(frozen=True)
+class DownloadedMedia:
+    media_path: Path
+    title: str
+
+
+@dataclass(frozen=True)
 class MediaInfo:
     audio_path: Path
     title: str
@@ -45,10 +51,20 @@ class Downloader(Protocol):
     def download(self, url: str, work_dir: Path) -> MediaInfo: ...
 
 
+class StagedDownloader(Downloader, Protocol):
+    def download_media(self, url: str, work_dir: Path) -> DownloadedMedia: ...
+
+    def normalize_audio(self, media: DownloadedMedia, work_dir: Path) -> MediaInfo: ...
+
+
 class ASREngine(Protocol):
     version: str
 
     def transcribe(self, audio_path: Path) -> ASRResult: ...
+
+
+class ConfigurableASREngine(ASREngine, Protocol):
+    def transcribe_with_model(self, audio_path: Path, model: str) -> ASRResult: ...
 
 
 class DiarizationEngine(Protocol):

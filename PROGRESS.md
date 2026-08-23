@@ -161,8 +161,24 @@
     文件发布或下载。
   - ✅ Checkpoint 2 专项测试 14 passed；全量 `pytest` 380 passed（1 条第三方警告）；
     Ruff lint/format 通过；mypy 28 个源码文件通过。
-  - ⏭️ 下一步：等待 Checkpoint 2 独立审查；未开始 Checkpoint 3 Pipeline
-    checkpoint，也未实现 worker、进程控制、启动恢复或控制 API。
+  - ✅ Checkpoint 2 审查修正：所有新 datetime 写入统一规范化为 UTC；自动 requeue
+    返回 REQUEUED/BUDGET_EXHAUSTED_AND_FAILED/STALE，第三次合法失败原子进入 failed。
+  - ✅ 普通 complete 已移除；`complete_job_with_artifacts` 在同一事务核对并登记
+    source/zh-CN 八文件、更新 completed 和写 event。缺失、重复、跨 Job 冲突、
+    stale run 和 event 失败均不会留下部分完成。
+  - ✅ retry/cancel、complete/cancel 多连接竞争测试确认每次只有一方成功。
+  - ✅ Phase 2 Checkpoint 3 完成：新增七阶段 checkpoint manifest、原子输出发布、
+    SHA-256/大小/记录数验证、连续前缀 resolver 和 run-scoped 路径隔离。
+  - ✅ checkpoint Pipeline 从 Repository 读取持久化 JobOptions；真实 MLX 调用显式使用
+    持久化 `asr_model`；`diarization=false` 生成 skipped checkpoint 且不调用引擎。
+  - ✅ 缓存损坏、截断、路径穿越、符号链接、options/engine 版本变化均从正确阶段及
+    下游重跑；stale run 不能发布 pointer 或删除当前 run 数据。
+  - ✅ checkpoint Pipeline 最终生成、解析并原子登记 8 个 artifact；全部 Segment
+    ID、时间戳、Speaker、语言、source_text、metadata、顺序和数量保持一致。
+  - ✅ Checkpoint 3 专项测试 16 passed；全量 `pytest` 410 passed（1 条第三方警告）；
+    Ruff lint/format 通过；mypy 29 个源码文件通过。
+  - ⏭️ 下一步：等待 Checkpoint 3 独立审查；未开始 Checkpoint 4 进程控制，也未实现
+    lifespan worker、启动恢复或控制 API。
 
 ## 已知阻塞
 

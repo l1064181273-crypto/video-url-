@@ -11,7 +11,7 @@ import yt_dlp  # type: ignore[import-untyped]
 from yt_dlp.utils import DownloadError  # type: ignore[import-untyped]
 
 from lvt.core.errors import LVTError
-from lvt.engines.base import MediaInfo
+from lvt.engines.base import DownloadedMedia, MediaInfo
 from lvt.security.paths import ensure_within_root, safe_filename
 
 
@@ -48,6 +48,10 @@ class YtDlpFFmpegDownloader:
         self.version = f"yt-dlp:{yt_dlp.version.__version__};ffmpeg:{self._ffmpeg_version()}"
 
     def download(self, url: str, work_dir: Path) -> MediaInfo:
+        downloaded = self.download_media(url, work_dir)
+        return self.normalize_audio(downloaded, work_dir)
+
+    def download_media(self, url: str, work_dir: Path) -> DownloadedMedia:
         work_dir.mkdir(parents=True, exist_ok=True)
         output_template = str(work_dir / "download.%(ext)s")
         options: dict[str, Any] = {
@@ -78,6 +82,10 @@ class YtDlpFFmpegDownloader:
             raise LVTError("MEDIA_INVALID", "下载产物不存在或为空")
 
         title = safe_filename(str(info.get("title") or downloaded.stem))
+        return DownloadedMedia(media_path=downloaded, title=title)
+
+    def normalize_audio(self, media: DownloadedMedia, work_dir: Path) -> MediaInfo:
+        downloaded = ensure_within_root(media.media_path, work_dir)
         audio_path = ensure_within_root(work_dir / "audio.normalized.wav", work_dir)
         command = [
             os.fspath(self.ffmpeg_path),
@@ -104,7 +112,7 @@ class YtDlpFFmpegDownloader:
         duration_ms = self._probe_duration_ms(audio_path)
         if not audio_path.is_file() or audio_path.stat().st_size == 0 or duration_ms <= 0:
             raise LVTError("MEDIA_INVALID", "规范化音频无效")
-        return MediaInfo(audio_path=audio_path, title=title, duration_ms=duration_ms)
+        return MediaInfo(audio_path=audio_path, title=media.title, duration_ms=duration_ms)
 
     def _probe_duration_ms(self, path: Path) -> int:
         command = [

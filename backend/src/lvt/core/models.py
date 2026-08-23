@@ -5,6 +5,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class JobOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asr_model: str = "default"
+    translate_to: str = "zh-CN"
+    diarization: bool = True
+
+
 class Segment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -38,6 +38,9 @@ class MLXWhisperASREngine:
         self.version = f"mlx-whisper:{package_version};model={model}"
 
     def transcribe(self, audio_path: Path) -> ASRResult:
+        return self.transcribe_with_model(audio_path, self.model)
+
+    def transcribe_with_model(self, audio_path: Path, model: str) -> ASRResult:
         if not audio_path.is_file() or audio_path.stat().st_size == 0:
             raise LVTError("MEDIA_INVALID", "ASR 输入音频不存在或为空")
         duration_ms = self._wav_duration_ms(audio_path)
@@ -49,7 +52,7 @@ class MLXWhisperASREngine:
         try:
             result = self.transcribe_fn(
                 os.fspath(audio_path),
-                path_or_hf_repo=self.model,
+                path_or_hf_repo=model,
                 word_timestamps=False,
                 verbose=False,
             )

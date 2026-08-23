@@ -465,6 +465,111 @@ cd backend
 - artifact 本轮只有数据库登记和冲突语义，不发布、移动、删除或下载文件。
 - 本轮没有修改媒体或翻译执行路径，因此未运行真实 Ollama 或五样本媒体 E2E。
 
+## Phase 2 Checkpoint 3：Pipeline checkpoint
+
+### Checkpoint 2 前置修正
+
+- 所有 Repository datetime 写入先执行 `astimezone(UTC).isoformat()`；跨 offset 的
+  created/next-at、到期边界和三字段排序均有测试。
+- automatic requeue 使用三态结果；第三次合法失败在同一事务写最终错误、
+  `finished_at`、failed 状态和 event，stale run 仍零写入。
+- 普通 `complete_job` 已移除；只允许 `complete_job_with_artifacts` 完成任务。
+- 完成事务要求精确八种 source/zh-CN artifact；0/1/7/9 个、重复 kind、跨 Job
+  artifact、stale run 或 completed event 失败时均不产生部分完成。
+- retry/cancel 和 complete/cancel 使用真实多连接竞争，确认只有一个事务获胜。
+
+前置修正 commit：
+
+```text
+93da0fa Fix Phase 2 retry timing and atomic artifact completion
+```
+
+### Checkpoint 3 测试先行
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest tests/integration/test_pipeline_checkpoints.py
+# exit 2：ImportError: DownloadedMedia
+```
+
+最终专项和质量门：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest tests/integration/test_pipeline_checkpoints.py
+# 16 passed
+
+../.venv-smoke/bin/python -m pytest
+# 410 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# All checks passed!
+
+../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# 49 files already formatted
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# Success: no issues found in 29 source files
+```
+
+### Manifest schema
+
+每个 manifest 包含：
+
+```text
+schema_version
+job_id
+stage
+run_id
+created_at
+source_url_sha256
+job_options
+options_fingerprint
+engine_names
+engine_versions
+engine_fingerprint
+input_checkpoint_fingerprints
+previous_manifest
+outputs[].relative_path
+outputs[].kind
+outputs[].byte_size
+outputs[].sha256
+outputs[].record_count
+manifest_fingerprint
+```
+
+### 缓存复用矩阵
+
+| 首个无效阶段 | 复用 | 重跑 |
+| --- | --- | --- |
+| downloaded_media | 无 | 全部七阶段 |
+| normalized_audio | downloaded_media | normalized_audio 及下游 |
+| asr_result | 前两阶段 | asr_result 及下游 |
+| diarization_result | 前三阶段 | diarization_result 及下游 |
+| source_transcript | 前四阶段 | source_transcript 及下游 |
+| translated_transcript | 前五阶段 | translated_transcript、export |
+| export_manifest | 前六阶段 | 仅 export |
+| 全部合法 | 全部七阶段 | 不调用引擎或 exporter，只原子完成 DB |
+
+已验证：
+
+- manifest 截断、hash、size、record_count、路径穿越和符号链接均被拒绝。
+- JobOptions、ASR model、diarization、目标语言及 engine version 按受影响阶段失效。
+- 每个 run 只写 `work/<job_id>/runs/<run_id>/`；重跑输出与旧 run 路径不同。
+- checkpoint pointer 只通过当前 run/status CAS 发布；stale run 只能清理自己的未发布目录。
+- `diarization=false` 不调用 diarization engine，并保留单说话人分段语义。
+- MLX checkpoint 路径使用持久化 `asr_model`，不读取当前默认值覆盖。
+- 八个导出文件完成 TXT/SRT/VTT/JSON 回读；source/zh-CN 的所有 Segment 不变量一致。
+- 最终任务完成调用 `complete_job_with_artifacts`，artifact、completed 和 event 原子提交。
+- Phase 1 既有同步 Pipeline 接口和测试保持通过。
+
+范围限制：
+
+- 本轮只拆分已有 download/normalize 调用，没有改变 yt-dlp/FFmpeg 子进程启动、
+  TERM/KILL/wait 或 timeout；这些属于 Checkpoint 4。
+- 未实现 lifespan worker、启动恢复或控制 API。
+- 本轮使用确定性 Fake Engine 验证 checkpoint，没有运行真实 Ollama 或五样本媒体 E2E。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：
