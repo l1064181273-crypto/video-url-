@@ -397,6 +397,74 @@ cd backend
 - `attempts` 作为 v2 兼容列暂时保留，只用于 migration 回填；后续逻辑使用
   `execution_count_total`、`retry_cycle` 和 `automatic_requeue_count_in_cycle`。
 
+## Phase 2 Checkpoint 2：Repository CAS
+
+### Checkpoint 1 前置审查修正
+
+- queued 合法目标在测试中逐项独立枚举，不再使用生产 `ACTIVE_JOB_STATUSES` 构造期望值。
+- `ClassifiedError` 同时返回规范化 `ErrorCode` 和 `ErrorPolicy`；未知结构化 code
+  返回 `INTERNAL_ERROR`，异常消息中的 `DOWNLOAD_FAILED` 等文本不影响分类。
+- `initialize()` 先取得 `BEGIN IMMEDIATE` 写事务，再读取 schema version。
+- 受控双连接测试在修复前稳定复现 `database is locked`；修复后两个 initialize
+  均成功，最终只有一个 v3 schema version 和一条 concurrency setting。
+- WAL 首次启用对 `SQLITE_BUSY/SQLITE_LOCKED` 使用 5 秒内有限等待，不解析错误消息。
+
+### 测试先行
+
+Repository CAS 实现前执行：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest tests/unit/test_repository_cas.py
+# exit 2：ImportError: ArtifactRegistrationResult
+```
+
+最终专项与全量质量门：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest tests/unit/test_repository_cas.py
+# 14 passed
+
+../.venv-smoke/bin/python -m pytest
+# 380 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# All checks passed!
+
+../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# 46 files already formatted
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# Success: no issues found in 28 source files
+```
+
+### 已验证的 Repository 契约
+
+- 两个连接同时竞争同一 queued Job 时只有一个 claim 成功。
+- 多 Job 严格按 `next_attempt_at`、`created_at`、`uuid` 排序。
+- claim 验证 active `first_required_stage`，生成唯一 `run_id`，增加
+  `execution_count_total`，只设置一次 `started_at` 并写 claimed event。
+- reclaimed Job 使用新 `run_id`；旧 run 对状态、进度、metadata、错误、artifact
+  和 completed 更新全部返回零写入。
+- 当前 run 可通过一次 CAS 写入 title、duration、detected_language、work directory
+  和 checkpoint pointer。
+- `stage_progress` 和 `overall_progress` 单调；旧 stage 或较小值被拒绝。
+- 状态和 event 在同一事务；触发器注入 event 失败时状态更新回滚。
+- 自动 requeue 恰好允许每周期 2 次；手工 retry 增加 cycle、重置周期自动次数，
+  不重置总执行数。
+- queued cancel 直接 cancelled；running cancel 保留 run，worker cancelled 后清空。
+- artifact 注册明确返回 created、idempotent、conflict 或 stale。
+- Repository 的公开写方法拒绝字符串 status、`interrupted` 和字符串 error code。
+- 持有 SQLite 写锁时，另一连接在 `busy_timeout` 内等待，释放锁后 CAS 成功。
+
+范围限制：
+
+- 未实现 lifespan worker、Pipeline/checkpoint manifest、yt-dlp/FFmpeg 进程控制、
+  启动恢复或 FastAPI 控制路由。
+- artifact 本轮只有数据库登记和冲突语义，不发布、移动、删除或下载文件。
+- 本轮没有修改媒体或翻译执行路径，因此未运行真实 Ollama 或五样本媒体 E2E。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：

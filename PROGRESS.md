@@ -145,8 +145,24 @@
     `UnsupportedSchemaVersionError` 在收集阶段失败；实现后目标测试 178 passed。
   - ✅ Checkpoint 1 全量质量门：`pytest` 363 passed（1 条第三方弃用警告）；
     Ruff lint/format 通过；mypy 28 个源码文件通过。
-  - ⏭️ 下一步：等待 Checkpoint 1 独立审查；未开始 Checkpoint 2 的 claim/CAS
-    Repository 操作、worker、Pipeline checkpoint、取消、恢复或控制 API。
+  - ✅ Checkpoint 1 审查缺口修复：queued 期望集合完全独立枚举；新增
+    `ClassifiedError` 并将未知结构化 code 规范化为 `INTERNAL_ERROR`；initialize
+    在 `BEGIN IMMEDIATE` 后读取 schema version，并通过双连接并发 migration 测试。
+  - ✅ Phase 2 Checkpoint 2 完成：实现最早到期 queued Job 的原子 claim、
+    `first_required_stage` 校验、每次唯一 `run_id`、总执行计数和 claimed event。
+  - ✅ 所有 worker 状态、进度、错误、metadata、checkpoint pointer、artifact 和完成
+    更新均要求 `job_id + run_id + expected_status`；stale run、旧 stage 和较小进度
+    均为零写入。
+  - ✅ 状态变化与 event 同事务；注入 event 写失败时状态完整回滚。
+  - ✅ 自动 requeue 每周期最多 2 次；手工 retry 增加 cycle、重置周期计数并保留总执行数。
+  - ✅ queued cancel 直接 cancelled；running cancel 保留 `active_run_id` 进入
+    cancelling，worker 使用原 run 收敛到 cancelled 后清空。
+  - ✅ artifact Repository 提供 created/idempotent/conflict/stale 数据库语义，未实现
+    文件发布或下载。
+  - ✅ Checkpoint 2 专项测试 14 passed；全量 `pytest` 380 passed（1 条第三方警告）；
+    Ruff lint/format 通过；mypy 28 个源码文件通过。
+  - ⏭️ 下一步：等待 Checkpoint 2 独立审查；未开始 Checkpoint 3 Pipeline
+    checkpoint，也未实现 worker、进程控制、启动恢复或控制 API。
 
 ## 已知阻塞
 

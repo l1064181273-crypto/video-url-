@@ -1,18 +1,31 @@
 from __future__ import annotations
 
+import builtins
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from time import monotonic, sleep
-from typing import Any
+from typing import Any, cast
 
+from lvt.core.jobs import (
+    ACTIVE_JOB_STATUSES,
+    ERROR_POLICIES,
+    ErrorCode,
+    JobEventType,
+    JobStatus,
+    can_transition,
+)
 from lvt.security.urls import sanitize_display_url
 
 SCHEMA_VERSION = 3
 BUSY_TIMEOUT_MS = 5_000
 DEFAULT_WORKER_CONCURRENCY = 1
+MAX_AUTOMATIC_REQUEUES_PER_CYCLE = 2
 
 _CREATE_V3_TABLES = (
     """
@@ -100,6 +113,13 @@ _V3_JOB_COLUMNS = (
 
 class UnsupportedSchemaVersionError(RuntimeError):
     pass
+
+
+class ArtifactRegistrationResult(StrEnum):
+    CREATED = "created"
+    IDEMPOTENT = "idempotent"
+    CONFLICT = "conflict"
+    STALE = "stale"
 
 
 class JobRepository:
@@ -200,6 +220,672 @@ class JobRepository:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("worker concurrency setting is missing")
+
+    def peek_next_queued(self, *, now: datetime | None = None) -> dict[str, Any] | None:
+        timestamp = self._timestamp(now)
+        with self._connect() as connection:
+            row = self._select_next_queued(connection, timestamp)
+        return self._decode_row(row) if row else None
+
+    def claim_next(
+        self,
+        *,
+        expected_job_id: str,
+        first_required_stage: JobStatus,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        self._require_status(first_required_stage)
+        if first_required_stage not in ACTIVE_JOB_STATUSES:
+            raise ValueError("first_required_stage must be an active JobStatus")
+        timestamp = self._timestamp(now)
+        run_id = str(uuid.uuid4())
+
+        with self._write_transaction() as connection:
+            candidate = self._select_next_queued(connection, timestamp)
+            if candidate is None or candidate["uuid"] != expected_job_id:
+                return None
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    stage_progress = 0,
+                    active_run_id = ?,
+                    execution_count_total = execution_count_total + 1,
+                    started_at = COALESCE(started_at, ?),
+                    updated_at = ?,
+                    finished_at = NULL,
+                    next_attempt_at = NULL,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE uuid = ?
+                  AND status = ?
+                  AND active_run_id IS NULL
+                """,
+                (
+                    first_required_stage.value,
+                    run_id,
+                    timestamp,
+                    timestamp,
+                    expected_job_id,
+                    JobStatus.QUEUED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            self._insert_event(
+                connection,
+                expected_job_id,
+                JobEventType.CLAIMED.value,
+                timestamp,
+                {
+                    "run_id": run_id,
+                    "resume_stage": first_required_stage.value,
+                },
+            )
+            claimed = connection.execute(
+                "SELECT * FROM jobs WHERE uuid = ?", (expected_job_id,)
+            ).fetchone()
+        if claimed is None:
+            raise RuntimeError("claimed job could not be read")
+        return self._decode_row(claimed)
+
+    def advance_stage(
+        self,
+        job_id: str,
+        run_id: str,
+        expected_status: JobStatus,
+        target_status: JobStatus,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_status(expected_status)
+        self._require_status(target_status)
+        if expected_status not in ACTIVE_JOB_STATUSES:
+            raise ValueError("expected_status must be an active JobStatus")
+        if target_status not in ACTIVE_JOB_STATUSES or not can_transition(
+            expected_status, target_status
+        ):
+            raise ValueError("target_status is not a legal active-stage transition")
+        timestamp = self._timestamp(now)
+
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, stage_progress = 0, updated_at = ?
+                WHERE uuid = ? AND active_run_id = ? AND status = ?
+                """,
+                (
+                    target_status.value,
+                    timestamp,
+                    job_id,
+                    run_id,
+                    expected_status.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_event(
+                connection,
+                job_id,
+                target_status.value,
+                timestamp,
+                {"run_id": run_id, "from_status": expected_status.value},
+            )
+        return True
+
+    def update_progress(
+        self,
+        job_id: str,
+        run_id: str,
+        expected_status: JobStatus,
+        *,
+        stage_progress: int,
+        overall_progress: int,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_active_status(expected_status)
+        self._require_progress(stage_progress, "stage_progress")
+        self._require_progress(overall_progress, "overall_progress")
+        timestamp = self._timestamp(now)
+
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET stage_progress = ?, overall_progress = ?, updated_at = ?
+                WHERE uuid = ?
+                  AND active_run_id = ?
+                  AND status = ?
+                  AND stage_progress <= ?
+                  AND overall_progress <= ?
+                """,
+                (
+                    stage_progress,
+                    overall_progress,
+                    timestamp,
+                    job_id,
+                    run_id,
+                    expected_status.value,
+                    stage_progress,
+                    overall_progress,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def update_worker_metadata(
+        self,
+        job_id: str,
+        run_id: str,
+        expected_status: JobStatus,
+        *,
+        title: str | None = None,
+        duration_ms: int | None = None,
+        detected_language: str | None = None,
+        work_dir: str | None = None,
+        checkpoint_pointer: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_active_status(expected_status)
+        updates: list[tuple[str, object]] = []
+        if title is not None:
+            updates.append(("title", title))
+        if duration_ms is not None:
+            if type(duration_ms) is not int or duration_ms <= 0:
+                raise ValueError("duration_ms must be a positive integer")
+            updates.append(("duration_ms", duration_ms))
+        if detected_language is not None:
+            updates.append(("detected_language", detected_language))
+        if work_dir is not None:
+            updates.append(("work_dir", work_dir))
+        if checkpoint_pointer is not None:
+            updates.append(("checkpoint_pointer", checkpoint_pointer))
+        if not updates:
+            raise ValueError("at least one worker metadata field is required")
+
+        timestamp = self._timestamp(now)
+        assignments = ", ".join(f"{column} = ?" for column, _ in updates)
+        parameters = [value for _, value in updates]
+        parameters.extend([timestamp, job_id, run_id, expected_status.value])
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE jobs
+                SET {assignments}, updated_at = ?
+                WHERE uuid = ? AND active_run_id = ? AND status = ?
+                """,
+                parameters,
+            )
+        return cursor.rowcount == 1
+
+    def fail_job(
+        self,
+        job_id: str,
+        run_id: str,
+        expected_status: JobStatus,
+        error_code: ErrorCode,
+        error_message: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_active_status(expected_status)
+        self._require_error_code(error_code)
+        if not can_transition(expected_status, JobStatus.FAILED):
+            raise ValueError("expected_status cannot transition to failed")
+        timestamp = self._timestamp(now)
+
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    active_run_id = NULL,
+                    error_code = ?,
+                    error_message = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE uuid = ? AND active_run_id = ? AND status = ?
+                """,
+                (
+                    JobStatus.FAILED.value,
+                    error_code.value,
+                    error_message,
+                    timestamp,
+                    timestamp,
+                    job_id,
+                    run_id,
+                    expected_status.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_event(
+                connection,
+                job_id,
+                JobEventType.FAILED.value,
+                timestamp,
+                {"run_id": run_id, "error_code": error_code.value},
+            )
+        return True
+
+    def complete_job(
+        self,
+        job_id: str,
+        run_id: str,
+        expected_status: JobStatus,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_status(expected_status)
+        if not can_transition(expected_status, JobStatus.COMPLETED):
+            raise ValueError("expected_status cannot transition to completed")
+        timestamp = self._timestamp(now)
+
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    stage_progress = 100,
+                    overall_progress = 100,
+                    active_run_id = NULL,
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE uuid = ? AND active_run_id = ? AND status = ?
+                """,
+                (
+                    JobStatus.COMPLETED.value,
+                    timestamp,
+                    timestamp,
+                    job_id,
+                    run_id,
+                    expected_status.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_event(
+                connection,
+                job_id,
+                JobEventType.COMPLETED.value,
+                timestamp,
+                {"run_id": run_id},
+            )
+        return True
+
+    def automatic_requeue(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        expected_status: JobStatus,
+        error_code: ErrorCode,
+        error_message: str,
+        next_attempt_at: datetime,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_active_status(expected_status)
+        self._require_error_code(error_code)
+        if not ERROR_POLICIES[error_code].auto_requeue:
+            raise ValueError("error_code is not eligible for automatic requeue")
+        timestamp = self._timestamp(now)
+        next_timestamp = self._timestamp(next_attempt_at)
+
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    stage_progress = 0,
+                    active_run_id = NULL,
+                    automatic_requeue_count_in_cycle =
+                        automatic_requeue_count_in_cycle + 1,
+                    next_attempt_at = ?,
+                    updated_at = ?,
+                    finished_at = NULL,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE uuid = ?
+                  AND active_run_id = ?
+                  AND status = ?
+                  AND automatic_requeue_count_in_cycle < ?
+                """,
+                (
+                    JobStatus.QUEUED.value,
+                    next_timestamp,
+                    timestamp,
+                    job_id,
+                    run_id,
+                    expected_status.value,
+                    MAX_AUTOMATIC_REQUEUES_PER_CYCLE,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_event(
+                connection,
+                job_id,
+                JobEventType.AUTOMATIC_REQUEUED.value,
+                timestamp,
+                {
+                    "run_id": run_id,
+                    "error_code": error_code.value,
+                    "error_message": error_message,
+                },
+            )
+        return True
+
+    def manual_retry(
+        self,
+        job_id: str,
+        expected_status: JobStatus,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_status(expected_status)
+        if expected_status not in {JobStatus.FAILED, JobStatus.CANCELLED}:
+            raise ValueError("manual retry requires failed or cancelled status")
+        timestamp = self._timestamp(now)
+
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    stage_progress = 0,
+                    active_run_id = NULL,
+                    retry_cycle = retry_cycle + 1,
+                    automatic_requeue_count_in_cycle = 0,
+                    next_attempt_at = ?,
+                    cancel_requested_at = NULL,
+                    error_code = NULL,
+                    error_message = NULL,
+                    finished_at = NULL,
+                    updated_at = ?
+                WHERE uuid = ? AND status = ?
+                """,
+                (
+                    JobStatus.QUEUED.value,
+                    timestamp,
+                    timestamp,
+                    job_id,
+                    expected_status.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_event(
+                connection,
+                job_id,
+                JobEventType.MANUAL_RETRY.value,
+                timestamp,
+                {"from_status": expected_status.value},
+            )
+        return True
+
+    def request_cancel(
+        self,
+        job_id: str,
+        expected_status: JobStatus,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_status(expected_status)
+        timestamp = self._timestamp(now)
+        if expected_status is JobStatus.QUEUED:
+            target_status = JobStatus.CANCELLED
+            event_status = JobEventType.CANCELLED.value
+        elif expected_status in ACTIVE_JOB_STATUSES:
+            target_status = JobStatus.CANCELLING
+            event_status = JobEventType.CANCEL_REQUESTED.value
+        else:
+            raise ValueError("cancel requires queued or active status")
+
+        with self._write_transaction() as connection:
+            if expected_status is JobStatus.QUEUED:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        active_run_id = NULL,
+                        cancel_requested_at = ?,
+                        error_code = ?,
+                        error_message = ?,
+                        updated_at = ?,
+                        finished_at = ?
+                    WHERE uuid = ? AND status = ? AND active_run_id IS NULL
+                    """,
+                    (
+                        target_status.value,
+                        timestamp,
+                        ErrorCode.CANCELLED_BY_USER.value,
+                        "任务已由用户取消",
+                        timestamp,
+                        timestamp,
+                        job_id,
+                        expected_status.value,
+                    ),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, cancel_requested_at = ?, updated_at = ?
+                    WHERE uuid = ?
+                      AND status = ?
+                      AND active_run_id IS NOT NULL
+                    """,
+                    (
+                        target_status.value,
+                        timestamp,
+                        timestamp,
+                        job_id,
+                        expected_status.value,
+                    ),
+                )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_event(
+                connection,
+                job_id,
+                event_status,
+                timestamp,
+                {"from_status": expected_status.value},
+            )
+        return True
+
+    def mark_cancelled(
+        self,
+        job_id: str,
+        run_id: str,
+        expected_status: JobStatus,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        self._require_status(expected_status)
+        if expected_status is not JobStatus.CANCELLING:
+            raise ValueError("worker cancellation requires cancelling status")
+        timestamp = self._timestamp(now)
+
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    active_run_id = NULL,
+                    error_code = ?,
+                    error_message = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE uuid = ? AND active_run_id = ? AND status = ?
+                """,
+                (
+                    JobStatus.CANCELLED.value,
+                    ErrorCode.CANCELLED_BY_USER.value,
+                    "任务已由用户取消",
+                    timestamp,
+                    timestamp,
+                    job_id,
+                    run_id,
+                    expected_status.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_event(
+                connection,
+                job_id,
+                JobEventType.CANCELLED.value,
+                timestamp,
+                {"run_id": run_id},
+            )
+        return True
+
+    def register_artifact(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        expected_status: JobStatus,
+        artifact_id: str,
+        kind: str,
+        path: str,
+        now: datetime | None = None,
+    ) -> ArtifactRegistrationResult:
+        self._require_active_status(expected_status)
+        timestamp = self._timestamp(now)
+
+        with self._write_transaction() as connection:
+            owner = connection.execute(
+                """
+                SELECT 1
+                FROM jobs
+                WHERE uuid = ? AND active_run_id = ? AND status = ?
+                """,
+                (job_id, run_id, expected_status.value),
+            ).fetchone()
+            if owner is None:
+                return ArtifactRegistrationResult.STALE
+            existing = connection.execute(
+                """
+                SELECT id, job_id, kind, path
+                FROM artifacts
+                WHERE id = ? OR (job_id = ? AND kind = ?)
+                """,
+                (artifact_id, job_id, kind),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["id"] == artifact_id
+                    and existing["job_id"] == job_id
+                    and existing["kind"] == kind
+                    and existing["path"] == path
+                ):
+                    return ArtifactRegistrationResult.IDEMPOTENT
+                return ArtifactRegistrationResult.CONFLICT
+            connection.execute(
+                """
+                INSERT INTO artifacts (id, job_id, kind, path, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (artifact_id, job_id, kind, path, timestamp),
+            )
+        return ArtifactRegistrationResult.CREATED
+
+    def list_events(self, job_id: str) -> builtins.list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM job_events WHERE job_id = ? ORDER BY id", (job_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_artifacts(self, job_id: str) -> builtins.list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM artifacts WHERE job_id = ? ORDER BY kind, id", (job_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _select_next_queued(connection: sqlite3.Connection, timestamp: str) -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            connection.execute(
+                """
+                SELECT *
+                FROM jobs
+                WHERE status = ?
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                ORDER BY next_attempt_at, created_at, uuid
+                LIMIT 1
+                """,
+                (JobStatus.QUEUED.value, timestamp),
+            ).fetchone(),
+        )
+
+    @staticmethod
+    def _insert_event(
+        connection: sqlite3.Connection,
+        job_id: str,
+        status: str,
+        timestamp: str,
+        details: dict[str, object],
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO job_events (job_id, status, message, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                status,
+                json.dumps(details, ensure_ascii=False, sort_keys=True),
+                timestamp,
+            ),
+        )
+
+    @contextmanager
+    def _write_transaction(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _require_status(status: JobStatus) -> None:
+        if not isinstance(status, JobStatus):
+            raise TypeError("status must be a JobStatus")
+
+    @classmethod
+    def _require_active_status(cls, status: JobStatus) -> None:
+        cls._require_status(status)
+        if status not in ACTIVE_JOB_STATUSES:
+            raise ValueError("status must be an active JobStatus")
+
+    @staticmethod
+    def _require_error_code(error_code: ErrorCode) -> None:
+        if not isinstance(error_code, ErrorCode):
+            raise TypeError("error_code must be an ErrorCode")
+
+    @staticmethod
+    def _require_progress(value: int, field: str) -> None:
+        if type(value) is not int or not 0 <= value <= 100:
+            raise ValueError(f"{field} must be an integer from 0 to 100")
+
+    @staticmethod
+    def _timestamp(value: datetime | None = None) -> str:
+        timestamp = value or datetime.now(UTC)
+        if timestamp.tzinfo is None:
+            raise ValueError("timestamps must include timezone information")
+        return timestamp.isoformat()
 
     @staticmethod
     def _decode_row(row: sqlite3.Row) -> dict[str, Any]:
