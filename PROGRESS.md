@@ -205,7 +205,11 @@
     checkpoint 保留并可在同一 run 重试复用。
   - ✅ macOS `/var` 与 `/private/var` 可信 work root 规范化回归通过；no-follow
     symlink 和已发布 checkpoint 保护保持不变。
-  - ✅ Checkpoint 4 后全量 `pytest` 444 passed（1 条第三方警告）；checkpoint 集成
+  - ✅ Checkpoint 4 最终阻塞修复：Popen 后保存 PGID；leader 正常/非零退出并
+    communicate/wait 后仍独立探测进程组，closed-pipe child/grandchild 统一执行
+    TERM、deadline 轮询、必要时 KILL 和消失确认。
+  - ✅ Checkpoint 4 后全量 `pytest` 448 passed（1 条第三方警告）；process-control
+    11 passed；checkpoint 集成
     35 passed；Ruff lint/format 通过；mypy 31 个源码文件通过。
   - ⏭️ 下一步：等待 Checkpoint 4 独立审查；未实现 lifespan worker、自动重试调度、
     启动恢复或控制 API。

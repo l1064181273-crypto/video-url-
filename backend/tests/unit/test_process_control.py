@@ -3,7 +3,9 @@ import signal
 import sys
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,6 +37,73 @@ def _process_exists(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+def _kill_group(pgid: int) -> None:
+    with suppress(ProcessLookupError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+def _saved_pgid(result: Any) -> int:
+    return int(getattr(result, "pgid", result.pid))
+
+
+def _closed_pipe_leader_command(
+    tmp_path: Path,
+    *,
+    exit_code: int,
+    ignore_term: bool = False,
+    spawn_grandchild: bool = False,
+) -> tuple[list[str], Path]:
+    pid_file = tmp_path / "descendants.txt"
+    child_script = tmp_path / "child.py"
+    grandchild_block = (
+        """
+grandchild = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+pid_text = f"{os.getpid()} {grandchild.pid}"
+"""
+        if spawn_grandchild
+        else "pid_text = str(os.getpid())"
+    )
+    ignore_block = "signal.signal(signal.SIGTERM, signal.SIG_IGN)" if ignore_term else ""
+    child_script.write_text(
+        f"""
+import os, signal, subprocess, sys, time
+{ignore_block}
+{grandchild_block}
+open(sys.argv[1], "w").write(pid_text)
+while True:
+    time.sleep(0.01)
+""",
+        encoding="utf-8",
+    )
+    leader_script = """
+import pathlib, subprocess, sys, time
+subprocess.Popen(
+    [sys.executable, sys.argv[1], sys.argv[2]],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+path = pathlib.Path(sys.argv[2])
+while not path.exists():
+    time.sleep(0.01)
+raise SystemExit(int(sys.argv[3]))
+"""
+    return (
+        _python(
+            leader_script,
+            str(child_script),
+            str(pid_file),
+            str(exit_code),
+        ),
+        pid_file,
+    )
 
 
 def test_process_executor_returns_normal_output_and_reaps_process() -> None:
@@ -149,6 +218,85 @@ open(sys.argv[1], "w").write(str(child.pid))
 
     child_pid = int(pid_file.read_text(encoding="utf-8"))
     _wait_until(lambda: not _process_exists(child_pid))
+
+
+def test_successful_leader_cleans_closed_pipe_child_before_return(
+    tmp_path: Path,
+) -> None:
+    command, pid_file = _closed_pipe_leader_command(tmp_path, exit_code=0)
+    executor = SubprocessExecutor(poll_interval=0.01, terminate_grace=0.1)
+    result = None
+    try:
+        result = executor.run(command, timeout=2)
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        assert result.returncode == 0
+        assert result.group_cleanup_signal is signal.SIGTERM
+        assert not _process_exists(child_pid)
+    finally:
+        if result is not None:
+            _kill_group(_saved_pgid(result))
+
+
+def test_nonzero_leader_cleans_closed_pipe_child_before_error(
+    tmp_path: Path,
+) -> None:
+    command, pid_file = _closed_pipe_leader_command(tmp_path, exit_code=7)
+    executor = SubprocessExecutor(poll_interval=0.01, terminate_grace=0.1)
+    captured: ProcessExecutionError | None = None
+    try:
+        with pytest.raises(ProcessExecutionError) as raised:
+            executor.run(command, timeout=2)
+        captured = raised.value
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        assert captured.returncode == 7
+        assert captured.termination_signal is signal.SIGTERM
+        assert not _process_exists(child_pid)
+    finally:
+        if captured is not None:
+            _kill_group(_saved_pgid(captured))
+
+
+def test_successful_leader_kills_closed_pipe_child_that_ignores_term(
+    tmp_path: Path,
+) -> None:
+    command, pid_file = _closed_pipe_leader_command(
+        tmp_path,
+        exit_code=0,
+        ignore_term=True,
+    )
+    executor = SubprocessExecutor(poll_interval=0.01, terminate_grace=0.05)
+    result = None
+    try:
+        result = executor.run(command, timeout=2)
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        assert result.group_cleanup_signal is signal.SIGKILL
+        assert not _process_exists(child_pid)
+    finally:
+        if result is not None:
+            _kill_group(_saved_pgid(result))
+
+
+def test_successful_leader_cleans_closed_pipe_child_and_grandchild(
+    tmp_path: Path,
+) -> None:
+    command, pid_file = _closed_pipe_leader_command(
+        tmp_path,
+        exit_code=0,
+        spawn_grandchild=True,
+    )
+    executor = SubprocessExecutor(poll_interval=0.01, terminate_grace=0.1)
+    result = None
+    try:
+        result = executor.run(command, timeout=2)
+        child_pid, grandchild_pid = [
+            int(value) for value in pid_file.read_text(encoding="utf-8").split()
+        ]
+        assert result.group_cleanup_signal is signal.SIGTERM
+        assert not _process_exists(child_pid)
+        assert not _process_exists(grandchild_pid)
+    finally:
+        if result is not None:
+            _kill_group(_saved_pgid(result))
 
 
 def test_large_stdout_and_stderr_do_not_deadlock() -> None:

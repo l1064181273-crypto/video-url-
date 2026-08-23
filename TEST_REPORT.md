@@ -641,10 +641,13 @@ cd backend
 实现：
 
 - `SubprocessExecutor` 只接受参数序列，使用 `Popen(..., start_new_session=True)` 创建
-  独立进程组，不使用 shell。
-- 正常和非零退出均通过 `communicate()` 完成 wait/reap。
+  独立进程组并立即保存 PGID，不使用 shell。
+- 正常和非零 leader 均先通过 `communicate()` 完成 wait/reap，再独立使用
+  `killpg(pgid, 0)` 判断进程组是否仍有成员。
 - timeout 或 cancellation 先向整个进程组发送 SIGTERM；宽限期后仍未退出则发送
   SIGKILL；最后再次 `communicate()` 回收父进程并排空管道。
+- 正常、非零、timeout、cancellation 和 Popen 后内部异常共用同一 group cleanup；
+  TERM 和 KILL 后均按 monotonic deadline 轮询 PGID 消失。
 - stdout/stderr 同时由 `communicate(timeout=...)` 排空，避免任一管道填满造成死锁。
 - yt-dlp 改为 `python -m yt_dlp` 外部命令；yt-dlp、FFmpeg、ffprobe 共用同一执行器。
 - Pipeline 在每个 stage 开始、外部调用期间以及 MLX/sherpa/Ollama 等进程内调用返回后
@@ -659,13 +662,13 @@ cd backend
 ```bash
 cd backend
 ../.venv-smoke/bin/python -m pytest tests/unit/test_process_control.py
-# 7 passed
+# 11 passed
 
 ../.venv-smoke/bin/python -m pytest tests/integration/test_pipeline_checkpoints.py
 # 35 passed
 
 ../.venv-smoke/bin/python -m pytest
-# 444 passed，1 条第三方 StarletteDeprecationWarning
+# 448 passed，1 条第三方 StarletteDeprecationWarning
 
 ../.venv-smoke/bin/python -m ruff check src tests ../scripts
 # All checks passed!
@@ -684,6 +687,10 @@ cd backend
 - 2 MiB stdout 与 2 MiB stderr 同时输出无死锁。
 - 创建子进程的父进程取消后，父子 PID 均不再存活；进程组 leader 先退出而子进程
   仍持有管道时，timeout 仍会清理整个组。
+- leader 正常 0 或非零 7 退出、child 三条 stdio 全部 DEVNULL 时，返回或抛错前
+  child 均已停止，原始 leader returncode 保持。
+- closed-pipe child 忽略 TERM 时升级 SIGKILL；child 再创建 grandchild 时两个 PID
+  均在 executor 返回前消失。
 - yt-dlp、FFmpeg 和 ffprobe 均通过同一 executor 及参数数组执行。
 - download 取消不产生 checkpoint pointer 或 published manifest。
 - normalize 取消保留已发布 downloaded checkpoint；同一 run 重试不重新下载。
