@@ -174,6 +174,36 @@
         </dl>
         <div id="detail-actions" class="job-actions" aria-label="任务操作"></div>
         <p id="detail-action-message" class="action-message" role="status"></p>
+        <section
+          id="artifact-section"
+          class="artifact-section"
+          aria-labelledby="artifact-title"
+          hidden
+        >
+          <div class="section-heading">
+            <h3 id="artifact-title">文件与预览</h3>
+            <span id="artifact-count" class="input-summary">0 / 8</span>
+          </div>
+          <p id="artifact-message" class="form-message" role="status"></p>
+          <div id="artifact-groups" class="artifact-groups"></div>
+          <div id="preview-panel" class="preview-panel" hidden>
+            <div
+              id="preview-tabs"
+              class="filter-tabs preview-tabs"
+              role="tablist"
+              aria-label="预览语言"
+            >
+              <button type="button" role="tab" data-preview-language="source" aria-selected="true">
+                原文
+              </button>
+              <button type="button" role="tab" data-preview-language="zh-CN" aria-selected="false">
+                中文
+              </button>
+            </div>
+            <p id="preview-message" class="form-message" role="status"></p>
+            <ol id="preview-segments" class="preview-segments"></ol>
+          </div>
+        </section>
         <section class="timeline-section" aria-labelledby="timeline-title">
           <div class="section-heading">
             <h3 id="timeline-title">事件时间线</h3>

@@ -1,14 +1,18 @@
 import {
+  ARTIFACT_KINDS,
+  artifactDownloadPath,
   type CapabilitiesResponse,
   type CreateJobsResponse,
   type HealthResponse,
   type Job,
+  type JobArtifact,
   type JobEventsResponse,
   type JobOptions,
   type SettingsResponse,
   parseCapabilitiesResponse,
   parseCreateJobsResponse,
   parseHealthResponse,
+  parseJobArtifactsResponse,
   parseJobEventsResponse,
   parseJobResponse,
   parseJobsResponse,
@@ -38,6 +42,7 @@ export type ConnectionSnapshot = {
 };
 
 type RequestOptions = {
+  accept?: string;
   authenticated?: boolean;
   body?: unknown;
   method?: "GET" | "POST" | "PATCH" | "DELETE";
@@ -87,8 +92,12 @@ export class LocalApiTransport {
     options: RequestOptions = {},
   ): Promise<Blob> {
     const response = await this.request(path, route, options);
-    const contentType = response.headers.get("Content-Type");
-    if (contentType === null || contentType.toLowerCase().includes("application/json")) {
+    const contentType = response.headers
+      .get("Content-Type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    if (contentType !== "application/octet-stream") {
       throw invalidResponse();
     }
     const blob = await response.blob();
@@ -98,6 +107,14 @@ export class LocalApiTransport {
     return blob;
   }
 
+  async requestResponse(
+    path: string,
+    route: ErrorRoute = "other",
+    options: RequestOptions = {},
+  ): Promise<Response> {
+    return this.request(path, route, options);
+  }
+
   private async request(
     path: string,
     route: ErrorRoute,
@@ -105,8 +122,9 @@ export class LocalApiTransport {
   ): Promise<Response> {
     const connection = await this.connectionSource.getConnection();
     const url = buildLocalApiUrl(connection.port, path);
+    assertValidatedLocalTarget(url, connection.port);
     const authenticated = options.authenticated ?? true;
-    const headers = new Headers({ Accept: "application/json" });
+    const headers = new Headers({ Accept: options.accept ?? "application/json" });
     if (authenticated) {
       if (connection.token === null) {
         throw new ApiClientError("notConfigured", "请先设置本地端口和配对 Token");
@@ -262,6 +280,31 @@ export class LocalApiClient {
     return response;
   }
 
+  async getJobArtifacts(jobId: string, signal?: AbortSignal): Promise<JobArtifact[]> {
+    return parseContract(
+      await this.transport.requestJson(`${jobPath(jobId)}/artifacts`, "other", { signal }),
+      (value) => parseJobArtifactsResponse(value, jobId),
+    );
+  }
+
+  async getArtifactResponse(
+    jobId: string,
+    artifact: JobArtifact,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    return this.transport.requestResponse(artifactPathForJob(jobId, artifact), "other", {
+      accept: "application/octet-stream",
+      signal,
+    });
+  }
+
+  async getArtifactBlob(jobId: string, artifact: JobArtifact, signal?: AbortSignal): Promise<Blob> {
+    return this.transport.requestBinary(artifactPathForJob(jobId, artifact), "other", {
+      accept: "application/octet-stream",
+      signal,
+    });
+  }
+
   async loadConnectionSnapshot(signal?: AbortSignal): Promise<ConnectionSnapshot> {
     const batch = new AbortController();
     const abortBatch = () => batch.abort();
@@ -342,6 +385,32 @@ function jobPath(jobId: string): string {
     throw invalidApiPath();
   }
   return `/api/v1/jobs/${encodeURIComponent(jobId)}`;
+}
+
+function artifactPathForJob(jobId: string, artifact: JobArtifact): string {
+  jobPath(jobId);
+  const expectedPath = artifactDownloadPath(artifact.id);
+  if (
+    artifact.jobId !== jobId ||
+    artifact.downloadPath !== expectedPath ||
+    !ARTIFACT_KINDS.includes(artifact.kind)
+  ) {
+    throw invalidResponse();
+  }
+  return expectedPath;
+}
+
+function assertValidatedLocalTarget(url: URL, port: number): void {
+  const expected = new URL("http://127.0.0.1/");
+  expected.port = String(port);
+  if (
+    url.protocol !== "http:" ||
+    url.hostname !== "127.0.0.1" ||
+    url.port !== String(port) ||
+    url.origin !== expected.origin
+  ) {
+    throw invalidResponse();
+  }
 }
 
 function isJsonResponse(response: Response): boolean {

@@ -1,4 +1,4 @@
-export const CONTRACT_VERSION = "phase-3-checkpoint-4";
+export const CONTRACT_VERSION = "phase-3-checkpoint-5a";
 
 export const JOB_STATUSES = [
   "queued",
@@ -149,6 +149,27 @@ export type JobEventsResponse = {
   total: number;
 };
 
+export const ARTIFACT_KINDS = [
+  "source.txt",
+  "source.srt",
+  "source.vtt",
+  "source.json",
+  "zh-CN.txt",
+  "zh-CN.srt",
+  "zh-CN.vtt",
+  "zh-CN.json",
+] as const;
+
+export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
+
+export type JobArtifact = {
+  id: string;
+  jobId: string;
+  kind: ArtifactKind;
+  createdAt: string;
+  downloadPath: string;
+};
+
 export const CAPABILITY_COMPONENTS = [
   "ffmpeg",
   "ollama",
@@ -191,6 +212,7 @@ export class ContractError extends Error {
 
 const JOB_STATUS_SET = new Set<string>(JOB_STATUSES);
 const JOB_EVENT_TYPE_SET = new Set<string>([...JOB_EVENT_TYPES, ...JOB_STATUSES]);
+const ARTIFACT_KIND_SET = new Set<string>(ARTIFACT_KINDS);
 const CAPABILITY_STATUS_SET = new Set<string>(CAPABILITY_STATUSES);
 const ERROR_CODE_SET = new Set<string>(ERROR_CODES);
 const MODEL_COMPONENTS = new Set<CapabilityComponentName>([
@@ -362,6 +384,49 @@ export function parseJobEventsResponse(value: unknown): JobEventsResponse {
   return { items, offset, limit, total };
 }
 
+export function parseJobArtifactsResponse(value: unknown, jobId: string): JobArtifact[] {
+  const canonicalJobId = expectUuid(jobId, "$jobId");
+  const root = expectRecord(value, "$");
+  expectExactKeys(root, "$", ["items"]);
+  if (!Array.isArray(root.items) || root.items.length !== ARTIFACT_KINDS.length) {
+    throw new ContractError("$.items", "expected exactly eight artifacts");
+  }
+  const seenIds = new Set<string>();
+  const seenKinds = new Set<ArtifactKind>();
+  const artifacts = root.items.map((value, index) => {
+    const path = `$.items[${String(index)}]`;
+    const item = expectRecord(value, path);
+    expectExactKeys(item, path, ["id", "kind", "created_at", "download_url"]);
+    const id = expectArtifactId(item.id, `${path}.id`);
+    const kind = expectEnum(item.kind, ARTIFACT_KIND_SET, `${path}.kind`) as ArtifactKind;
+    const downloadPath = artifactDownloadPath(id);
+    if (item.download_url !== downloadPath) {
+      throw new ContractError(`${path}.download_url`, "must match the fixed artifact route");
+    }
+    if (seenIds.has(id) || seenKinds.has(kind)) {
+      throw new ContractError(path, "artifact IDs and kinds must be unique");
+    }
+    seenIds.add(id);
+    seenKinds.add(kind);
+    return {
+      id,
+      jobId: canonicalJobId,
+      kind,
+      createdAt: expectTimestamp(item.created_at, `${path}.created_at`),
+      downloadPath,
+    };
+  });
+  if (ARTIFACT_KINDS.some((kind) => !seenKinds.has(kind))) {
+    throw new ContractError("$.items", "artifact kinds do not match the required set");
+  }
+  return artifacts;
+}
+
+export function artifactDownloadPath(artifactId: string): string {
+  const id = expectArtifactId(artifactId, "$artifactId");
+  return `/api/v1/artifacts/${encodeURIComponent(id)}/download`;
+}
+
 function parseJob(value: unknown, path: string): Job {
   const job = expectRecord(value, path);
   return {
@@ -404,6 +469,14 @@ function parseJob(value: unknown, path: string): Job {
       `${path}.cancel_requested_at`,
     ),
   };
+}
+
+function expectArtifactId(value: unknown, path: string): string {
+  const id = expectNonEmptyString(value, path);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(id)) {
+    throw new ContractError(path, "expected a canonical lowercase UUID");
+  }
+  return id;
 }
 
 function parseJobOptions(value: unknown, path: string): JobOptions {

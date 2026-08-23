@@ -6,6 +6,7 @@ import {
   buildLocalApiUrl,
   type ConnectionSource,
 } from "../../src/api/client";
+import { ARTIFACT_KINDS, type JobArtifact } from "../../src/api/contracts";
 import { ApiClientError, normalizeHttpError } from "../../src/api/errors";
 
 const TOKEN = "ClientHeaderToken123";
@@ -302,6 +303,73 @@ describe("typed API client", () => {
     });
   });
 
+  it("lists artifacts and downloads only through fixed authenticated loopback routes", async () => {
+    const jobId = "4c50ff38-9cca-4f91-bae0-f3fe4bc18b6f";
+    const requests: { headers: Headers; redirect: RequestRedirect | undefined; url: string }[] = [];
+    const connection = new MutableConnectionSource();
+    const fetcher = vi.fn<typeof fetch>((input, init) => {
+      const url = requestUrl(input);
+      requests.push({
+        url,
+        headers: new Headers(init?.headers),
+        redirect: init?.redirect,
+      });
+      if (url.endsWith("/artifacts")) {
+        return Promise.resolve(jsonResponse(artifactListPayload()));
+      }
+      return Promise.resolve(
+        new Response("artifact bytes", {
+          headers: { "Content-Type": "application/octet-stream" },
+        }),
+      );
+    });
+    const client = new LocalApiClient(new LocalApiTransport(connection, fetcher));
+
+    const artifacts = await client.getJobArtifacts(jobId);
+    const firstArtifact = artifacts[0];
+    const secondArtifact = artifacts[1];
+    if (firstArtifact === undefined || secondArtifact === undefined) {
+      throw new Error("artifact fixture did not return eight items");
+    }
+    connection.token = "RotatedCurrentToken";
+    const response = await client.getArtifactResponse(jobId, firstArtifact);
+    const blob = await client.getArtifactBlob(jobId, secondArtifact);
+
+    expect(artifacts).toHaveLength(8);
+    expect(await response.text()).toBe("artifact bytes");
+    expect(await blob.text()).toBe("artifact bytes");
+    expect(requests.map(({ url }) => url)).toEqual([
+      `http://127.0.0.1:9123/api/v1/jobs/${jobId}/artifacts`,
+      `http://127.0.0.1:9123/api/v1/artifacts/${artifacts[0]?.id ?? ""}/download`,
+      `http://127.0.0.1:9123/api/v1/artifacts/${artifacts[1]?.id ?? ""}/download`,
+    ]);
+    for (const request of requests.slice(1)) {
+      expect(request.headers.get("X-LVT-Token")).toBe("RotatedCurrentToken");
+      expect(request.headers.get("Accept")).toBe("application/octet-stream");
+      expect(request.redirect).toBe("error");
+      expect(request.url).not.toContain("RotatedCurrentToken");
+    }
+  });
+
+  it("rejects a cross-Job or forged artifact before fetch", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const client = new LocalApiClient(
+      new LocalApiTransport(new MutableConnectionSource(), fetcher),
+    );
+    const artifact: JobArtifact = {
+      id: "25274279-9f3f-45f1-8352-79bc38f11cf6",
+      jobId: "25274279-9f3f-45f1-8352-79bc38f11cf6",
+      kind: "source.txt",
+      createdAt: CHECKED_AT,
+      downloadPath: "/api/v1/artifacts/25274279-9f3f-45f1-8352-79bc38f11cf6/download",
+    };
+
+    await expect(
+      client.getArtifactBlob("4c50ff38-9cca-4f91-bae0-f3fe4bc18b6f", artifact),
+    ).rejects.toMatchObject({ kind: "invalidResponse" });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("parses a complete connection snapshot from frozen contracts", async () => {
     const connection = new MutableConnectionSource();
     const payloads: Record<string, unknown> = {
@@ -513,6 +581,20 @@ function jobPayload(uuid: string): Record<string, unknown> {
     automatic_requeue_count_in_cycle: 0,
     next_attempt_at: null,
     cancel_requested_at: null,
+  };
+}
+
+function artifactListPayload(): Record<string, unknown> {
+  return {
+    items: ARTIFACT_KINDS.map((kind, index) => {
+      const id = `25274279-9f3f-45f1-8352-${(index + 1).toString(16).padStart(12, "0")}`;
+      return {
+        id,
+        kind,
+        created_at: CHECKED_AT,
+        download_url: `/api/v1/artifacts/${id}/download`,
+      };
+    }),
   };
 }
 

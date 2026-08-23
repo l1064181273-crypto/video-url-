@@ -1,6 +1,15 @@
 import { LocalApiClient, LocalApiTransport } from "./api/client";
-import type { Job, JobEvent, JobOptions } from "./api/contracts";
+import type { ArtifactKind, Job, JobArtifact, JobEvent, JobOptions } from "./api/contracts";
 import { ApiClientError } from "./api/errors";
+import { ArtifactDownloadService } from "./artifacts/download";
+import {
+  parseTranscriptPreview,
+  type PreviewLanguage,
+  PreviewSegmentLimitError,
+  PreviewTooLargeError,
+  readBoundedJsonResponse,
+  type TranscriptPreview,
+} from "./artifacts/preview";
 import { VisibilityPoller } from "./state/poller";
 import { ConnectionStore, type ConnectionStatus } from "./state/store";
 import { ConnectionSettingsStorage, type ConnectionSummary } from "./storage/settings";
@@ -70,6 +79,14 @@ const eventCount = requireElement("#event-count", HTMLSpanElement);
 const timelineMessage = requireElement("#timeline-message", HTMLParagraphElement);
 const eventList = requireElement("#event-list", HTMLOListElement);
 const loadMoreEvents = requireElement("#load-more-events", HTMLButtonElement);
+const artifactSection = requireElement("#artifact-section", HTMLElement);
+const artifactCount = requireElement("#artifact-count", HTMLSpanElement);
+const artifactMessage = requireElement("#artifact-message", HTMLParagraphElement);
+const artifactGroups = requireElement("#artifact-groups", HTMLDivElement);
+const previewPanel = requireElement("#preview-panel", HTMLDivElement);
+const previewTabs = requireElement("#preview-tabs", HTMLDivElement);
+const previewMessage = requireElement("#preview-message", HTMLParagraphElement);
+const previewSegments = requireElement("#preview-segments", HTMLOListElement);
 const deleteDialog = requireElement("#delete-dialog", HTMLDialogElement);
 const deleteJobTitle = requireElement("#delete-job-title", HTMLParagraphElement);
 const deleteCancel = requireElement("#delete-cancel", HTMLButtonElement);
@@ -87,6 +104,14 @@ let timelineNextOffset = 0;
 let timelineLoading = false;
 let eventRequestGeneration = 0;
 let eventAbort: AbortController | undefined;
+let artifactAbort: AbortController | undefined;
+let previewAbort: AbortController | undefined;
+let artifactsJobId: string | null = null;
+let artifacts: JobArtifact[] = [];
+let artifactLoading = false;
+let activePreviewLanguage: PreviewLanguage = "source";
+const transcriptPreviews = new Map<PreviewLanguage, TranscriptPreview>();
+const busyArtifactIds = new Set<string>();
 let deleteTargetJobId: string | null = null;
 let deleteReturnFocus: HTMLButtonElement | null = null;
 const jobRows = new Map<string, HTMLElement>();
@@ -94,6 +119,7 @@ const actionGate = new JobActionGate();
 
 const connectionStorage = new ConnectionSettingsStorage();
 const apiClient = new LocalApiClient(new LocalApiTransport(connectionStorage));
+const artifactDownloader = new ArtifactDownloadService(apiClient, connectionStorage);
 const store = new ConnectionStore();
 const poller = new VisibilityPoller({
   load: (signal) => apiClient.loadConnectionSnapshot(signal),
@@ -211,6 +237,44 @@ loadMoreEvents.addEventListener("click", () => {
   void loadEvents(false);
 });
 
+artifactGroups.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element) || selectedJobId === null) {
+    return;
+  }
+  const button = target.closest<HTMLButtonElement>(
+    "button[data-artifact-id][data-artifact-action]",
+  );
+  const artifactId = button?.dataset.artifactId;
+  const action = button?.dataset.artifactAction;
+  const artifact = artifacts.find((candidate) => candidate.id === artifactId);
+  const job = store.getState().jobs.find((candidate) => candidate.uuid === selectedJobId);
+  if (button === null || artifact === undefined || job === undefined) {
+    return;
+  }
+  if (action === "preview" && isPreviewKind(artifact.kind)) {
+    void loadPreview(job, artifact, previewLanguageForKind(artifact.kind));
+  } else if (action === "download") {
+    void downloadArtifact(job, artifact);
+  }
+});
+
+previewTabs.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement) || selectedJobId === null) {
+    return;
+  }
+  const language = target.dataset.previewLanguage;
+  if (!isPreviewLanguage(language)) {
+    return;
+  }
+  const job = store.getState().jobs.find((candidate) => candidate.uuid === selectedJobId);
+  const artifact = artifacts.find((candidate) => candidate.kind === `${language}.json`);
+  if (job !== undefined && artifact !== undefined) {
+    void loadPreview(job, artifact, language);
+  }
+});
+
 deleteCancel.addEventListener("click", () => {
   deleteDialog.close("cancel");
 });
@@ -265,6 +329,8 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("pagehide", () => {
   poller.stop();
   eventAbort?.abort();
+  artifactAbort?.abort();
+  previewAbort?.abort();
   unsubscribe();
 });
 
@@ -597,11 +663,16 @@ function openJobDetail(jobId: string): void {
   renderJobDetail(job);
   detailBack.focus();
   void loadEvents(true);
+  void ensureArtifacts(job);
 }
 
 function closeJobDetail(): void {
   eventAbort?.abort();
+  artifactAbort?.abort();
+  previewAbort?.abort();
   eventAbort = undefined;
+  artifactAbort = undefined;
+  previewAbort = undefined;
   eventRequestGeneration += 1;
   selectedJobId = null;
   timelineEvents = [];
@@ -610,6 +681,7 @@ function closeJobDetail(): void {
   timelineLoading = false;
   eventList.replaceChildren();
   timelineMessage.textContent = "";
+  resetArtifacts();
   jobDetail.hidden = true;
   submissionSection.hidden = false;
   jobsSection.hidden = false;
@@ -639,6 +711,264 @@ function renderJobDetail(job: Job): void {
     );
   detailActions.replaceChildren(...buttons);
   updateActionButtons(detailActions, job);
+  artifactSection.hidden = job.status !== "completed";
+  if (job.status === "completed" && artifactsJobId !== job.uuid && !artifactLoading) {
+    void ensureArtifacts(job);
+  } else if (job.status !== "completed" && artifactsJobId !== null) {
+    resetArtifacts();
+  }
+}
+
+async function ensureArtifacts(job: Job): Promise<void> {
+  if (
+    job.status !== "completed" ||
+    artifactLoading ||
+    (artifactsJobId === job.uuid && artifacts.length === 8)
+  ) {
+    return;
+  }
+  artifactAbort?.abort();
+  previewAbort?.abort();
+  const controller = new AbortController();
+  artifactAbort = controller;
+  artifactLoading = true;
+  artifactsJobId = job.uuid;
+  artifacts = [];
+  transcriptPreviews.clear();
+  artifactSection.hidden = false;
+  artifactMessage.textContent = "正在加载文件";
+  artifactGroups.replaceChildren();
+  previewPanel.hidden = true;
+  artifactCount.textContent = "0 / 8";
+  try {
+    const result = await apiClient.getJobArtifacts(job.uuid, controller.signal);
+    if (controller.signal.aborted || selectedJobId !== job.uuid) {
+      return;
+    }
+    artifacts = result;
+    artifactMessage.textContent = "";
+    renderArtifactGroups();
+  } catch (error) {
+    if (!controller.signal.aborted && selectedJobId === job.uuid) {
+      artifactMessage.textContent =
+        error instanceof ApiClientError ? error.message : "文件列表加载失败，请稍后重试";
+    }
+  } finally {
+    if (selectedJobId === job.uuid && artifactAbort === controller) {
+      artifactLoading = false;
+      artifactAbort = undefined;
+    }
+  }
+}
+
+function renderArtifactGroups(): void {
+  artifactCount.textContent = `${String(artifacts.length)} / 8`;
+  artifactGroups.replaceChildren(
+    ...(["source", "zh-CN"] as const).map((language) => {
+      const group = document.createElement("section");
+      group.className = "artifact-group";
+      const heading = document.createElement("h4");
+      heading.textContent = language === "source" ? "原文" : "中文";
+      const list = document.createElement("ul");
+      list.className = "artifact-list";
+      for (const extension of ["txt", "srt", "vtt", "json"] as const) {
+        const kind = `${language}.${extension}`;
+        const artifact = artifacts.find((candidate) => candidate.kind === kind);
+        if (artifact === undefined) {
+          continue;
+        }
+        const row = document.createElement("li");
+        row.className = "artifact-row";
+        const label = document.createElement("span");
+        label.className = "artifact-kind";
+        label.textContent = kind;
+        const buttons = document.createElement("span");
+        buttons.className = "artifact-buttons";
+        if (extension === "json") {
+          buttons.append(createArtifactButton(artifact, "preview", "预览"));
+        }
+        buttons.append(createArtifactButton(artifact, "download", "下载"));
+        row.append(label, buttons);
+        list.append(row);
+      }
+      group.append(heading, list);
+      return group;
+    }),
+  );
+}
+
+function createArtifactButton(
+  artifact: JobArtifact,
+  action: "preview" | "download",
+  label: string,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary";
+  button.dataset.artifactId = artifact.id;
+  button.dataset.artifactAction = action;
+  button.textContent = label;
+  button.ariaLabel = `${label} ${artifact.kind}`;
+  button.disabled = busyArtifactIds.has(artifact.id);
+  return button;
+}
+
+async function loadPreview(
+  job: Job,
+  artifact: JobArtifact,
+  language: PreviewLanguage,
+): Promise<void> {
+  if (
+    job.status !== "completed" ||
+    artifact.jobId !== job.uuid ||
+    artifact.kind !== `${language}.json`
+  ) {
+    return;
+  }
+  activePreviewLanguage = language;
+  selectPreviewTab(language);
+  previewPanel.hidden = false;
+  const cached = transcriptPreviews.get(language);
+  if (cached !== undefined) {
+    previewMessage.textContent = "";
+    renderTranscriptPreview(cached);
+    return;
+  }
+
+  previewAbort?.abort();
+  const controller = new AbortController();
+  previewAbort = controller;
+  previewSegments.replaceChildren();
+  previewMessage.textContent = "正在加载预览";
+  try {
+    const response = await apiClient.getArtifactResponse(job.uuid, artifact, controller.signal);
+    const value = await readBoundedJsonResponse(response, undefined, JSON.parse, controller.signal);
+    const preview = parseTranscriptPreview(value, language, job.uuid);
+    if (
+      controller.signal.aborted ||
+      selectedJobId !== job.uuid ||
+      activePreviewLanguage !== language
+    ) {
+      return;
+    }
+    transcriptPreviews.set(language, preview);
+    previewMessage.textContent = "";
+    renderTranscriptPreview(preview);
+  } catch (error) {
+    if (!controller.signal.aborted && selectedJobId === job.uuid) {
+      previewSegments.replaceChildren();
+      previewMessage.textContent =
+        error instanceof PreviewTooLargeError ||
+        error instanceof PreviewSegmentLimitError ||
+        error instanceof ApiClientError
+          ? error.message
+          : "预览加载失败，请下载后查看";
+    }
+  } finally {
+    if (previewAbort === controller) {
+      previewAbort = undefined;
+    }
+  }
+}
+
+function renderTranscriptPreview(preview: TranscriptPreview): void {
+  previewSegments.replaceChildren(
+    ...preview.segments.map((segment) => {
+      const item = document.createElement("li");
+      item.className = "preview-segment";
+      item.dataset.segmentId = String(segment.id);
+      const metadata = document.createElement("div");
+      metadata.className = "preview-segment-meta";
+      const sequence = document.createElement("span");
+      sequence.textContent = `#${String(segment.id)}`;
+      const timestamp = document.createElement("span");
+      timestamp.textContent = `${formatSegmentTimestamp(segment.startMs)} → ${formatSegmentTimestamp(segment.endMs)}`;
+      const speaker = document.createElement("span");
+      speaker.textContent = segment.speaker;
+      metadata.append(sequence, timestamp, speaker);
+      const text = document.createElement("p");
+      text.className = "preview-segment-text";
+      text.textContent = segment.text;
+      item.append(metadata, text);
+      return item;
+    }),
+  );
+}
+
+async function downloadArtifact(job: Job, artifact: JobArtifact): Promise<void> {
+  if (
+    job.status !== "completed" ||
+    artifact.jobId !== job.uuid ||
+    busyArtifactIds.has(artifact.id)
+  ) {
+    return;
+  }
+  busyArtifactIds.add(artifact.id);
+  artifactMessage.textContent = "";
+  renderArtifactGroups();
+  try {
+    await artifactDownloader.download(job.uuid, jobDisplayTitle(job), artifact);
+    if (selectedJobId === job.uuid) {
+      artifactMessage.textContent = `已开始下载 ${artifact.kind}`;
+    }
+  } catch (error) {
+    if (selectedJobId === job.uuid) {
+      artifactMessage.textContent =
+        error instanceof ApiClientError ? error.message : "下载未开始，请稍后重试";
+    }
+  } finally {
+    busyArtifactIds.delete(artifact.id);
+    if (selectedJobId === job.uuid) {
+      renderArtifactGroups();
+    }
+  }
+}
+
+function selectPreviewTab(language: PreviewLanguage): void {
+  for (const button of previewTabs.querySelectorAll<HTMLButtonElement>("[data-preview-language]")) {
+    button.setAttribute("aria-selected", String(button.dataset.previewLanguage === language));
+  }
+}
+
+function resetArtifacts(): void {
+  artifactAbort?.abort();
+  previewAbort?.abort();
+  artifactAbort = undefined;
+  previewAbort = undefined;
+  artifactsJobId = null;
+  artifacts = [];
+  artifactLoading = false;
+  activePreviewLanguage = "source";
+  transcriptPreviews.clear();
+  busyArtifactIds.clear();
+  artifactSection.hidden = true;
+  artifactCount.textContent = "0 / 8";
+  artifactMessage.textContent = "";
+  artifactGroups.replaceChildren();
+  previewPanel.hidden = true;
+  previewMessage.textContent = "";
+  previewSegments.replaceChildren();
+  selectPreviewTab("source");
+}
+
+function isPreviewKind(kind: ArtifactKind): kind is "source.json" | "zh-CN.json" {
+  return kind === "source.json" || kind === "zh-CN.json";
+}
+
+function previewLanguageForKind(kind: "source.json" | "zh-CN.json"): PreviewLanguage {
+  return kind === "source.json" ? "source" : "zh-CN";
+}
+
+function isPreviewLanguage(value: string | undefined): value is PreviewLanguage {
+  return value === "source" || value === "zh-CN";
+}
+
+function formatSegmentTimestamp(milliseconds: number): string {
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
+  const seconds = Math.floor((milliseconds % 60_000) / 1_000);
+  const remainder = milliseconds % 1_000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(remainder).padStart(3, "0")}`;
 }
 
 async function runJobAction(action: JobAction, jobId: string): Promise<void> {

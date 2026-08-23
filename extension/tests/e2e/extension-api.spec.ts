@@ -488,6 +488,174 @@ test("job controls, confirmed delete, and paginated events use the real backend"
   }
 });
 
+test("completed Job previews and downloads eight artifacts through authenticated fetch", async () => {
+  const profile = await mkdtemp(resolve(tmpdir(), "lvt-chromium-profile-"));
+  let context: BrowserContext | undefined;
+  try {
+    context = await chromium.launchPersistentContext(profile, {
+      channel: "chromium",
+      headless: true,
+      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    });
+    const worker = await extensionWorker(context);
+    const extensionId = new URL(worker.url()).host;
+    await worker.evaluate(
+      async ({ port, token }) =>
+        chrome.storage.local.set({
+          lvtConnection: { port, token },
+        }),
+      { port: Number(new URL(baseUrl).port), token: TOKEN },
+    );
+    const artifactRequests: { headers: Record<string, string>; url: string }[] = [];
+    context.on("request", (request) => {
+      if (request.url().includes("/api/v1/artifacts/") && request.url().endsWith("/download")) {
+        artifactRequests.push({ headers: request.headers(), url: request.url() });
+      }
+    });
+
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      const active = new Set<string>();
+      const downloadFilenames: string[] = [];
+      const createObjectURL = URL.createObjectURL.bind(URL);
+      const revokeObjectURL = URL.revokeObjectURL.bind(URL);
+      URL.createObjectURL = (blob) => {
+        const url = createObjectURL(blob);
+        active.add(url);
+        return url;
+      };
+      URL.revokeObjectURL = (url) => {
+        active.delete(url);
+        revokeObjectURL(url);
+      };
+      Object.defineProperty(window, "__activeArtifactBlobUrls", {
+        get: () => active.size,
+      });
+      Object.defineProperty(window, "__artifactDownloadFilenames", {
+        get: () => [...downloadFilenames],
+      });
+      chrome.downloads.download = (options) => {
+        downloadFilenames.push(options.filename ?? "");
+        return Promise.resolve(downloadFilenames.length);
+      };
+    });
+    await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
+    const created = parseCreateJobsResponse(
+      await page.evaluate(
+        async ({ origin, token }) => {
+          const response = await fetch(`${origin}/api/v1/jobs`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-LVT-Token": token,
+            },
+            body: JSON.stringify({ urls: ["https://example.test/artifact-preview"] }),
+          });
+          return response.json() as Promise<unknown>;
+        },
+        { origin: baseUrl, token: TOKEN },
+      ),
+    );
+    const job = created.accepted[0];
+    if (job === undefined) {
+      throw new Error("artifact test job was not created");
+    }
+    await seedArtifactJob(job.uuid);
+
+    const row = page.locator(`[data-job-id="${job.uuid}"]`);
+    await expect(row).toHaveAttribute("data-status", "completed");
+    await row.getByRole("button", { name: "查看详情 Artifact Target" }).click();
+    await expect(page.locator("#artifact-count")).toHaveText("8 / 8");
+    await expect(page.locator(".artifact-row")).toHaveCount(8);
+    expect(await page.locator(".artifact-kind").allTextContents()).toEqual([
+      "source.txt",
+      "source.srt",
+      "source.vtt",
+      "source.json",
+      "zh-CN.txt",
+      "zh-CN.srt",
+      "zh-CN.vtt",
+      "zh-CN.json",
+    ]);
+
+    await page.getByRole("button", { name: "预览 source.json" }).click();
+    await expect(page.locator(".preview-segment")).toHaveCount(2);
+    expect(
+      await page
+        .locator(".preview-segment")
+        .evaluateAll((segments) =>
+          segments.map((segment) => (segment as HTMLElement).dataset.segmentId),
+        ),
+    ).toEqual(["1", "2"]);
+    await expect(page.locator(".preview-segment").nth(0)).toContainText(
+      "#100:00:00.125 → 00:00:02.100Speaker 1Hello <img src=x>",
+    );
+    await expect(page.locator("#preview-segments img")).toHaveCount(0);
+    await page.getByRole("tab", { name: "中文" }).click();
+    await expect(page.locator(".preview-segment").nth(0)).toContainText("你好 <script>");
+    await expect(page.locator("#preview-segments script")).toHaveCount(0);
+    await page.setViewportSize({ width: 360, height: 900 });
+    await expect(page.locator("#artifact-section")).toHaveScreenshot(
+      "checkpoint-5a-artifact-preview-360.png",
+      { animations: "disabled" },
+    );
+
+    for (const kind of [
+      "source.txt",
+      "source.srt",
+      "source.vtt",
+      "source.json",
+      "zh-CN.txt",
+      "zh-CN.srt",
+      "zh-CN.vtt",
+      "zh-CN.json",
+    ]) {
+      await page.getByRole("button", { name: `下载 ${kind}` }).click();
+      await expect(page.locator("#artifact-message")).toHaveText(`已开始下载 ${kind}`);
+    }
+
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __artifactDownloadFilenames?: string[];
+            }
+          ).__artifactDownloadFilenames ?? [],
+      ),
+    ).toEqual([
+      `Artifact Target--${job.uuid.slice(0, 8)}/source.txt`,
+      `Artifact Target--${job.uuid.slice(0, 8)}/source.srt`,
+      `Artifact Target--${job.uuid.slice(0, 8)}/source.vtt`,
+      `Artifact Target--${job.uuid.slice(0, 8)}/source.json`,
+      `Artifact Target--${job.uuid.slice(0, 8)}/zh-CN.txt`,
+      `Artifact Target--${job.uuid.slice(0, 8)}/zh-CN.srt`,
+      `Artifact Target--${job.uuid.slice(0, 8)}/zh-CN.vtt`,
+      `Artifact Target--${job.uuid.slice(0, 8)}/zh-CN.json`,
+    ]);
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __activeArtifactBlobUrls?: number }).__activeArtifactBlobUrls ??
+          -1,
+      ),
+    ).toBe(0);
+    expect(artifactRequests).toHaveLength(10);
+    for (const request of artifactRequests) {
+      expect(request.url).toMatch(
+        new RegExp(`^${baseUrl.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}/api/v1/artifacts/`),
+      );
+      expect(request.url).not.toContain(TOKEN);
+      expect(request.headers["x-lvt-token"]).toBe(TOKEN);
+    }
+    await expect(page.locator("body")).not.toContainText(TOKEN);
+  } finally {
+    await context?.close();
+    await rm(profile, { force: true, recursive: true });
+  }
+});
+
 async function extensionWorker(context: BrowserContext): Promise<Worker> {
   const existing = context.serviceWorkers()[0];
   return existing ?? context.waitForEvent("serviceworker");
@@ -580,6 +748,93 @@ async function seedControlJobs(
     cancelJobId,
     retryJobId,
     deleteJobId,
+  ]);
+}
+
+async function seedArtifactJob(jobId: string): Promise<void> {
+  if (dataRoot === undefined) {
+    throw new Error("E2E data root was not initialized");
+  }
+  const database = resolve(dataRoot, "db/lvt.sqlite3");
+  const workRoot = resolve(dataRoot, "work");
+  await execFileAsync(PYTHON, [
+    "-c",
+    [
+      "import hashlib, json, pathlib, sqlite3, sys, uuid",
+      "database, work_root, job_id = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3]",
+      "run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f'e2e-run:{job_id}'))",
+      "stage = work_root / job_id / 'runs' / run_id / 'export_manifest'",
+      "exports = stage / 'exports'",
+      "exports.mkdir(parents=True, exist_ok=True)",
+      [
+        "segments = [",
+        "{'id': 1, 'start_ms': 125, 'end_ms': 2100, 'speaker': 'Speaker 1', ",
+        "'source_language': 'en', 'source_text': 'Hello <img src=x>', ",
+        "'translated_text': '你好 <script>', 'metadata': {}}, ",
+        "{'id': 2, 'start_ms': 2200, 'end_ms': 4999, 'speaker': 'Speaker 2', ",
+        "'source_language': 'en', 'source_text': 'Second line.', ",
+        "'translated_text': '第二行。', 'metadata': {}}]",
+      ].join(""),
+      [
+        "base = {'schema_version': '1.0', 'job_id': job_id, ",
+        "'source_url': 'https://example.test/artifact-preview', 'title': 'Artifact Target', ",
+        "'duration_ms': 5000, 'detected_language': 'en', 'engine_versions': {}, ",
+        "'processing_options': {}, 'segments': segments, 'warnings': []}",
+      ].join(""),
+      "source = json.loads(json.dumps(base))",
+      "[segment.update({'translated_text': ''}) for segment in source['segments']]",
+      [
+        "files = {",
+        "'source.txt': 'Hello <img src=x>\\nSecond line.\\n', ",
+        "'source.srt': '1\\n00:00:00,125 --> 00:00:02,100\\nHello <img src=x>\\n', ",
+        "'source.vtt': 'WEBVTT\\n\\n00:00:00.125 --> 00:00:02.100\\nHello <img src=x>\\n', ",
+        "'source.json': json.dumps(source, ensure_ascii=False, indent=2) + '\\n', ",
+        "'zh-CN.txt': '你好 <script>\\n第二行。\\n', ",
+        "'zh-CN.srt': '1\\n00:00:00,125 --> 00:00:02,100\\n你好 <script>\\n', ",
+        "'zh-CN.vtt': 'WEBVTT\\n\\n00:00:00.125 --> 00:00:02.100\\n你好 <script>\\n', ",
+        "'zh-CN.json': json.dumps(base, ensure_ascii=False, indent=2) + '\\n'}",
+      ].join(""),
+      [
+        "[(exports / kind).write_text(content, encoding='utf-8') ",
+        "for kind, content in files.items()]",
+      ].join(""),
+      [
+        "outputs = [{'kind': kind, ",
+        "'relative_path': (exports / kind).relative_to(work_root).as_posix(), ",
+        "'byte_size': (exports / kind).stat().st_size, ",
+        "'sha256': hashlib.sha256((exports / kind).read_bytes()).hexdigest()} ",
+        "for kind in sorted(files)]",
+      ].join(""),
+      [
+        "(stage / 'manifest.json').write_text(json.dumps({",
+        "'job_id': job_id, 'run_id': run_id, 'stage': 'export_manifest', 'outputs': outputs",
+        "}), encoding='utf-8')",
+      ].join(""),
+      "(stage / '.published').write_text('published', encoding='utf-8')",
+      "connection = sqlite3.connect(database)",
+      "connection.execute('DELETE FROM artifacts WHERE job_id = ?', (job_id,))",
+      [
+        "connection.executemany(",
+        "'INSERT INTO artifacts (id, job_id, kind, path, created_at) VALUES (?, ?, ?, ?, ?)', ",
+        "[(str(uuid.uuid5(uuid.NAMESPACE_URL, f'e2e-artifact:{job_id}:{kind}')), job_id, kind, ",
+        "(exports / kind).relative_to(work_root).as_posix(), '2026-08-23T10:02:03+00:00') ",
+        "for kind in sorted(files)])",
+      ].join(""),
+      [
+        "connection.execute(",
+        "\"UPDATE jobs SET title = 'Artifact Target', status = 'completed', \"",
+        '"stage_progress = 100, overall_progress = 100, active_run_id = NULL, "',
+        "\"detected_language = 'en', duration_ms = 5000, \"",
+        "\"checkpoint_pointer = ?, finished_at = '2026-08-23T10:02:03+00:00' \"",
+        '"WHERE uuid = ?", ',
+        "((stage / 'manifest.json').relative_to(work_root).as_posix(), job_id))",
+      ].join(""),
+      "connection.commit()",
+      "connection.close()",
+    ].join("; "),
+    database,
+    workRoot,
+    jobId,
   ]);
 }
 
