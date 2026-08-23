@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from lvt.core.instance_lock import ProcessInstanceLock
 from lvt.core.models import JobOptions
 from lvt.db.repository import JobRepository
 from lvt.security.urls import validate_public_media_url
@@ -33,10 +34,9 @@ def create_app(
     worker_clock: Clock | None = None,
 ) -> FastAPI:
     repository = JobRepository(db_path)
-    repository.initialize()
     if type(worker_concurrency) is not int or worker_concurrency not in {1, 2}:
         raise ValueError("worker_concurrency must be 1 or 2")
-    repository.set_worker_concurrency(worker_concurrency)
+    instance_lock = ProcessInstanceLock(db_path.with_name(f"{db_path.name}.instance.lock"))
     worker_pool = (
         JobWorkerPool(
             repository=repository,
@@ -51,19 +51,27 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> Any:
-        recovery = repository.recover_startup()
-        _app.state.startup_recovery = recovery
-        if worker_pool is not None:
-            worker_pool.start()
+        instance_lock.acquire()
         try:
-            yield
-        finally:
+            repository.initialize()
+            repository.set_worker_concurrency(worker_concurrency)
+            recovery = repository.recover_startup()
+            _app.state.startup_recovery = recovery
             if worker_pool is not None:
-                await asyncio.to_thread(worker_pool.stop)
+                worker_pool.start()
+            try:
+                yield
+            finally:
+                if worker_pool is not None:
+                    await asyncio.to_thread(worker_pool.stop)
+        finally:
+            if worker_pool is None or worker_pool.live_thread_count == 0:
+                instance_lock.release()
 
     app = FastAPI(title="Local Video Transcriber", version="0.1.0", lifespan=lifespan)
     app.state.repository = repository
     app.state.worker_pool = worker_pool
+    app.state.instance_lock = instance_lock
 
     def require_token(
         supplied_token: Annotated[str | None, Header(alias="X-LVT-Token")] = None,

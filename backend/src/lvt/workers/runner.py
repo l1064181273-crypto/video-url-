@@ -82,11 +82,16 @@ class JobCancellationToken(CancellationToken):
         if super().cancelled:
             return True
         current = self.repository.get(self.job_id)
-        if (
-            current is not None
-            and current["status"] == JobStatus.CANCELLING.value
-            and current["active_run_id"] == self.run_id
-        ):
+        if current is None:
+            return False
+        status = JobStatus(str(current["status"]))
+        active_run_id = current["active_run_id"]
+        requested_cancel = status is JobStatus.CANCELLING and active_run_id == self.run_id
+        lost_ownership = (
+            status in {*ACTIVE_JOB_STATUSES, JobStatus.QUEUED, JobStatus.CANCELLING}
+            and active_run_id != self.run_id
+        )
+        if requested_cancel or lost_ownership:
             self.cancel()
         return super().cancelled
 

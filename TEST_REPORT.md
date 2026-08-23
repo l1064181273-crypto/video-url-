@@ -892,6 +892,91 @@ cd backend
 - 未重跑真实五样本媒体 E2E；本轮恢复使用已发布 checkpoint 和确定性引擎调用计数，
   外部取消使用真实本地进程树。
 
+## Phase 2 Checkpoint 6 独立审查阻塞修复：跨进程启动所有权
+
+### 红灯与根因
+
+新增测试首次执行：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest \
+  tests/integration/test_single_instance_lifecycle.py
+# exit 2：ModuleNotFoundError: lvt.core.instance_lock
+```
+
+根因是每个 FastAPI lifespan 都无条件调用 `recover_startup()`，但进程间没有任何
+启动所有权。晚到实例即使最终端口绑定失败，也可能先把健康实例的新 run 恢复为
+queued、清除 active_run_id 并写第二条 interrupted event。
+
+### 实现与生命周期
+
+- 新增 `ProcessInstanceLock`，对数据库旁的固定 lock 文件使用
+  `fcntl.flock(LOCK_EX | LOCK_NB)`；锁文件权限为 0600。
+- lock 文件不在释放时删除，避免 unlock/unlink 与下一实例 open 之间产生不同 inode
+  的竞态。文件只记录当前持有进程 PID，不作为所有权判定依据。
+- lifespan 顺序固定为：获取进程锁 → initialize/migration → settings →
+  单事务 recovery → Pipeline factory → worker start/claim。
+- shutdown 顺序固定为：停止 claim → 等待/取消并 join worker → 确认无线程存活 →
+  释放进程锁。
+- initialize、recovery、Pipeline factory、线程启动或 lifespan body 抛错时，若无
+  worker 存活则释放锁。若 worker 超时仍存活，则不释放锁，由进程退出关闭 FD，
+  防止新实例与旧 worker 并行。
+- `JobCancellationToken` 在 queued/active/cancelling 非终态发现 active_run_id
+  已不再属于自己时触发协作式停止；正常 completed/failed/cancelled 不触发取消。
+
+### 确定性跨进程证据
+
+测试使用 multiprocessing `spawn`、Pipe 和 Event，不使用随机 sleep：
+
+1. 预置一个模拟崩溃的 active run。
+2. 独立进程 A 获取 lifespan 锁，恢复一次并由 worker claim 新 run。
+3. A 的 Pipeline 通过 Pipe 报告已进入 run，并由 Event 阻塞。
+4. 此后才启动独立进程 B；B 在 recovery 前收到
+   `InstanceAlreadyRunningError`。
+5. 父进程验证 Job status、active_run_id 和完整 event 列表逐项不变，
+   interrupted 仍只有 1 条；B 的 factory Event 未设置且无 `lvt-worker-*` 线程。
+6. 释放 A 并完成 worker join 后启动后继实例；后继实例恢复 A 纯 shutdown 留下的
+   active run 恰好一次，并 claim 第三个唯一 run_id。
+
+另有确定性测试验证 Pipeline factory 失败、worker thread start 失败和 lifespan
+body 异常后，下一实例均可立即取得锁；lost-ownership token 会停止 stale run，
+completed token 保持未取消。
+
+### 修复后测试
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest \
+  tests/unit/test_repository_recovery.py \
+  tests/integration/test_cancellation.py \
+  tests/integration/test_startup_recovery.py \
+  tests/integration/test_pipeline_checkpoints.py \
+  tests/integration/test_single_instance_lifecycle.py
+# 92 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest \
+  tests/integration/test_worker.py \
+  tests/integration/test_worker_lifecycle.py
+# 23 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest tests/unit/test_process_control.py
+# 11 passed
+
+../.venv-smoke/bin/python -m pytest
+# 528 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# Success: no issues found in 35 source files
+```
+
+### 残留限制
+
+- 该锁是 macOS/POSIX 本机文件锁，符合 v0.1 单机单实例范围；不提供分布式租约。
+- 若 worker 忽略协作式取消并永久挂起，lifespan 会报告 shutdown 失败并继续持锁，
+  需要终止该进程后由内核释放；不会为了让第二实例启动而并行运行两个 worker。
+- 未实现任何 Checkpoint 7 控制 API，未修改 Phase 1 strict-token 文件。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：

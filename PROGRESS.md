@@ -250,7 +250,20 @@
   - ✅ Checkpoint 6 后全量 `pytest` 523 passed（1 条第三方警告）；专项
     55 passed（32 deselected）；worker 回归 23 passed；Ruff lint/format 通过；
     mypy 34 个源码文件通过。
-  - ⏭️ 下一步：等待 Checkpoint 6 独立审查；未实现 Checkpoint 7 控制 API。
+  - ✅ Checkpoint 6 独立审查阻塞修复：新增基于 `fcntl.flock` 的跨进程单实例锁，
+    在数据库 initialize/recovery、Pipeline factory、worker start 和 claim 之前获取，
+    并持有到 worker 完全停止之后；晚到实例在任何数据库恢复写入前失败。
+  - ✅ 锁文件与数据库并列且永久保留 inode，只释放 advisory lock，不执行 unlink；
+    启动恢复、factory 和线程启动异常以及 lifespan 异常均在无线程残留后释放锁。
+    若 worker 未能在有限时间内停止，则保持锁直至进程退出，避免仍存活 worker 与新实例并行。
+  - ✅ 新增 `spawn` 多进程 + Pipe/Event 确定性竞争回归：A 恢复并 claim 后 B 才启动；
+    B 无 interrupted event、无 run_id 变化、无 factory 调用和 worker 线程。A 退出后
+    后继实例只恢复一次并生成唯一新 run。
+  - ✅ `JobCancellationToken` 增加非终态 run 所有权丢失防御；queued/active/cancelling
+    状态下 run_id 不匹配会在安全边界停止旧 worker，completed/failed/cancelled 不误判。
+  - ✅ 修复后 Checkpoint 6 全集 92 passed；worker/lifecycle 23 passed；process-control
+    11 passed；全量 `pytest` 528 passed（1 条第三方警告）；mypy 35 个源码文件通过。
+  - ⏭️ 下一步：等待 Checkpoint 6 修复独立复审；未实现 Checkpoint 7 控制 API。
 
 ## 已知阻塞
 
