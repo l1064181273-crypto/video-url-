@@ -211,8 +211,20 @@
   - ✅ Checkpoint 4 后全量 `pytest` 448 passed（1 条第三方警告）；process-control
     11 passed；checkpoint 集成
     35 passed；Ruff lint/format 通过；mypy 31 个源码文件通过。
-  - ⏭️ 下一步：等待 Checkpoint 4 独立审查；未实现 lifespan worker、自动重试调度、
-    启动恢复或控制 API。
+  - ✅ Phase 2 Checkpoint 5 完成：FastAPI lifespan 启停本地 worker pool，HTTP
+    创建 Job 只持久化 queued 后立即返回，媒体处理只在 `lvt-worker-*` 线程执行。
+  - ✅ worker concurrency 仅允许 1/2；真实线程与 Barrier/Event 测试确认活动 Job
+    不超过配置，双 worker 竞争同一 Job 仅一个 claim/run 获得执行权。
+  - ✅ 固定权重进度、stage 0/100 回调及 overall high-water 已持久化；stale run、
+    旧 stage、较小进度和恢复到较早 checkpoint 均不能使进度倒退。
+  - ✅ Job 自动重试严格为初次加 2 次；持久化 backoff 为 2 秒、10 秒；第三次失败
+    原子进入 failed。仅结构化 auto-requeue 错误重试，消息文本不能开启重试。
+  - ✅ shutdown 先停止 claim，有限等待后取消协作式执行并再次有限等待；测试结束
+    worker thread 数为 0，第二个 queued Job 未被 claim。
+  - ✅ Checkpoint 5 后全量 `pytest` 461 passed（1 条第三方警告）；worker 专项
+    13 passed；Ruff lint/format 通过；mypy 34 个源码文件通过。
+  - ⏭️ 下一步：等待 Checkpoint 5 独立审查；未实现 Checkpoint 6 启动恢复和完整取消
+    编排，也未实现 Checkpoint 7 控制 API。
 
 ## 已知阻塞
 

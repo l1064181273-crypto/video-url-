@@ -47,6 +47,7 @@ from lvt.security.urls import validate_public_media_url
 
 Segmenter = Callable[..., list[Segment]]
 Exporter = Callable[[Transcript, Path], list[Path]]
+ProgressCallback = Callable[[JobStatus, int], None]
 IN_PROCESS_CANCELLATION_LIMITATION = (
     "MLX, sherpa-onnx and Ollama calls are checked immediately before and after "
     "each call; worst-case cancellation latency is the remaining call duration."
@@ -154,10 +155,16 @@ class Pipeline:
         job_id: str,
         run_id: str,
         cancellation: CancellationToken | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> PipelineResult:
         token = cancellation or CancellationToken()
         try:
-            return self._run_claimed(job_id=job_id, run_id=run_id, cancellation=token)
+            return self._run_claimed(
+                job_id=job_id,
+                run_id=run_id,
+                cancellation=token,
+                progress_callback=progress_callback,
+            )
         except BaseException:
             self.checkpoints.cleanup_unpublished_run(job_id, run_id)
             raise
@@ -168,6 +175,7 @@ class Pipeline:
         job_id: str,
         run_id: str,
         cancellation: CancellationToken,
+        progress_callback: ProgressCallback | None,
     ) -> PipelineResult:
         repository = self._repository()
         cancellation.raise_if_cancelled()
@@ -194,6 +202,8 @@ class Pipeline:
         start_index = len(manifests)
         for stage in CHECKPOINT_STAGE_ORDER[start_index:]:
             cancellation.raise_if_cancelled()
+            if progress_callback is not None:
+                progress_callback(STAGE_JOB_STATUS[stage], 0)
             previous = (
                 manifests[CHECKPOINT_STAGE_ORDER[CHECKPOINT_STAGE_ORDER.index(stage) - 1]]
                 if CHECKPOINT_STAGE_ORDER.index(stage) > 0
@@ -383,6 +393,8 @@ class Pipeline:
                 raise RuntimeError("stale run cannot publish checkpoint")
             self.checkpoints.mark_published(manifest)
             manifests[stage] = manifest
+            if progress_callback is not None:
+                progress_callback(expected_status, 100)
             if stage is not CheckpointStage.EXPORT_MANIFEST:
                 next_stage = CHECKPOINT_STAGE_ORDER[CHECKPOINT_STAGE_ORDER.index(stage) + 1]
                 if not repository.advance_stage(
@@ -398,6 +410,8 @@ class Pipeline:
         export_manifest = manifests.get(CheckpointStage.EXPORT_MANIFEST)
         if transcript is None or export_manifest is None:
             raise RuntimeError("completed checkpoint chain is incomplete")
+        if start_index == len(CHECKPOINT_STAGE_ORDER) and progress_callback is not None:
+            progress_callback(JobStatus.EXPORTING, 100)
         artifact_paths = [
             self.checkpoints.resolve_output_path(output) for output in export_manifest.outputs
         ]

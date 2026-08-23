@@ -703,6 +703,75 @@ cd backend
 - 没有更改 yt-dlp/FFmpeg 的业务参数、模型算法或 Phase 1 strict-token。
 - 未运行真实网络下载和模型 E2E；外部进程生命周期使用真实本地子进程组验证。
 
+## Phase 2 Checkpoint 5：worker / retry / progress
+
+实现：
+
+- FastAPI lifespan 启动和停止 `JobWorkerPool`；POST 创建任务只写 queued 并通知
+  worker，不在请求线程执行 Pipeline。
+- worker concurrency 仅允许 1 或 2，并同步持久化到 settings。
+- worker 先解析连续 checkpoint，再使用 Repository 原子 claim 获得唯一 run_id。
+- Pipeline 从 Repository 读取持久化 JobOptions，并接受阶段 progress callback。
+- 固定权重：
+  - downloading 15
+  - extracting 5
+  - transcribing 35
+  - diarizing 15
+  - segmenting 5
+  - translating 20
+  - exporting 5
+- overall 使用 `floor(base + weight * stage_progress / 100)`，并与当前高水位取最大值。
+- Pipeline 对每个实际阶段报告 0 和 100；完整缓存直接恢复到 exporting 时报告 100。
+- 进度仍通过 `job_id + run_id + expected_status` CAS；stale、旧 stage 和倒退全部拒绝。
+- 自动重试只接受结构化 ErrorCode 且 policy 标记 `auto_requeue` 的错误。
+- Job 级 backoff 固定为第一次 2 秒、第二次 10 秒，写入 `next_attempt_at`。
+- 第三次执行失败由 Repository 原子进入 failed；工具内部 retry 不增加 Job execution。
+- shutdown 先设置 stop，禁止新 claim；等待 graceful deadline 后取消活动 token，再有限
+  等待 worker 退出。测试中的协作式 Pipeline 全部退出且无后台线程。
+
+测试：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest tests/integration/test_worker.py
+# 13 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest
+# 461 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# All checks passed!
+
+../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# 59 files already formatted
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# Success: no issues found in 34 source files
+```
+
+已验证：
+
+- HTTP 响应在线程阻塞的 Pipeline 完成前返回，执行线程名称为 `lvt-worker-*`。
+- concurrency=1/2 的活动 run 上限分别为 1/2。
+- 双 worker 同时到达 claim barrier 时同一 Job 只执行一次。
+- 固定阶段权重和公式逐项验证；真实 checkpoint Pipeline 按阶段报告 0/100。
+- 同 stage 进度倒退、旧 stage、stale run 和迟到回调均零写入。
+- 从 transcribing 高水位 55 恢复 downloading 后，overall 仍保持 55。
+- DOWNLOAD_FAILED 恰好执行三次；2 秒和 10 秒到期前不可 claim，第三次进入 failed。
+- MEDIA_INVALID 直接 failed，不自动重试。
+- 异常消息仅含 `DOWNLOAD_FAILED` 但无结构化 code 时按 INTERNAL_ERROR 直接失败。
+- 模拟工具内部三次尝试时 `execution_count_total` 只增加一次。
+- 手工 retry 仍只增加 retry_cycle、重置周期自动次数并保留总执行数。
+- shutdown 期间第二个 queued Job 不被 claim；协作取消后 live worker thread 为 0。
+
+范围限制：
+
+- 未实现 Checkpoint 6 的启动恢复、`cancelling → cancelled` 完整编排。
+- 未实现 Checkpoint 7 retry/cancel/delete/settings 等控制 API。
+- 对不支持取消的 MLX/sherpa/Ollama 原生调用仍无法强杀；若超过 shutdown deadline，
+  `WorkerShutdownError` 会明确报告未停止线程，不会谎报干净退出。
+- 本轮使用确定性 Fake Pipeline 验证 worker 编排，没有执行真实五样本 API+worker E2E。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：

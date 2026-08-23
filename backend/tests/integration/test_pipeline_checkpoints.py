@@ -213,14 +213,24 @@ def _create_job(
     return str(job["uuid"])
 
 
-def _claim_and_run(pipeline: Pipeline, repository: JobRepository, job_id: str) -> Any:
+def _claim_and_run(
+    pipeline: Pipeline,
+    repository: JobRepository,
+    job_id: str,
+    *,
+    progress_callback: Any = None,
+) -> Any:
     first_stage = pipeline.resolve_first_required_stage(job_id)
     claimed = repository.claim_next(
         expected_job_id=job_id,
         first_required_stage=first_stage,
     )
     assert claimed is not None
-    return pipeline.run_claimed(job_id=job_id, run_id=str(claimed["active_run_id"]))
+    return pipeline.run_claimed(
+        job_id=job_id,
+        run_id=str(claimed["active_run_id"]),
+        progress_callback=progress_callback,
+    )
 
 
 def _prime_failed_completion(
@@ -279,7 +289,13 @@ def test_checkpoint_pipeline_reads_persisted_options_and_skips_diarization(
         translate_to="zh-CN",
     )
 
-    result = _claim_and_run(pipeline, repository, job_id)
+    progress: list[tuple[JobStatus, int]] = []
+    result = _claim_and_run(
+        pipeline,
+        repository,
+        job_id,
+        progress_callback=lambda status, value: progress.append((status, value)),
+    )
 
     assert calls["diarization_result"] == 0
     assert calls["asr_model:persisted-asr"] == 1
@@ -296,6 +312,19 @@ def test_checkpoint_pipeline_reads_persisted_options_and_skips_diarization(
     assert len(result.artifacts) == 8
     assert repository.get(job_id)["status"] == JobStatus.COMPLETED.value  # type: ignore[index]
     assert len(repository.list_artifacts(job_id)) == 8
+    assert progress == [
+        item
+        for status in (
+            JobStatus.DOWNLOADING,
+            JobStatus.EXTRACTING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.DIARIZING,
+            JobStatus.SEGMENTING,
+            JobStatus.TRANSLATING,
+            JobStatus.EXPORTING,
+        )
+        for item in ((status, 0), (status, 100))
+    ]
     output_dir = result.artifacts[0].parent
     source = json.loads((output_dir / "source.json").read_text(encoding="utf-8"))
     translated = json.loads((output_dir / "zh-CN.json").read_text(encoding="utf-8"))

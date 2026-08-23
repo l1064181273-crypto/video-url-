@@ -22,6 +22,9 @@ class CancellationToken:
     def cancel(self) -> None:
         self._event.set()
 
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
+
     def raise_if_cancelled(self) -> None:
         if self.cancelled:
             raise ProcessCancelledError(

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -10,6 +13,7 @@ from pydantic import BaseModel, Field
 from lvt.core.models import JobOptions
 from lvt.db.repository import JobRepository
 from lvt.security.urls import validate_public_media_url
+from lvt.workers.runner import Clock, JobWorkerPool, WorkerPipeline
 
 
 class CreateJobsRequest(BaseModel):
@@ -22,11 +26,41 @@ def create_app(
     db_path: Path,
     api_token: str,
     capabilities: dict[str, Any] | None = None,
+    pipeline_builder: Callable[[JobRepository], WorkerPipeline] | None = None,
+    worker_concurrency: int = 1,
+    worker_poll_interval: float = 0.25,
+    worker_clock: Clock | None = None,
 ) -> FastAPI:
     repository = JobRepository(db_path)
     repository.initialize()
-    app = FastAPI(title="Local Video Transcriber", version="0.1.0")
+    if type(worker_concurrency) is not int or worker_concurrency not in {1, 2}:
+        raise ValueError("worker_concurrency must be 1 or 2")
+    repository.set_worker_concurrency(worker_concurrency)
+    worker_pool = (
+        JobWorkerPool(
+            repository=repository,
+            pipeline_factory=lambda: pipeline_builder(repository),
+            concurrency=worker_concurrency,
+            clock=worker_clock,
+            poll_interval=worker_poll_interval,
+        )
+        if pipeline_builder is not None
+        else None
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> Any:
+        if worker_pool is not None:
+            worker_pool.start()
+        try:
+            yield
+        finally:
+            if worker_pool is not None:
+                await asyncio.to_thread(worker_pool.stop)
+
+    app = FastAPI(title="Local Video Transcriber", version="0.1.0", lifespan=lifespan)
     app.state.repository = repository
+    app.state.worker_pool = worker_pool
 
     def require_token(
         supplied_token: Annotated[str | None, Header(alias="X-LVT-Token")] = None,
@@ -62,6 +96,8 @@ def create_app(
                 )
                 continue
             accepted.append(repository.create(url, payload.options.model_dump()))
+        if accepted and worker_pool is not None:
+            worker_pool.notify()
         return {"accepted": accepted, "rejected": rejected}
 
     @app.get("/api/v1/jobs", dependencies=[Depends(require_token)])
