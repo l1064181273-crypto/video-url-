@@ -72,6 +72,31 @@ class CancellationObservedPipeline(PassivePipeline):
         cancellation.raise_if_cancelled()
 
 
+class RetirementPipeline(PassivePipeline):
+    def __init__(
+        self,
+        entered: threading.Event,
+        release: threading.Event,
+        exited: threading.Event,
+    ) -> None:
+        self.entered = entered
+        self.release = release
+        self.exited = exited
+
+    def run_claimed(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        cancellation: CancellationToken,
+        progress_callback: Callable[[JobStatus, int], None],
+    ) -> None:
+        self.entered.set()
+        assert self.release.wait(timeout=5)
+        self.exited.set()
+        cancellation.raise_if_cancelled()
+
+
 class BlockingClaimRepository(JobRepository):
     def __init__(self, db_path: Path) -> None:
         super().__init__(db_path)
@@ -219,6 +244,94 @@ def test_lifespan_surfaces_factory_failure_without_worker_thread(tmp_path: Path)
         pass
 
     assert app.state.worker_pool.live_thread_count == 0
+
+
+def test_runtime_concurrency_decrease_retires_worker_after_active_run(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "runtime-concurrency.sqlite3")
+    job_ids = [_create_job(repository, str(index)) for index in range(3)]
+    first_entered = threading.Event()
+    first_release = threading.Event()
+    first_exited = threading.Event()
+    second_entered = threading.Event()
+    second_release = threading.Event()
+    second_exited = threading.Event()
+    pipelines: list[WorkerPipeline] = [
+        RetirementPipeline(first_entered, first_release, first_exited),
+        RetirementPipeline(second_entered, second_release, second_exited),
+    ]
+    pool = JobWorkerPool(
+        repository=repository,
+        pipeline_factory=lambda: pipelines.pop(0),
+        concurrency=1,
+        poll_interval=60,
+    )
+    pool.start()
+    pool.notify()
+    assert first_entered.wait(timeout=2)
+
+    pool.update_concurrency(2)
+    pool.notify()
+    assert second_entered.wait(timeout=2)
+    assert repository.get_worker_concurrency() == 2
+    assert pool.live_thread_count == 2
+
+    pool.update_concurrency(1)
+    assert repository.get_worker_concurrency() == 1
+    assert not first_exited.is_set()
+    assert not second_exited.is_set()
+    retiring_thread = pool._threads[1]
+
+    pool.update_concurrency(2)
+    assert pool._threads[1] is retiring_thread
+    assert pool.live_thread_count == 2
+    pool.update_concurrency(1)
+
+    second_release.set()
+    assert second_exited.wait(timeout=2)
+    pool._threads[1].join(timeout=2)
+    assert not pool._threads[1].is_alive()
+    assert pool.live_thread_count == 1
+    third = repository.get(job_ids[2])
+    assert third is not None
+    assert third["status"] == JobStatus.QUEUED.value
+    assert third["execution_count_total"] == 0
+
+    first_release.set()
+    assert first_exited.wait(timeout=2)
+    pool.stop()
+    assert pool.live_thread_count == 0
+
+
+def test_runtime_concurrency_increase_failure_rolls_back_setting_and_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(tmp_path / "runtime-increase-failure.sqlite3")
+    pool = JobWorkerPool(
+        repository=repository,
+        pipeline_factory=PassivePipeline,
+        concurrency=1,
+        poll_interval=60,
+    )
+    pool.start()
+    original_start = threading.Thread.start
+
+    def fail_second_worker(thread: threading.Thread) -> None:
+        if thread.name == "lvt-worker-2":
+            raise RuntimeError("injected runtime thread failure")
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_second_worker)
+    with pytest.raises(WorkerStartupError, match="thread failed to start"):
+        pool.update_concurrency(2)
+
+    assert pool.concurrency == 1
+    assert repository.get_worker_concurrency() == 1
+    assert len(pool._threads) == 1
+    assert pool.live_thread_count == 1
+    pool.stop()
 
 
 @pytest.mark.parametrize("failure_point", ["resolver", "peek", "claim"])

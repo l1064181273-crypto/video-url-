@@ -975,7 +975,92 @@ cd backend
 - 该锁是 macOS/POSIX 本机文件锁，符合 v0.1 单机单实例范围；不提供分布式租约。
 - 若 worker 忽略协作式取消并永久挂起，lifespan 会报告 shutdown 失败并继续持锁，
   需要终止该进程后由内核释放；不会为了让第二实例启动而并行运行两个 worker。
-- 未实现任何 Checkpoint 7 控制 API，未修改 Phase 1 strict-token 文件。
+- 截至该 Checkpoint 6 修复 commit 尚未实现 Checkpoint 7；Phase 1 strict-token 文件未修改。
+
+## Phase 2 Checkpoint 7：HTTP 控制面
+
+### HTTP 合同
+
+全部路由要求 `X-LVT-Token`：
+
+| 路由 | 成功行为 | 主要错误 |
+| --- | --- | --- |
+| `POST /api/v1/jobs/{id}/retry` | failed/cancelled → queued；queued 幂等 | 404；状态冲突或策略禁止为 409 |
+| `POST /api/v1/jobs/{id}/cancel` | queued → cancelled；active → cancelling；重复幂等 | 404；terminal 冲突为 409 |
+| `DELETE /api/v1/jobs/{id}?confirm=true` | 删除 terminal Job、events、artifacts 和 Job 文件树 | 未确认/活动/不安全路径 409；未知 404 |
+| `GET /api/v1/jobs/{id}/events` | `offset/limit` 稳定 ID 顺序分页 | 未知 404；非法分页 422 |
+| `GET /api/v1/jobs/{id}/artifacts` | completed Job 的 8 个公开 artifact 描述 | 未完成 409；未知 404 |
+| `GET /api/v1/artifacts/{id}/download` | 经 DB owner 和路径验证后流式下载 | 未知、非 completed、缺失或非法路径均为 404 |
+| `GET /api/v1/settings` | 返回持久化 worker concurrency | 未鉴权 401 |
+| `PATCH /api/v1/settings` | 严格整数 1/2，运行时调整新 claim 容量 | 非法值 422；worker 扩容失败 503 |
+
+Job HTTP payload 不再返回内部 `work_dir` 或 `checkpoint_pointer`；artifact 列表不返回
+文件路径，只返回服务生成的 artifact ID、kind、创建时间和下载路由。
+
+### 删除和下载安全
+
+- artifact 下载不接受文件路径参数，只通过 artifact ID 查询 artifact 与 owning Job。
+- owning Job 必须 completed；路径必须是 `work_root/<job_id>/...` 下的相对路径，
+  artifact kind 必须等于文件名。
+- 从 work root 到文件逐组件 `lstat`，拒绝绝对路径、`..`、中间/最终 symlink 和
+  非普通文件；最终使用 `O_NOFOLLOW` 打开后再流式返回，避免响应阶段路径替换。
+- 删除先验证 artifact、checkpoint pointer 和 work_dir；拒绝 traversal、外部绝对
+  路径、symlink 和非目录 Job root。
+- 删除事务取得 `BEGIN IMMEDIATE` 后才把 Job root 原子 rename 到唯一隔离目录；
+  DB DELETE/commit 失败时恢复原目录，提交后才递归删除隔离目录。
+- 进程若在 rename/commit/finalize 间崩溃，下次 lifespan 在单实例锁内、startup
+  recovery 前对账：DB Job 仍存在则恢复目录，Job 已删除则清理隔离目录。
+
+### 并发与 settings
+
+- retry、cancel 和 delete 使用既有 expected-status CAS；delete 与 retry 多连接竞争
+  只允许 `(retry 200, delete 409)` 或 `(retry 404, delete 204)`。
+- API cancel 与另一连接 worker complete 竞争只有一个获胜：最终 completed 或
+  cancelling，不产生部分 artifacts。
+- 既有 cancel/progress、cancel/automatic retry、cancel/complete 和
+  queued cancel/claim 竞争继续纳入回归。
+- concurrency 1→2 在创建 Pipeline 成功后启动第二 worker；2→1 不取消已运行 Job，
+  退休 worker 在当前 run 返回后退出，并在 claim admission 内再次检查容量。
+- 快速 2→1→2 复用仍存活 worker，不替换线程句柄；Pipeline factory 或线程启动失败
+  时持久化值和运行值回滚。未配置 worker 的测试/管理实例只持久化到下一次 worker 启动。
+- 持久化 concurrency 在普通重启时保留；只有显式
+  `LVT_WORKER_CONCURRENCY` 才作为启动覆盖。
+
+### 测试
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest \
+  tests/integration/test_control_api.py \
+  tests/integration/test_api.py \
+  tests/unit/test_repository_cas.py \
+  tests/unit/test_repository_completion.py
+# 48 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest \
+  tests/unit/test_repository_recovery.py \
+  tests/integration/test_cancellation.py \
+  tests/integration/test_startup_recovery.py \
+  tests/integration/test_single_instance_lifecycle.py \
+  tests/integration/test_worker.py \
+  tests/integration/test_worker_lifecycle.py \
+  tests/unit/test_process_control.py
+# 86 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest
+# 548 passed，1 条第三方 StarletteDeprecationWarning
+```
+
+测试包含所有新路由鉴权、404/409/422/503、retry/cancel 幂等、分页、8 artifact
+列表与下载、缺失文件审计、traversal、绝对/跨 Job 路径、内部 symlink、删除确认、
+活动 Job 删除冲突、DB 删除失败回滚、启动隔离目录对账、设置跨重启持久化、运行时
+升降并发和受控 Barrier 多连接竞争。
+
+范围限制：
+
+- 本轮未运行 Phase 2 最终真实五样本 API+worker E2E；属于 Checkpoint 8。
+- 未实现 Chrome UI、WebSocket、分布式队列、安装或打包。
+- 未修改 Phase 1 strict-token 文件。
 
 ## 已验证的产物不变量
 

@@ -4,7 +4,7 @@ import builtins
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +16,7 @@ from typing import Any, cast
 from lvt.core.jobs import (
     ACTIVE_JOB_STATUSES,
     ERROR_POLICIES,
+    TERMINAL_JOB_STATUSES,
     ErrorCode,
     JobEventType,
     JobStatus,
@@ -147,6 +148,16 @@ class AutomaticRequeueResult(StrEnum):
     STALE = "stale"
 
 
+class DeleteJobResult(StrEnum):
+    DELETED = "deleted"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+
+
+class DeleteFinalizationError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ArtifactSpec:
     artifact_id: str
@@ -158,6 +169,12 @@ class ArtifactSpec:
 class StartupRecoverySummary:
     interrupted_requeued: int
     cancelling_cancelled: int
+
+
+@dataclass(frozen=True)
+class DeleteHooks:
+    rollback: Callable[[], None]
+    finalize: Callable[[], None]
 
 
 class JobRepository:
@@ -1038,12 +1055,33 @@ class JobRepository:
             )
         return ArtifactRegistrationResult.CREATED
 
-    def list_events(self, job_id: str) -> builtins.list[dict[str, Any]]:
+    def list_events(
+        self,
+        job_id: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> builtins.list[dict[str, Any]]:
+        if offset < 0:
+            raise ValueError("event offset must be non-negative")
+        if limit is not None and limit <= 0:
+            raise ValueError("event limit must be positive")
+        query = "SELECT * FROM job_events WHERE job_id = ? ORDER BY id"
+        parameters: list[object] = [job_id]
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            parameters.extend((limit, offset))
         with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM job_events WHERE job_id = ? ORDER BY id", (job_id,)
-            ).fetchall()
+            rows = connection.execute(query, parameters).fetchall()
         return [dict(row) for row in rows]
+
+    def count_events(self, job_id: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM job_events WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
 
     def list_artifacts(self, job_id: str) -> builtins.list[dict[str, Any]]:
         with self._connect() as connection:
@@ -1051,6 +1089,93 @@ class JobRepository:
                 "SELECT * FROM artifacts WHERE job_id = ? ORDER BY kind, id", (job_id,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT artifacts.*, jobs.status AS job_status
+                FROM artifacts
+                JOIN jobs ON jobs.uuid = artifacts.job_id
+                WHERE artifacts.id = ?
+                """,
+                (artifact_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def record_artifact_unavailable(
+        self,
+        *,
+        job_id: str,
+        artifact_id: str,
+        reason: str,
+        now: datetime | None = None,
+    ) -> bool:
+        timestamp = self._timestamp(now)
+        with self._write_transaction() as connection:
+            owner = connection.execute(
+                """
+                SELECT 1
+                FROM artifacts
+                JOIN jobs ON jobs.uuid = artifacts.job_id
+                WHERE artifacts.id = ?
+                  AND artifacts.job_id = ?
+                  AND jobs.status = ?
+                """,
+                (artifact_id, job_id, JobStatus.COMPLETED.value),
+            ).fetchone()
+            if owner is None:
+                return False
+            self._insert_event(
+                connection,
+                job_id,
+                JobEventType.ARTIFACT_UNAVAILABLE.value,
+                timestamp,
+                {"artifact_id": artifact_id, "reason": reason},
+            )
+        return True
+
+    def delete_terminal_job(
+        self,
+        job_id: str,
+        expected_status: JobStatus,
+        *,
+        prepare_delete: Callable[[], DeleteHooks] | None = None,
+    ) -> DeleteJobResult:
+        self._require_status(expected_status)
+        if expected_status not in TERMINAL_JOB_STATUSES:
+            raise ValueError("job deletion requires terminal status")
+        hooks: DeleteHooks | None = None
+        try:
+            with self._write_transaction() as connection:
+                row = connection.execute(
+                    "SELECT status FROM jobs WHERE uuid = ?",
+                    (job_id,),
+                ).fetchone()
+                if row is None:
+                    return DeleteJobResult.NOT_FOUND
+                if row["status"] != expected_status.value:
+                    return DeleteJobResult.CONFLICT
+                if prepare_delete is not None:
+                    hooks = prepare_delete()
+                cursor = connection.execute(
+                    "DELETE FROM jobs WHERE uuid = ? AND status = ?",
+                    (job_id, expected_status.value),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("terminal job deletion lost status CAS")
+        except BaseException:
+            if hooks is not None:
+                hooks.rollback()
+            raise
+        if hooks is not None:
+            try:
+                hooks.finalize()
+            except OSError as exc:
+                raise DeleteFinalizationError(
+                    "job database row was deleted but file cleanup is pending"
+                ) from exc
+        return DeleteJobResult.DELETED
 
     @staticmethod
     def _select_next_queued(connection: sqlite3.Connection, timestamp: str) -> sqlite3.Row | None:

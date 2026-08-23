@@ -144,7 +144,7 @@ class JobWorkerPool:
 
     def health_snapshot(self) -> dict[str, int | str]:
         fatal_count = len(self.fatal_errors)
-        live_workers = self.live_thread_count
+        live_workers = sum(thread.is_alive() for thread in self._threads[: self.concurrency])
         healthy = (
             self._started
             and not self._stop.is_set()
@@ -203,6 +203,73 @@ class JobWorkerPool:
 
     def notify(self) -> None:
         self._wake.set()
+
+    def set_initial_concurrency(self, concurrency: int) -> None:
+        if type(concurrency) is not int or concurrency not in {1, 2}:
+            raise ValueError("worker concurrency must be 1 or 2")
+        if self._started or self.live_thread_count:
+            raise RuntimeError("initial concurrency can only be set before worker start")
+        self.concurrency = concurrency
+
+    def update_concurrency(self, concurrency: int) -> None:
+        if type(concurrency) is not int or concurrency not in {1, 2}:
+            raise ValueError("worker concurrency must be 1 or 2")
+        if concurrency == self.concurrency:
+            self.repository.set_worker_concurrency(concurrency)
+            return
+
+        with self._admission_lock:
+            if not self._started or self._stop.is_set():
+                raise WorkerStartupError("worker pool is not running")
+            previous = self.concurrency
+            if concurrency < previous:
+                self.repository.set_worker_concurrency(concurrency)
+                self.concurrency = concurrency
+                self._wake.set()
+                return
+
+            worker_index = concurrency - 1
+            if worker_index < len(self._threads) and self._threads[worker_index].is_alive():
+                self.repository.set_worker_concurrency(concurrency)
+                self.concurrency = concurrency
+                self._wake.set()
+                return
+            try:
+                pipeline = self.pipeline_factory()
+            except BaseException as exc:
+                self._record_fatal(None, "pipeline_factory", exc)
+                raise WorkerStartupError("worker pipeline factory failed") from exc
+            thread = threading.Thread(
+                target=self._worker_main,
+                args=(worker_index, pipeline),
+                name=f"lvt-worker-{concurrency}",
+                daemon=False,
+            )
+            previous_pipeline: WorkerPipeline | None = None
+            previous_thread: threading.Thread | None = None
+            if worker_index < len(self._pipelines):
+                previous_pipeline = self._pipelines[worker_index]
+                previous_thread = self._threads[worker_index]
+                self._pipelines[worker_index] = pipeline
+                self._threads[worker_index] = thread
+            else:
+                self._pipelines.append(pipeline)
+                self._threads.append(thread)
+            self.repository.set_worker_concurrency(concurrency)
+            self.concurrency = concurrency
+            try:
+                thread.start()
+            except BaseException as exc:
+                self.concurrency = previous
+                self.repository.set_worker_concurrency(previous)
+                if previous_pipeline is None or previous_thread is None:
+                    self._pipelines.pop()
+                    self._threads.pop()
+                else:
+                    self._pipelines[worker_index] = previous_pipeline
+                    self._threads[worker_index] = previous_thread
+                self._record_fatal(worker_index, "thread_start", exc)
+                raise WorkerStartupError("worker thread failed to start") from exc
 
     def request_cancel(self, job_id: str) -> CancelRequestResult:
         with self._admission_lock:
@@ -292,6 +359,7 @@ class JobWorkerPool:
         pipeline: WorkerPipeline | None = None,
         *,
         before_claim: Callable[[], object] | None = None,
+        worker_index: int | None = None,
     ) -> bool:
         if self._stop.is_set():
             return False
@@ -305,7 +373,9 @@ class JobWorkerPool:
         if before_claim is not None:
             before_claim()
         with self._admission_lock:
-            if self._stop.is_set():
+            if self._stop.is_set() or (
+                worker_index is not None and worker_index >= self.concurrency
+            ):
                 return False
             claimed = self.repository.claim_next(
                 expected_job_id=job_id,
@@ -361,7 +431,9 @@ class JobWorkerPool:
     def _worker_main(self, worker_index: int, pipeline: WorkerPipeline) -> None:
         try:
             while not self._stop.is_set():
-                if self.run_once(pipeline):
+                if worker_index >= self.concurrency:
+                    return
+                if self.run_once(pipeline, worker_index=worker_index):
                     continue
                 self._wake.wait(self.poll_interval)
                 self._wake.clear()

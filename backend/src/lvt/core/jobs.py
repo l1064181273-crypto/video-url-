@@ -77,6 +77,7 @@ class JobEventType(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    ARTIFACT_UNAVAILABLE = "artifact_unavailable"
 
 
 class ErrorCode(StrEnum):

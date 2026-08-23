@@ -34,8 +34,11 @@ app = create_app(
     db_path=settings.data_root / "db" / "lvt.sqlite3",
     api_token=os.environ.get("LVT_TOKEN")
     or load_or_create_token(settings.data_root / "config" / "api-token"),
+    work_root=settings.data_root / "work",
     pipeline_builder=build_pipeline,
-    worker_concurrency=settings.worker_concurrency,
+    worker_concurrency=(
+        settings.worker_concurrency if "LVT_WORKER_CONCURRENCY" in os.environ else None
+    ),
 )
 
 

@@ -263,7 +263,25 @@
     状态下 run_id 不匹配会在安全边界停止旧 worker，completed/failed/cancelled 不误判。
   - ✅ 修复后 Checkpoint 6 全集 92 passed；worker/lifecycle 23 passed；process-control
     11 passed；全量 `pytest` 528 passed（1 条第三方警告）；mypy 35 个源码文件通过。
-  - ⏭️ 下一步：等待 Checkpoint 6 修复独立复审；未实现 Checkpoint 7 控制 API。
+  - ✅ Phase 2 Checkpoint 7 完成：新增 retry/cancel/delete/events/artifacts/download/
+    settings HTTP 控制面，全部复用既有 Repository CAS、错误策略和
+    `JobWorkerPool.request_cancel`。
+  - ✅ retry 对 queued 幂等；failed/cancelled 原子进入 queued；不可手工重试错误、
+    active/cancelling/completed 返回稳定 409；成功后通知 worker。
+  - ✅ delete 仅允许 confirmed terminal Job。事务持有 SQLite 写锁时把
+    `work/<job_id>` 原子 rename 到隔离目录，DB 提交失败恢复目录，提交成功后清理；
+    启动时在 instance lock 内、recovery 前对账崩溃遗留隔离目录。
+  - ✅ artifact 列表不返回内部路径；下载只使用数据库 artifact ID，要求 completed
+    owner、job_id 根、kind/文件名一致、逐组件 no-symlink 和普通文件，并通过已打开
+    文件描述符流式返回。缺失或非法路径返回 404 并写 artifact_unavailable 事件。
+  - ✅ settings concurrency 严格接受整数 1/2，持久化跨重启；1→2 启动第二 worker，
+    2→1 不取消活动任务，第二 worker 完成后退休且不能新 claim；快速 2→1→2 复用
+    存活 worker，factory/thread 启动失败回滚设置。
+  - ✅ Barrier + 独立 SQLite 连接覆盖 API cancel/worker complete、delete/retry，
+    并保留既有 cancel/progress、cancel/automatic retry、cancel/complete CAS 竞争测试。
+  - ✅ Checkpoint 7 专项 48 passed；Checkpoint 6/worker/process 回归 86 passed；
+    全量 `pytest` 548 passed（1 条第三方警告）；mypy 36 个源码文件通过。
+  - ⏭️ 下一步：Checkpoint 7 独立审查；未开始 Checkpoint 8 最终验收。
 
 ## 已知阻塞
 
