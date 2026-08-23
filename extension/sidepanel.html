@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Video Transcriber</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-mark" aria-hidden="true">LVT</div>
+      <div>
+        <h1>Local Video Transcriber</h1>
+        <p id="connection-status" role="status">尚未连接</p>
+      </div>
+    </header>
+    <main>
+      <section aria-labelledby="workspace-title">
+        <h2 id="workspace-title">任务</h2>
+        <div class="empty-state">
+          <p>暂无任务</p>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/sidepanel.ts"></script>
+  </body>
+</html>
