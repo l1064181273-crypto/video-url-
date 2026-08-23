@@ -1094,7 +1094,9 @@ class JobRepository:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT artifacts.*, jobs.status AS job_status
+                SELECT artifacts.*,
+                       jobs.status AS job_status,
+                       jobs.checkpoint_pointer AS checkpoint_pointer
                 FROM artifacts
                 JOIN jobs ON jobs.uuid = artifacts.job_id
                 WHERE artifacts.id = ?

@@ -97,6 +97,40 @@ class RetirementPipeline(PassivePipeline):
         cancellation.raise_if_cancelled()
 
 
+class RepeatableRetirementPipeline(PassivePipeline):
+    def __init__(
+        self,
+        first_entered: threading.Event,
+        first_release: threading.Event,
+        second_entered: threading.Event | None = None,
+        second_release: threading.Event | None = None,
+    ) -> None:
+        self.first_entered = first_entered
+        self.first_release = first_release
+        self.second_entered = second_entered
+        self.second_release = second_release
+        self.calls = 0
+
+    def run_claimed(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        cancellation: CancellationToken,
+        progress_callback: Callable[[JobStatus, int], None],
+    ) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            self.first_entered.set()
+            assert self.first_release.wait(timeout=5)
+        else:
+            assert self.second_entered is not None
+            assert self.second_release is not None
+            self.second_entered.set()
+            assert self.second_release.wait(timeout=5)
+        cancellation.raise_if_cancelled()
+
+
 class BlockingClaimRepository(JobRepository):
     def __init__(self, db_path: Path) -> None:
         super().__init__(db_path)
@@ -246,62 +280,75 @@ def test_lifespan_surfaces_factory_failure_without_worker_thread(tmp_path: Path)
     assert app.state.worker_pool.live_thread_count == 0
 
 
-def test_runtime_concurrency_decrease_retires_worker_after_active_run(
+def test_fast_concurrency_restore_reactivates_parked_worker_repeatedly(
     tmp_path: Path,
 ) -> None:
-    repository = _repository(tmp_path / "runtime-concurrency.sqlite3")
-    job_ids = [_create_job(repository, str(index)) for index in range(3)]
-    first_entered = threading.Event()
-    first_release = threading.Event()
-    first_exited = threading.Event()
-    second_entered = threading.Event()
-    second_release = threading.Event()
-    second_exited = threading.Event()
-    pipelines: list[WorkerPipeline] = [
-        RetirementPipeline(first_entered, first_release, first_exited),
-        RetirementPipeline(second_entered, second_release, second_exited),
-    ]
-    pool = JobWorkerPool(
-        repository=repository,
-        pipeline_factory=lambda: pipelines.pop(0),
-        concurrency=1,
-        poll_interval=60,
-    )
-    pool.start()
-    pool.notify()
-    assert first_entered.wait(timeout=2)
+    for iteration in range(20):
+        repository = _repository(tmp_path / f"parked-{iteration}.sqlite3")
+        job_ids = [_create_job(repository, f"{iteration}-{index}") for index in range(3)]
+        first_entered = threading.Event()
+        first_release = threading.Event()
+        second_entered = threading.Event()
+        second_release = threading.Event()
+        third_entered = threading.Event()
+        third_release = threading.Event()
+        park_entered = threading.Barrier(2)
+        park_release = threading.Barrier(2)
 
-    pool.update_concurrency(2)
-    pool.notify()
-    assert second_entered.wait(timeout=2)
-    assert repository.get_worker_concurrency() == 2
-    assert pool.live_thread_count == 2
+        def park_hook(
+            worker_index: int,
+            entered: threading.Barrier = park_entered,
+            release: threading.Barrier = park_release,
+        ) -> None:
+            if worker_index == 1:
+                entered.wait(timeout=5)
+                release.wait(timeout=5)
 
-    pool.update_concurrency(1)
-    assert repository.get_worker_concurrency() == 1
-    assert not first_exited.is_set()
-    assert not second_exited.is_set()
-    retiring_thread = pool._threads[1]
+        pipelines: list[WorkerPipeline] = [
+            RepeatableRetirementPipeline(first_entered, first_release),
+            RepeatableRetirementPipeline(
+                second_entered,
+                second_release,
+                third_entered,
+                third_release,
+            ),
+        ]
+        pool = JobWorkerPool(
+            repository=repository,
+            pipeline_factory=lambda items=pipelines: items.pop(0),
+            concurrency=2,
+            poll_interval=60,
+            worker_park_hook=park_hook,
+        )
+        pool.start()
+        pool.notify()
+        assert first_entered.wait(timeout=2)
+        assert second_entered.wait(timeout=2)
 
-    pool.update_concurrency(2)
-    assert pool._threads[1] is retiring_thread
-    assert pool.live_thread_count == 2
-    pool.update_concurrency(1)
+        pool.update_concurrency(1)
+        second_release.set()
+        park_entered.wait(timeout=5)
+        pool.update_concurrency(2)
+        park_release.wait(timeout=5)
+        pool.notify()
 
-    second_release.set()
-    assert second_exited.wait(timeout=2)
-    pool._threads[1].join(timeout=2)
-    assert not pool._threads[1].is_alive()
-    assert pool.live_thread_count == 1
-    third = repository.get(job_ids[2])
-    assert third is not None
-    assert third["status"] == JobStatus.QUEUED.value
-    assert third["execution_count_total"] == 0
+        assert third_entered.wait(timeout=2)
+        health = pool.health_snapshot()
+        assert health == {
+            "status": "healthy",
+            "configured_workers": 2,
+            "live_workers": 2,
+            "fatal_count": 0,
+        }
+        third = repository.get(job_ids[2])
+        assert third is not None
+        assert third["status"] == JobStatus.DOWNLOADING.value
+        assert third["execution_count_total"] == 1
 
-    first_release.set()
-    assert first_exited.wait(timeout=2)
-    pool.stop()
-    assert pool.live_thread_count == 0
+        first_release.set()
+        third_release.set()
+        pool.stop()
+        assert pool.live_thread_count == 0
 
 
 def test_runtime_concurrency_increase_failure_rolls_back_setting_and_thread(
@@ -331,6 +378,12 @@ def test_runtime_concurrency_increase_failure_rolls_back_setting_and_thread(
     assert repository.get_worker_concurrency() == 1
     assert len(pool._threads) == 1
     assert pool.live_thread_count == 1
+    assert pool.health_snapshot() == {
+        "status": "healthy",
+        "configured_workers": 1,
+        "live_workers": 1,
+        "fatal_count": 0,
+    }
     pool.stop()
 
 

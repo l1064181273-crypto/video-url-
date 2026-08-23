@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -98,13 +100,24 @@ def _complete_job(
         work_dir=f"work/{job_id}/runs/{run_id}",
         checkpoint_pointer=f"{job_id}/runs/{run_id}/export_manifest/manifest.json",
     )
-    artifact_dir = work_root / job_id / "runs" / run_id / "exports"
+    export_stage_dir = work_root / job_id / "runs" / run_id / "export_manifest"
+    artifact_dir = export_stage_dir / "exports"
     artifact_dir.mkdir(parents=True)
     artifacts: list[ArtifactSpec] = []
+    manifest_outputs: list[dict[str, object]] = []
     for index, kind in enumerate(sorted(REQUIRED_ARTIFACT_KINDS)):
         path = artifact_dir / kind
-        path.write_bytes(f"{job_id}:{kind}".encode())
+        data = f"{job_id}:{kind}".encode()
+        path.write_bytes(data)
         relative_path = path.relative_to(work_root).as_posix()
+        manifest_outputs.append(
+            {
+                "kind": kind,
+                "relative_path": relative_path,
+                "byte_size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
         if index == 0 and artifact_path_override is not None:
             relative_path = artifact_path_override
         artifacts.append(
@@ -114,6 +127,18 @@ def _complete_job(
                 path=relative_path,
             )
         )
+    (export_stage_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "job_id": job_id,
+                "run_id": run_id,
+                "stage": "export_manifest",
+                "outputs": manifest_outputs,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (export_stage_dir / ".published").write_text("published", encoding="utf-8")
     assert (
         repository.complete_job_with_artifacts(
             job_id=job_id,
@@ -366,6 +391,116 @@ def test_artifact_list_download_and_path_attacks(tmp_path: Path) -> None:
         assert repository.get(symlink_id) is not None
 
 
+def test_artifact_rejects_same_job_non_export_path(tmp_path: Path) -> None:
+    database = tmp_path / "lvt.sqlite3"
+    work_root = tmp_path / "work"
+    app = create_app(db_path=database, api_token="token", work_root=work_root)
+    with TestClient(app) as client:
+        repository: JobRepository = app.state.repository
+        job_id, artifacts = _complete_job(repository, work_root, "private-artifact")
+        job = repository.get(job_id)
+        assert job is not None
+        run_id = str(job["checkpoint_pointer"]).split("/")[2]
+        invalid_paths = [
+            work_root / job_id / "private" / artifacts[0].kind,
+            work_root
+            / job_id
+            / "runs"
+            / "other-run"
+            / "export_manifest"
+            / "exports"
+            / artifacts[0].kind,
+            work_root / job_id / "runs" / run_id / "downloaded_media" / artifacts[0].kind,
+        ]
+        for index, invalid_path in enumerate(invalid_paths):
+            invalid_path.parent.mkdir(parents=True, exist_ok=True)
+            invalid_path.write_text(f"invalid-{index}", encoding="utf-8")
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "UPDATE artifacts SET path = ? WHERE id = ?",
+                    (
+                        invalid_path.relative_to(work_root).as_posix(),
+                        artifacts[0].artifact_id,
+                    ),
+                )
+
+            response = client.get(
+                f"/api/v1/artifacts/{artifacts[0].artifact_id}/download",
+                headers=TOKEN_HEADER,
+            )
+            assert response.status_code == 404
+            assert response.content != f"invalid-{index}".encode()
+            assert repository.list_events(job_id)[-1]["status"] == "artifact_unavailable"
+
+
+def test_artifact_directory_replacement_after_manifest_validation_is_rejected(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "lvt.sqlite3"
+    work_root = tmp_path / "work"
+    outside = tmp_path / "outside"
+    app = create_app(db_path=database, api_token="token", work_root=work_root)
+    with TestClient(app) as client:
+        repository: JobRepository = app.state.repository
+        job_id, artifacts = _complete_job(repository, work_root, "replace-stage")
+        job = repository.get(job_id)
+        assert job is not None
+        export_stage = work_root / str(job["checkpoint_pointer"]).removesuffix("/manifest.json")
+        backup = export_stage.with_name("export_manifest.backup")
+        outside_artifact = outside / "exports" / artifacts[0].kind
+        outside_artifact.parent.mkdir(parents=True)
+        outside_artifact.write_text("outside", encoding="utf-8")
+
+        def replace_stage() -> None:
+            export_stage.rename(backup)
+            export_stage.symlink_to(outside, target_is_directory=True)
+
+        app.state.file_store.artifact_open_hook = replace_stage
+        try:
+            response = client.get(
+                f"/api/v1/artifacts/{artifacts[0].artifact_id}/download",
+                headers=TOKEN_HEADER,
+            )
+        finally:
+            app.state.file_store.artifact_open_hook = None
+            if export_stage.is_symlink():
+                export_stage.unlink()
+            if backup.exists():
+                backup.rename(export_stage)
+
+        assert response.status_code == 404
+        assert response.content != b"outside"
+        assert repository.list_events(job_id)[-1]["status"] == "artifact_unavailable"
+
+
+def test_open_artifact_fd_survives_concurrent_delete(tmp_path: Path) -> None:
+    database = tmp_path / "lvt.sqlite3"
+    work_root = tmp_path / "work"
+    app = create_app(db_path=database, api_token="token", work_root=work_root)
+    with TestClient(app) as client:
+        repository: JobRepository = app.state.repository
+        job_id, artifacts = _complete_job(repository, work_root, "download-delete")
+        job = repository.get(job_id)
+        assert job is not None
+        artifact = repository.get_artifact(artifacts[0].artifact_id)
+        assert artifact is not None
+        stream = app.state.file_store.open_artifact(
+            job_id=job_id,
+            kind=str(artifact["kind"]),
+            relative_path=str(artifact["path"]),
+            checkpoint_pointer=str(job["checkpoint_pointer"]),
+        )
+        try:
+            deleted = client.delete(
+                f"/api/v1/jobs/{job_id}?confirm=true",
+                headers=TOKEN_HEADER,
+            )
+            assert deleted.status_code == 204
+            assert stream.read() == f"{job_id}:{artifacts[0].kind}".encode()
+        finally:
+            stream.close()
+
+
 def test_delete_requires_confirmation_cleans_files_and_rejects_unsafe_paths(
     tmp_path: Path,
 ) -> None:
@@ -605,6 +740,53 @@ def test_settings_runtime_increase_failure_keeps_previous_value(tmp_path: Path) 
         assert app.state.repository.get_worker_concurrency() == 1
         assert app.state.worker_pool.concurrency == 1
         assert app.state.worker_pool.live_thread_count == 1
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["worker"] == {
+            "status": "healthy",
+            "configured_workers": 1,
+            "live_workers": 1,
+            "fatal_count": 0,
+        }
+
+
+def test_settings_thread_start_failure_keeps_health_and_previous_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(
+        db_path=tmp_path / "settings-thread-failure.sqlite3",
+        api_token="token",
+        pipeline_builder=lambda _repository: PassivePipeline(),
+        worker_concurrency=1,
+        worker_poll_interval=60,
+    )
+    with TestClient(app) as client:
+        original_start = threading.Thread.start
+
+        def fail_second_worker(thread: threading.Thread) -> None:
+            if thread.name == "lvt-worker-2":
+                raise RuntimeError("injected thread start failure")
+            original_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", fail_second_worker)
+        response = client.patch(
+            "/api/v1/settings",
+            headers=TOKEN_HEADER,
+            json={"worker_concurrency": 2},
+        )
+        assert response.status_code == 503
+        assert _detail_code(response) == "SETTINGS_APPLY_FAILED"
+        assert app.state.repository.get_worker_concurrency() == 1
+        assert app.state.worker_pool.concurrency == 1
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["worker"] == {
+            "status": "healthy",
+            "configured_workers": 1,
+            "live_workers": 1,
+            "fatal_count": 0,
+        }
 
 
 def test_delete_and_retry_race_has_one_transactional_winner(tmp_path: Path) -> None:

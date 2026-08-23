@@ -272,16 +272,24 @@
     `work/<job_id>` 原子 rename 到隔离目录，DB 提交失败恢复目录，提交成功后清理；
     启动时在 instance lock 内、recovery 前对账崩溃遗留隔离目录。
   - ✅ artifact 列表不返回内部路径；下载只使用数据库 artifact ID，要求 completed
-    owner、job_id 根、kind/文件名一致、逐组件 no-symlink 和普通文件，并通过已打开
-    文件描述符流式返回。缺失或非法路径返回 404 并写 artifact_unavailable 事件。
+    owner、checkpoint pointer 指向同 run 的 export_manifest、artifact 精确出现在
+    manifest outputs、kind/文件名一致，并通过已打开文件描述符流式返回。
   - ✅ settings concurrency 严格接受整数 1/2，持久化跨重启；1→2 启动第二 worker，
-    2→1 不取消活动任务，第二 worker 完成后退休且不能新 claim；快速 2→1→2 复用
-    存活 worker，factory/thread 启动失败回滚设置。
+    2→1 不取消活动任务，第二 worker 完成后 parked 且不能新 claim；快速 2→1→2
+    在同一 Condition/admission 锁下重新激活 parked worker。
   - ✅ Barrier + 独立 SQLite 连接覆盖 API cancel/worker complete、delete/retry，
     并保留既有 cancel/progress、cancel/automatic retry、cancel/complete CAS 竞争测试。
   - ✅ Checkpoint 7 专项 48 passed；Checkpoint 6/worker/process 回归 86 passed；
     全量 `pytest` 548 passed（1 条第三方警告）；mypy 36 个源码文件通过。
-  - ⏭️ 下一步：Checkpoint 7 独立审查；未开始 Checkpoint 8 最终验收。
+  - ✅ Checkpoint 7 最终阻塞修复：worker parked/activate 决策使用 Condition 同步；
+    运行时 factory/thread 扩容失败完整回滚且不写永久 fatal，既有 worker 保持 healthy。
+  - ✅ artifact 打开从可信 work_root fd 开始，逐级使用
+    `dir_fd + O_DIRECTORY + O_NOFOLLOW`；固定 export stage/父目录 fd，复核 inode，
+    并按 manifest byte_size/SHA-256 校验最终普通文件 fd 后 rewind 流式返回。
+  - ✅ 20 次 Barrier 快速 2→1→2、同 Job private/其他 run/downloaded_media、
+    manifest 后目录替换、下载/delete 固定 fd 并发均通过。修复后专项 34 passed，
+    全量 `pytest` 552 passed（1 条第三方警告）。
+  - ⏭️ 下一步：Checkpoint 7 最终修复独立复审；未开始 Checkpoint 8 最终验收。
 
 ## 已知阻塞
 

@@ -287,6 +287,7 @@ def create_app(
                 job_id=str(artifact["job_id"]),
                 kind=str(artifact["kind"]),
                 relative_path=str(artifact["path"]),
+                checkpoint_pointer=str(artifact["checkpoint_pointer"]),
             )
         except (OSError, UnsafeJobPathError, ValueError):
             repository.record_artifact_unavailable(

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import stat
 import uuid
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
@@ -17,6 +20,7 @@ class UnsafeJobPathError(ValueError):
 class JobFileStore:
     def __init__(self, work_root: Path) -> None:
         self.work_root = work_root.expanduser().resolve()
+        self.artifact_open_hook: Callable[[], None] | None = None
 
     def ensure_root(self) -> None:
         self.work_root.mkdir(parents=True, exist_ok=True)
@@ -44,17 +48,80 @@ class JobFileStore:
         job_id: str,
         kind: str,
         relative_path: str,
+        checkpoint_pointer: str,
     ) -> BinaryIO:
-        path = self._validated_path(job_id, relative_path, require_exists=True)
-        if path.name != kind:
-            raise UnsafeJobPathError("artifact path does not match its kind")
-        mode = path.lstat().st_mode
-        if not stat.S_ISREG(mode):
-            raise FileNotFoundError("artifact is not a regular file")
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        return os.fdopen(os.open(path, flags), "rb")
+        manifest_parts = self._relative_parts(job_id, checkpoint_pointer)
+        if (
+            len(manifest_parts) != 5
+            or manifest_parts[1] != "runs"
+            or manifest_parts[3] != "export_manifest"
+            or manifest_parts[4] != "manifest.json"
+        ):
+            raise UnsafeJobPathError("checkpoint pointer is not an export manifest")
+        artifact_parts = self._relative_parts(job_id, relative_path)
+        stage_parts = manifest_parts[:-1]
+        if (
+            len(artifact_parts) <= len(stage_parts)
+            or artifact_parts[: len(stage_parts)] != stage_parts
+            or artifact_parts[-1] != kind
+        ):
+            raise UnsafeJobPathError("artifact is outside the completed export stage")
+
+        root_fd = self._open_root_fd()
+        stage_fd = -1
+        artifact_parent_fd = -1
+        try:
+            stage_fd = self._open_directory_chain(root_fd, stage_parts)
+            self._require_regular_at(stage_fd, ".published")
+            manifest = self._read_json_at(stage_fd, "manifest.json")
+            manifest_output = self._manifest_output(manifest, kind, relative_path)
+            if (
+                manifest.get("job_id") != job_id
+                or manifest.get("run_id") != manifest_parts[2]
+                or manifest.get("stage") != "export_manifest"
+                or manifest_output is None
+            ):
+                raise UnsafeJobPathError("artifact does not match export manifest")
+
+            artifact_subparts = artifact_parts[len(stage_parts) :]
+            artifact_parent_fd = self._open_directory_chain(
+                stage_fd,
+                artifact_subparts[:-1],
+            )
+            if self.artifact_open_hook is not None:
+                self.artifact_open_hook()
+            verification_fd = self._open_directory_chain(root_fd, stage_parts)
+            try:
+                verification_stat = os.fstat(verification_fd)
+                stage_stat = os.fstat(stage_fd)
+                if (verification_stat.st_dev, verification_stat.st_ino) != (
+                    stage_stat.st_dev,
+                    stage_stat.st_ino,
+                ):
+                    raise UnsafeJobPathError("export stage directory was replaced")
+            finally:
+                os.close(verification_fd)
+            verification_parent_fd = self._open_directory_chain(
+                stage_fd,
+                artifact_subparts[:-1],
+            )
+            try:
+                if self._inode(verification_parent_fd) != self._inode(artifact_parent_fd):
+                    raise UnsafeJobPathError("artifact parent directory was replaced")
+            finally:
+                os.close(verification_parent_fd)
+
+            return self._open_verified_file(
+                artifact_parent_fd,
+                artifact_subparts[-1],
+                manifest_output,
+            )
+        finally:
+            if artifact_parent_fd >= 0:
+                os.close(artifact_parent_fd)
+            if stage_fd >= 0:
+                os.close(stage_fd)
+            os.close(root_fd)
 
     def prepare_delete(
         self,
@@ -128,6 +195,132 @@ class JobFileStore:
             if stat.S_ISLNK(mode):
                 raise UnsafeJobPathError("stored path contains a symlink")
         return current
+
+    def _open_root_fd(self) -> int:
+        return os.open(
+            self.work_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+
+    @staticmethod
+    def _open_directory_chain(base_fd: int, parts: tuple[str, ...]) -> int:
+        current_fd = os.dup(base_fd)
+        try:
+            for part in parts:
+                next_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=current_fd,
+                )
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd
+        except BaseException:
+            os.close(current_fd)
+            raise
+
+    @staticmethod
+    def _open_verified_file(
+        directory_fd: int,
+        name: str,
+        manifest_output: dict[str, Any],
+    ) -> BinaryIO:
+        file_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+        try:
+            file_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise UnsafeJobPathError("artifact is not a regular file")
+            expected_size = manifest_output.get("byte_size")
+            expected_sha256 = manifest_output.get("sha256")
+            if (
+                type(expected_size) is not int
+                or expected_size < 0
+                or not isinstance(expected_sha256, str)
+                or len(expected_sha256) != 64
+            ):
+                raise UnsafeJobPathError("artifact manifest integrity fields are invalid")
+            if file_stat.st_size != expected_size:
+                raise UnsafeJobPathError("artifact size does not match export manifest")
+            stream = os.fdopen(file_fd, "rb")
+            file_fd = -1
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                stream.close()
+                raise UnsafeJobPathError("artifact hash does not match export manifest")
+            stream.seek(0)
+            return stream
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+
+    @staticmethod
+    def _inode(descriptor: int) -> tuple[int, int]:
+        file_stat = os.fstat(descriptor)
+        return file_stat.st_dev, file_stat.st_ino
+
+    @staticmethod
+    def _require_regular_at(directory_fd: int, name: str) -> None:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise UnsafeJobPathError("checkpoint file is not regular")
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _read_json_at(directory_fd: int, name: str) -> dict[str, Any]:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise UnsafeJobPathError("manifest is not a regular file")
+            value = json.load(handle)
+        if not isinstance(value, dict):
+            raise UnsafeJobPathError("manifest must be an object")
+        return value
+
+    @staticmethod
+    def _manifest_output(
+        manifest: dict[str, Any],
+        kind: str,
+        relative_path: str,
+    ) -> dict[str, Any] | None:
+        outputs = manifest.get("outputs")
+        if not isinstance(outputs, list):
+            return None
+        for output in outputs:
+            if (
+                isinstance(output, dict)
+                and output.get("kind") == kind
+                and output.get("relative_path") == relative_path
+            ):
+                return output
+        return None
+
+    @staticmethod
+    def _relative_parts(job_id: str, relative_path: str) -> tuple[str, ...]:
+        relative = PurePosixPath(relative_path)
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or relative.parts[0] != job_id
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise UnsafeJobPathError("stored path escapes job root")
+        return relative.parts
 
     def _job_root(self, job_id: str) -> Path:
         if not job_id or "/" in job_id or job_id in {".", ".."}:

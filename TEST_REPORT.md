@@ -1002,8 +1002,12 @@ Job HTTP payload 不再返回内部 `work_dir` 或 `checkpoint_pointer`；artifa
 - artifact 下载不接受文件路径参数，只通过 artifact ID 查询 artifact 与 owning Job。
 - owning Job 必须 completed；路径必须是 `work_root/<job_id>/...` 下的相对路径，
   artifact kind 必须等于文件名。
-- 从 work root 到文件逐组件 `lstat`，拒绝绝对路径、`..`、中间/最终 symlink 和
-  非普通文件；最终使用 `O_NOFOLLOW` 打开后再流式返回，避免响应阶段路径替换。
+- 从可信 work root 目录 fd 开始，逐组件使用
+  `openat(dir_fd) + O_DIRECTORY + O_NOFOLLOW`；最终文件使用
+  `O_RDONLY + O_NOFOLLOW` 并以 `fstat` 确认为普通文件。
+- checkpoint pointer 必须精确为同 Job、同 run 的
+  `export_manifest/manifest.json`；artifact 必须精确匹配 manifest output 的
+  relative_path、kind、byte_size 和 SHA-256。
 - 删除先验证 artifact、checkpoint pointer 和 work_dir；拒绝 traversal、外部绝对
   路径、symlink 和非目录 Job root。
 - 删除事务取得 `BEGIN IMMEDIATE` 后才把 Job root 原子 rename 到唯一隔离目录；
@@ -1020,9 +1024,10 @@ Job HTTP payload 不再返回内部 `work_dir` 或 `checkpoint_pointer`；artifa
 - 既有 cancel/progress、cancel/automatic retry、cancel/complete 和
   queued cancel/claim 竞争继续纳入回归。
 - concurrency 1→2 在创建 Pipeline 成功后启动第二 worker；2→1 不取消已运行 Job，
-  退休 worker 在当前 run 返回后退出，并在 claim admission 内再次检查容量。
-- 快速 2→1→2 复用仍存活 worker，不替换线程句柄；Pipeline factory 或线程启动失败
-  时持久化值和运行值回滚。未配置 worker 的测试/管理实例只持久化到下一次 worker 启动。
+  worker 2 在当前 run 返回后进入 parked 状态，并在 claim admission 内再次检查容量。
+- parked/activate 与设置更新共用 Condition/admission lock；快速 2→1→2 不依赖
+  `Thread.is_alive()` 猜测退役状态。Pipeline factory 或线程启动失败时持久化值、
+  运行值和线程表回滚，且不记录永久 worker fatal。
 - 持久化 concurrency 在普通重启时保留；只有显式
   `LVT_WORKER_CONCURRENCY` 才作为启动覆盖。
 
@@ -1061,6 +1066,32 @@ cd backend
 - 本轮未运行 Phase 2 最终真实五样本 API+worker E2E；属于 Checkpoint 8。
 - 未实现 Chrome UI、WebSocket、分布式队列、安装或打包。
 - 未修改 Phase 1 strict-token 文件。
+
+### Checkpoint 7 最终阻塞修复
+
+确定性测试新增覆盖：
+
+- 20 次循环将 worker 2 阻塞在“已决定 parked、尚未 wait”钩子，通过两个 Barrier
+  在该窗口 PATCH 回 2；释放后 health 始终为 healthy、live/configured 均为 2，
+  第三个 queued Job 由 worker 2 成功 claim。
+- 运行时 Pipeline factory 和 `thread.start` 扩容失败均返回
+  `SETTINGS_APPLY_FAILED`；SQLite concurrency、运行值和线程表保持 1，
+  `/health` 为 200、fatal_count 为 0。既有真实 worker loop fatal 测试仍为 503。
+- 同 Job private、其他 run、downloaded_media 阶段下的同名 `source.txt` 全部 404；
+  traversal、绝对路径、跨 Job、最终 symlink 和内部 symlink 回归保持。
+- manifest 校验完成后把 export_manifest 目录替换为外部 symlink，目录 inode 复核
+  拒绝下载且外部内容不可读。
+- 下载先固定并验证合法 fd，再并发删除 Job；删除完成后该 fd 仍只读取原合法内容。
+
+```bash
+../.venv-smoke/bin/python -m pytest \
+  tests/integration/test_control_api.py \
+  tests/integration/test_worker_lifecycle.py
+# 34 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest
+# 552 passed，1 条第三方 StarletteDeprecationWarning
+```
 
 ## 已验证的产物不变量
 

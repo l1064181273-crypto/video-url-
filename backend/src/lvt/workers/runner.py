@@ -105,6 +105,7 @@ class JobWorkerPool:
         concurrency: int = 1,
         clock: Clock | None = None,
         poll_interval: float = 0.25,
+        worker_park_hook: Callable[[int], None] | None = None,
     ) -> None:
         if type(concurrency) is not int or concurrency not in {1, 2}:
             raise ValueError("worker concurrency must be 1 or 2")
@@ -122,6 +123,9 @@ class JobWorkerPool:
         self._active_tokens: dict[tuple[str, str], JobCancellationToken] = {}
         self._shutdown_cleaned_runs: set[tuple[str, str]] = set()
         self._admission_lock = threading.Lock()
+        self._capacity_condition = threading.Condition(self._admission_lock)
+        self._parked_workers: set[int] = set()
+        self._worker_park_hook = worker_park_hook
         self._state_lock = threading.Lock()
         self._fatal_errors: list[WorkerFatalError] = []
         self._fatal_event = threading.Event()
@@ -163,6 +167,7 @@ class JobWorkerPool:
             return
         self._stop.clear()
         self._shutdown_cleaned_runs.clear()
+        self._parked_workers.clear()
         self._fatal_event.clear()
         with self._state_lock:
             self._fatal_errors.clear()
@@ -214,17 +219,26 @@ class JobWorkerPool:
     def update_concurrency(self, concurrency: int) -> None:
         if type(concurrency) is not int or concurrency not in {1, 2}:
             raise ValueError("worker concurrency must be 1 or 2")
-        if concurrency == self.concurrency:
-            self.repository.set_worker_concurrency(concurrency)
-            return
 
-        with self._admission_lock:
+        with self._capacity_condition:
             if not self._started or self._stop.is_set():
                 raise WorkerStartupError("worker pool is not running")
             previous = self.concurrency
+            required_threads_alive = all(
+                index < len(self._threads) and self._threads[index].is_alive()
+                for index in range(concurrency)
+            )
+            if concurrency == previous and required_threads_alive:
+                self.repository.set_worker_concurrency(concurrency)
+                self._capacity_condition.notify_all()
+                self._wake.set()
+                return
+            if concurrency == previous and self.fatal_errors:
+                raise WorkerStartupError("configured worker capacity is unhealthy")
             if concurrency < previous:
                 self.repository.set_worker_concurrency(concurrency)
                 self.concurrency = concurrency
+                self._capacity_condition.notify_all()
                 self._wake.set()
                 return
 
@@ -237,7 +251,6 @@ class JobWorkerPool:
             try:
                 pipeline = self.pipeline_factory()
             except BaseException as exc:
-                self._record_fatal(None, "pipeline_factory", exc)
                 raise WorkerStartupError("worker pipeline factory failed") from exc
             thread = threading.Thread(
                 target=self._worker_main,
@@ -268,8 +281,9 @@ class JobWorkerPool:
                 else:
                     self._pipelines[worker_index] = previous_pipeline
                     self._threads[worker_index] = previous_thread
-                self._record_fatal(worker_index, "thread_start", exc)
                 raise WorkerStartupError("worker thread failed to start") from exc
+            self._capacity_condition.notify_all()
+            self._wake.set()
 
     def request_cancel(self, job_id: str) -> CancelRequestResult:
         with self._admission_lock:
@@ -337,8 +351,8 @@ class JobWorkerPool:
         self._wake.set()
         # Admission is a barrier: any claim already inside must register its token
         # before shutdown can proceed, while later callers observe _stop and exit.
-        with self._admission_lock:
-            pass
+        with self._capacity_condition:
+            self._capacity_condition.notify_all()
         self._join_until(graceful_deadline)
         if self.live_thread_count:
             with self._admission_lock:
@@ -352,6 +366,7 @@ class JobWorkerPool:
             )
         self._threads = []
         self._pipelines = []
+        self._parked_workers.clear()
         self._started = False
 
     def run_once(
@@ -431,7 +446,18 @@ class JobWorkerPool:
     def _worker_main(self, worker_index: int, pipeline: WorkerPipeline) -> None:
         try:
             while not self._stop.is_set():
-                if worker_index >= self.concurrency:
+                park_hook: Callable[[int], None] | None = None
+                with self._capacity_condition:
+                    if worker_index >= self.concurrency and not self._stop.is_set():
+                        self._parked_workers.add(worker_index)
+                        park_hook = self._worker_park_hook
+                if park_hook is not None:
+                    park_hook(worker_index)
+                with self._capacity_condition:
+                    while worker_index >= self.concurrency and not self._stop.is_set():
+                        self._capacity_condition.wait()
+                    self._parked_workers.discard(worker_index)
+                if self._stop.is_set():
                     return
                 if self.run_once(pipeline, worker_index=worker_index):
                     continue
