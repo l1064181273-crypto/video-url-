@@ -636,6 +636,66 @@ cd backend
 - 未修改 Phase 1 strict-token 文件，也未扩展翻译 token 边界。
 - 本轮未运行真实 Ollama 或五样本媒体 E2E；验证聚焦确定性 checkpoint 和 Repository。
 
+## Phase 2 Checkpoint 4：外部进程控制
+
+实现：
+
+- `SubprocessExecutor` 只接受参数序列，使用 `Popen(..., start_new_session=True)` 创建
+  独立进程组，不使用 shell。
+- 正常和非零退出均通过 `communicate()` 完成 wait/reap。
+- timeout 或 cancellation 先向整个进程组发送 SIGTERM；宽限期后仍未退出则发送
+  SIGKILL；最后再次 `communicate()` 回收父进程并排空管道。
+- stdout/stderr 同时由 `communicate(timeout=...)` 排空，避免任一管道填满造成死锁。
+- yt-dlp 改为 `python -m yt_dlp` 外部命令；yt-dlp、FFmpeg、ffprobe 共用同一执行器。
+- Pipeline 在每个 stage 开始、外部调用期间以及 MLX/sherpa/Ollama 等进程内调用返回后
+  检查 CancellationToken。
+- 进程内模型不能安全强杀；最坏取消延迟明确为当前模型调用的剩余时间。
+- 异常或取消调用只清理当前 `job_id/run_id` 的未发布 stage；已发布 checkpoint 保留。
+- 可信 work root 启动时 canonicalize，覆盖 macOS `/var` 与 `/private/var` 别名；
+  root 以下路径继续逐组件 no-follow。
+
+测试：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest tests/unit/test_process_control.py
+# 7 passed
+
+../.venv-smoke/bin/python -m pytest tests/integration/test_pipeline_checkpoints.py
+# 35 passed
+
+../.venv-smoke/bin/python -m pytest
+# 444 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# All checks passed!
+
+../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# 55 files already formatted
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# Success: no issues found in 31 source files
+```
+
+已验证：
+
+- 正常退出、非零退出、timeout 和显式 cancellation。
+- 正常响应 TERM；忽略 TERM 后由 KILL 终止。
+- 2 MiB stdout 与 2 MiB stderr 同时输出无死锁。
+- 创建子进程的父进程取消后，父子 PID 均不再存活；进程组 leader 先退出而子进程
+  仍持有管道时，timeout 仍会清理整个组。
+- yt-dlp、FFmpeg 和 ffprobe 均通过同一 executor 及参数数组执行。
+- download 取消不产生 checkpoint pointer 或 published manifest。
+- normalize 取消保留已发布 downloaded checkpoint；同一 run 重试不重新下载。
+- stale run 清理不会删除 current run，内部 symlink 清理攻击继续被拒绝。
+- macOS `/var` alias 规范化到 `/private/var` 可信根。
+
+范围限制：
+
+- 未实现 lifespan worker、自动重试调度、启动恢复或控制 API。
+- 没有更改 yt-dlp/FFmpeg 的业务参数、模型算法或 Phase 1 strict-token。
+- 未运行真实网络下载和模型 E2E；外部进程生命周期使用真实本地子进程组验证。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：

@@ -1,6 +1,4 @@
-import json
 import struct
-import subprocess
 import wave
 from pathlib import Path
 from typing import Any
@@ -8,6 +6,7 @@ from typing import Any
 import pytest
 
 from lvt.core.errors import LVTError
+from lvt.core.processes import ProcessResult
 from lvt.engines.base import DownloadedMedia
 from lvt.engines.media import YtDlpFFmpegDownloader
 from lvt.engines.mlx_whisper import MLXWhisperASREngine
@@ -79,7 +78,7 @@ def test_mlx_whisper_uses_requested_persisted_model(tmp_path: Path) -> None:
 
 
 def test_ffmpeg_normalizer_accepts_verified_sibling_checkpoint_input(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     downloaded_dir = tmp_path / "run" / "downloaded_media"
     normalized_dir = tmp_path / "run" / ".normalized_audio.tmp"
@@ -88,22 +87,21 @@ def test_ffmpeg_normalizer_accepts_verified_sibling_checkpoint_input(
     downloaded = downloaded_dir / "download.bin"
     downloaded.write_bytes(b"media")
 
-    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if "-version" in command:
-            return subprocess.CompletedProcess(command, 0, stdout="ffmpeg version 7.0\n")
-        if "-show_entries" in command:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps({"format": {"duration": "1.0"}}),
-            )
-        write_wav(Path(command[-1]), [0] * 16_000)
-        return subprocess.CompletedProcess(command, 0, stdout="")
+    class Executor:
+        def run(self, command: list[str], **_kwargs: Any) -> ProcessResult:
+            if "-version" in command:
+                stdout = "ffmpeg version 7.0\n"
+            elif "-show_entries" in command:
+                stdout = '{"format": {"duration": "1.0"}}'
+            else:
+                write_wav(Path(command[-1]), [0] * 16_000)
+                stdout = ""
+            return ProcessResult(tuple(command), 1, 0, stdout, "")
 
-    monkeypatch.setattr("lvt.engines.media.subprocess.run", run)
     engine = YtDlpFFmpegDownloader(
         ffmpeg_path=Path("/tools/ffmpeg"),
         ffprobe_path=Path("/tools/ffprobe"),
+        process_executor=Executor(),  # type: ignore[arg-type]
     )
 
     result = engine.normalize_audio(
@@ -113,6 +111,45 @@ def test_ffmpeg_normalizer_accepts_verified_sibling_checkpoint_input(
 
     assert result.audio_path.parent == normalized_dir
     assert result.duration_ms == 1_000
+
+
+def test_downloader_routes_ytdlp_ffmpeg_and_ffprobe_through_one_executor(
+    tmp_path: Path,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    class Executor:
+        def run(self, command: list[str], **_kwargs: Any) -> ProcessResult:
+            normalized = tuple(str(value) for value in command)
+            commands.append(normalized)
+            if "-version" in normalized:
+                stdout = "ffmpeg version 7.0\n"
+            elif "yt_dlp" in normalized:
+                template = Path(normalized[normalized.index("--output") + 1])
+                downloaded = Path(str(template).replace("%(ext)s", "m4a"))
+                downloaded.write_bytes(b"downloaded")
+                stdout = f"__LVT_PATH__{downloaded}\n__LVT_TITLE__Downloaded title\n"
+            elif "-show_entries" in normalized:
+                stdout = '{"format": {"duration": "1.0"}}'
+            else:
+                write_wav(Path(normalized[-1]), [0] * 16_000)
+                stdout = ""
+            return ProcessResult(normalized, 1, 0, stdout, "")
+
+    engine = YtDlpFFmpegDownloader(
+        ffmpeg_path=Path("/tools/ffmpeg"),
+        ffprobe_path=Path("/tools/ffprobe"),
+        process_executor=Executor(),  # type: ignore[arg-type]
+    )
+    work_dir = tmp_path / "run"
+
+    result = engine.download("https://example.test/video", work_dir)
+
+    assert result.title == "Downloaded title"
+    assert result.duration_ms == 1_000
+    assert any("yt_dlp" in command for command in commands)
+    assert any(command[0] == "/tools/ffmpeg" and "-i" in command for command in commands)
+    assert any(command[0] == "/tools/ffprobe" for command in commands)
 
 
 def test_sherpa_diarization_returns_empty_for_silence_without_loading_models(

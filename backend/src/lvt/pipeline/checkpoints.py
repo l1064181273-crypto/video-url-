@@ -127,9 +127,8 @@ def stable_fingerprint(value: object) -> str:
 
 class CheckpointStore:
     def __init__(self, work_root: Path) -> None:
-        self.work_root = work_root.absolute()
-        if self.work_root.is_symlink():
-            raise ValueError("checkpoint work root cannot be a symlink")
+        # Canonicalize the trusted root once so macOS /var and /private/var aliases agree.
+        self.work_root = work_root.resolve(strict=False)
         self.work_root.mkdir(parents=True, exist_ok=True)
 
     def run_root(self, job_id: str, run_id: str) -> Path:
@@ -309,7 +308,11 @@ class CheckpointStore:
         self._assert_tree_has_no_symlinks(run_root)
         if any(run_root.glob("*/.published")):
             for candidate in run_root.iterdir():
-                if candidate.name.startswith(".") and candidate.is_dir():
+                if candidate.is_dir() and (
+                    candidate.name.startswith(".")
+                    or not self._is_regular_no_follow(candidate / ".published")
+                ):
+                    self._assert_tree_has_no_symlinks(candidate)
                     shutil.rmtree(candidate)
             return
         shutil.rmtree(run_root)

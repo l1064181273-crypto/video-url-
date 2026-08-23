@@ -193,8 +193,22 @@
     WAV；downloader 与 normalizer 版本指纹分离，七类 engine 变更均从正确阶段失效。
   - ✅ Checkpoint 3 专项测试 33 passed；全量 `pytest` 433 passed（1 条第三方警告）；
     Ruff lint/format 通过；mypy 30 个源码文件通过。
-  - ⏭️ 下一步：等待 Checkpoint 3 修复独立审查；未开始 Checkpoint 4 进程控制，也未实现
-    lifespan worker、启动恢复或控制 API。
+  - ✅ Phase 2 Checkpoint 4 完成：新增统一 `SubprocessExecutor`，yt-dlp、FFmpeg 和
+    ffprobe 全部通过参数数组和独立进程组执行。
+  - ✅ 正常、非零、timeout 和 cancellation 路径均完成 wait/reap；超时/取消先 TERM
+    整个进程组，宽限期后仍存活则 KILL，再最终 communicate/wait。
+  - ✅ stdout/stderr 通过 `communicate(timeout=...)` 持续并行排空；2 MiB 双管道压力
+    测试无死锁，父子进程取消后均不再存活。
+  - ✅ Pipeline 在每个 stage 和进程内模型调用前后检查取消；MLX/sherpa/Ollama
+    无法强杀时，最坏取消延迟为当前调用剩余执行时间。
+  - ✅ download/normalize 取消只清理当前 run 的未发布 stage；此前合法 downloaded
+    checkpoint 保留并可在同一 run 重试复用。
+  - ✅ macOS `/var` 与 `/private/var` 可信 work root 规范化回归通过；no-follow
+    symlink 和已发布 checkpoint 保护保持不变。
+  - ✅ Checkpoint 4 后全量 `pytest` 444 passed（1 条第三方警告）；checkpoint 集成
+    35 passed；Ruff lint/format 通过；mypy 31 个源码文件通过。
+  - ⏭️ 下一步：等待 Checkpoint 4 独立审查；未实现 lifespan worker、自动重试调度、
+    启动恢复或控制 API。
 
 ## 已知阻塞
 

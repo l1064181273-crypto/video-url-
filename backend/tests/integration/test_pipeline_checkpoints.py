@@ -14,6 +14,7 @@ import webvtt
 
 from lvt.core.jobs import ErrorCode, JobStatus
 from lvt.core.models import DEFAULT_ASR_MODEL
+from lvt.core.processes import CancellationToken, ProcessCancelledError
 from lvt.db.repository import AutomaticRequeueResult, JobRepository
 from lvt.engines.base import (
     ASRResult,
@@ -46,13 +47,20 @@ class CountingDownloader:
         self.normalizer_version = normalizer_version
         self.version = f"{downloader_version};{normalizer_version}"
 
-    def download_media(self, url: str, work_dir: Path) -> DownloadedMedia:
+    def download_media(
+        self, url: str, work_dir: Path, _cancellation: Any = None
+    ) -> DownloadedMedia:
         self.calls["downloaded_media"] += 1
         path = work_dir / "download.bin"
         path.write_bytes(b"downloaded-media")
         return DownloadedMedia(media_path=path, title="Checkpoint Sample")
 
-    def normalize_audio(self, media: DownloadedMedia, work_dir: Path) -> MediaInfo:
+    def normalize_audio(
+        self,
+        media: DownloadedMedia,
+        work_dir: Path,
+        _cancellation: Any = None,
+    ) -> MediaInfo:
         self.calls["normalized_audio"] += 1
         assert media.media_path.is_file()
         assert media.media_path.read_bytes() == b"downloaded-media"
@@ -65,8 +73,12 @@ class CountingDownloader:
             output.writeframes(b"\0\0" * 6_000)
         return MediaInfo(audio_path=path, title=media.title, duration_ms=6_000)
 
-    def download(self, url: str, work_dir: Path) -> MediaInfo:
-        return self.normalize_audio(self.download_media(url, work_dir), work_dir)
+    def download(self, url: str, work_dir: Path, _cancellation: Any = None) -> MediaInfo:
+        return self.normalize_audio(
+            self.download_media(url, work_dir, _cancellation),
+            work_dir,
+            _cancellation,
+        )
 
 
 class CountingASR:
@@ -162,10 +174,12 @@ def _build_pipeline(
     segmenter_version: str = "fake-segmenter-1",
     translator_version: str = "fake-translator-1",
     exporter_version: str = "fake-exporter-1",
+    downloader: Any | None = None,
     exporter: Any | None = None,
 ) -> Pipeline:
     return Pipeline(
-        downloader=CountingDownloader(
+        downloader=downloader
+        or CountingDownloader(
             calls,
             downloader_version=downloader_version,
             normalizer_version=normalizer_version,
@@ -631,7 +645,14 @@ def test_run_directories_are_isolated_and_stale_cleanup_cannot_touch_current_run
         JobStatus.DOWNLOADING,
         checkpoint_pointer="stale/manifest.json",
     )
-    pipeline.checkpoints.cleanup_unpublished_run(job_id, first_run)
+    cancellation = CancellationToken()
+    cancellation.cancel()
+    with pytest.raises(ProcessCancelledError):
+        pipeline.run_claimed(
+            job_id=job_id,
+            run_id=first_run,
+            cancellation=cancellation,
+        )
 
     assert not stale_dir.exists()
     assert current_file.read_text(encoding="utf-8") == "current"
@@ -657,6 +678,113 @@ def test_stale_cleanup_rejects_symlink_to_current_run(tmp_path: Path) -> None:
         pipeline.checkpoints.cleanup_unpublished_run(job_id, stale_run)
 
     assert current_file.read_text(encoding="utf-8") == "current"
+
+
+class CancellingDownloader(CountingDownloader):
+    def __init__(
+        self,
+        calls: Counter[str],
+        token: CancellationToken,
+        cancel_stage: CheckpointStage,
+    ) -> None:
+        super().__init__(calls)
+        self.token = token
+        self.cancel_stage = cancel_stage
+
+    def download_media(
+        self,
+        url: str,
+        work_dir: Path,
+        _cancellation: Any = None,
+    ) -> DownloadedMedia:
+        media = super().download_media(url, work_dir, _cancellation)
+        if self.cancel_stage is CheckpointStage.DOWNLOADED_MEDIA:
+            self.token.cancel()
+            self.token.raise_if_cancelled()
+        return media
+
+    def normalize_audio(
+        self,
+        media: DownloadedMedia,
+        work_dir: Path,
+        _cancellation: Any = None,
+    ) -> MediaInfo:
+        normalized = super().normalize_audio(media, work_dir, _cancellation)
+        if self.cancel_stage is CheckpointStage.NORMALIZED_AUDIO:
+            self.token.cancel()
+            self.token.raise_if_cancelled()
+        return normalized
+
+
+def test_download_cancellation_removes_temporary_stage_without_publishing(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path / "lvt.sqlite3")
+    repository.initialize()
+    calls: Counter[str] = Counter()
+    token = CancellationToken()
+    pipeline = _build_pipeline(
+        tmp_path,
+        repository,
+        calls,
+        downloader=CancellingDownloader(calls, token, CheckpointStage.DOWNLOADED_MEDIA),
+    )
+    job_id = _create_job(repository)
+    claimed = repository.claim_next(
+        expected_job_id=job_id,
+        first_required_stage=JobStatus.DOWNLOADING,
+    )
+    assert claimed is not None
+    run_id = str(claimed["active_run_id"])
+
+    with pytest.raises(ProcessCancelledError):
+        pipeline.run_claimed(job_id=job_id, run_id=run_id, cancellation=token)
+
+    persisted = repository.get(job_id)
+    assert persisted is not None
+    assert persisted["status"] == JobStatus.DOWNLOADING.value
+    assert persisted["checkpoint_pointer"] is None
+    assert not pipeline.checkpoints.run_root(job_id, run_id).exists()
+
+
+def test_normalize_cancellation_keeps_download_cache_and_retry_reuses_it(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path / "lvt.sqlite3")
+    repository.initialize()
+    calls: Counter[str] = Counter()
+    token = CancellationToken()
+    pipeline = _build_pipeline(
+        tmp_path,
+        repository,
+        calls,
+        downloader=CancellingDownloader(calls, token, CheckpointStage.NORMALIZED_AUDIO),
+    )
+    job_id = _create_job(repository)
+    claimed = repository.claim_next(
+        expected_job_id=job_id,
+        first_required_stage=JobStatus.DOWNLOADING,
+    )
+    assert claimed is not None
+    run_id = str(claimed["active_run_id"])
+
+    with pytest.raises(ProcessCancelledError):
+        pipeline.run_claimed(job_id=job_id, run_id=run_id, cancellation=token)
+
+    persisted = repository.get(job_id)
+    assert persisted is not None
+    assert persisted["status"] == JobStatus.EXTRACTING.value
+    assert CheckpointStage.DOWNLOADED_MEDIA.value in str(persisted["checkpoint_pointer"])
+    assert pipeline.resolve_checkpoints(job_id).first_required_stage is JobStatus.EXTRACTING
+    assert calls["downloaded_media"] == 1
+    assert calls["normalized_audio"] == 1
+
+    retry_pipeline = _build_pipeline(tmp_path, repository, calls)
+    result = retry_pipeline.run_claimed(job_id=job_id, run_id=run_id)
+
+    assert calls["downloaded_media"] == 1
+    assert calls["normalized_audio"] == 2
+    assert len(result.artifacts) == 8
 
 
 class CorruptingExporter:

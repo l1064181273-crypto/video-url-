@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from lvt.core.jobs import JobStatus
 from lvt.core.models import JobOptions, Segment, Transcript, apply_translations
+from lvt.core.processes import CancellationToken
 from lvt.db.repository import (
     ArtifactCompletionResult,
     ArtifactSpec,
@@ -46,6 +47,10 @@ from lvt.security.urls import validate_public_media_url
 
 Segmenter = Callable[..., list[Segment]]
 Exporter = Callable[[Transcript, Path], list[Path]]
+IN_PROCESS_CANCELLATION_LIMITATION = (
+    "MLX, sherpa-onnx and Ollama calls are checked immediately before and after "
+    "each call; worst-case cancellation latency is the remaining call duration."
+)
 
 
 @dataclass(frozen=True)
@@ -143,8 +148,29 @@ class Pipeline:
     def status_for_stage(stage: CheckpointStage) -> JobStatus:
         return STAGE_JOB_STATUS[stage]
 
-    def run_claimed(self, *, job_id: str, run_id: str) -> PipelineResult:
+    def run_claimed(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        cancellation: CancellationToken | None = None,
+    ) -> PipelineResult:
+        token = cancellation or CancellationToken()
+        try:
+            return self._run_claimed(job_id=job_id, run_id=run_id, cancellation=token)
+        except BaseException:
+            self.checkpoints.cleanup_unpublished_run(job_id, run_id)
+            raise
+
+    def _run_claimed(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        cancellation: CancellationToken,
+    ) -> PipelineResult:
         repository = self._repository()
+        cancellation.raise_if_cancelled()
         job = repository.get(job_id)
         if job is None:
             raise KeyError(f"job does not exist: {job_id}")
@@ -167,6 +193,7 @@ class Pipeline:
 
         start_index = len(manifests)
         for stage in CHECKPOINT_STAGE_ORDER[start_index:]:
+            cancellation.raise_if_cancelled()
             previous = (
                 manifests[CHECKPOINT_STAGE_ORDER[CHECKPOINT_STAGE_ORDER.index(stage) - 1]]
                 if CHECKPOINT_STAGE_ORDER.index(stage) > 0
@@ -175,7 +202,7 @@ class Pipeline:
             workspace = self.checkpoints.begin_stage(job_id, run_id, stage)
             if stage is CheckpointStage.DOWNLOADED_MEDIA:
                 staged = self._staged_downloader()
-                downloaded = staged.download_media(url, workspace.temporary_dir)
+                downloaded = staged.download_media(url, workspace.temporary_dir, cancellation)
                 metadata_path = self.checkpoints.write_json(
                     workspace,
                     "downloaded-media.json",
@@ -189,7 +216,7 @@ class Pipeline:
                 if downloaded is None:
                     raise RuntimeError("downloaded media checkpoint is missing")
                 media = self._staged_downloader().normalize_audio(
-                    downloaded, workspace.temporary_dir
+                    downloaded, workspace.temporary_dir, cancellation
                 )
                 metadata_path = self.checkpoints.write_json(
                     workspace,
@@ -208,6 +235,7 @@ class Pipeline:
                 if media is None:
                     raise RuntimeError("normalized media checkpoint is missing")
                 asr_result = self._transcribe(media.audio_path, options.asr_model)
+                cancellation.raise_if_cancelled()
                 output = self.checkpoints.write_json(
                     workspace,
                     "asr-result.json",
@@ -222,6 +250,7 @@ class Pipeline:
                     raise RuntimeError("normalized media checkpoint is missing")
                 if options.diarization:
                     intervals = self.diarizer.diarize(media.audio_path)
+                    cancellation.raise_if_cancelled()
                     skipped = False
                 else:
                     intervals = []
@@ -243,6 +272,7 @@ class Pipeline:
                     intervals,
                     source_language=asr_result.language,
                 )
+                cancellation.raise_if_cancelled()
                 output = self.checkpoints.write_json(
                     workspace,
                     "source-transcript.json",
@@ -256,6 +286,7 @@ class Pipeline:
                     {item.id: item.source_text for item in source_segments},
                     asr_result.language,
                 )
+                cancellation.raise_if_cancelled()
                 translated_segments = apply_translations(source_segments, translation.texts)
                 transcript = Transcript(
                     job_id=job_id,
@@ -285,12 +316,14 @@ class Pipeline:
                 if transcript is None:
                     raise RuntimeError("translated transcript checkpoint is missing")
                 artifact_paths = self.exporter(transcript, workspace.temporary_dir)
+                cancellation.raise_if_cancelled()
                 validate_export_artifacts(transcript, artifact_paths)
                 outputs = [
                     PendingOutput(path, path.name, len(transcript.segments))
                     for path in artifact_paths
                 ]
 
+            cancellation.raise_if_cancelled()
             manifest = self.checkpoints.publish(
                 workspace,
                 source_url=url,
@@ -368,6 +401,7 @@ class Pipeline:
         artifact_paths = [
             self.checkpoints.resolve_output_path(output) for output in export_manifest.outputs
         ]
+        cancellation.raise_if_cancelled()
         validate_export_artifacts(transcript, artifact_paths)
         artifact_specs = [
             ArtifactSpec(

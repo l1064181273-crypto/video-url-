@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from lvt.core.processes import CancellationToken
+
 
 @dataclass(frozen=True)
 class DownloadedMedia:
@@ -48,13 +50,28 @@ class TranslationResult:
 class Downloader(Protocol):
     version: str
 
-    def download(self, url: str, work_dir: Path) -> MediaInfo: ...
+    def download(
+        self,
+        url: str,
+        work_dir: Path,
+        cancellation: CancellationToken | None = None,
+    ) -> MediaInfo: ...
 
 
 class StagedDownloader(Downloader, Protocol):
-    def download_media(self, url: str, work_dir: Path) -> DownloadedMedia: ...
+    def download_media(
+        self,
+        url: str,
+        work_dir: Path,
+        cancellation: CancellationToken | None = None,
+    ) -> DownloadedMedia: ...
 
-    def normalize_audio(self, media: DownloadedMedia, work_dir: Path) -> MediaInfo: ...
+    def normalize_audio(
+        self,
+        media: DownloadedMedia,
+        work_dir: Path,
+        cancellation: CancellationToken | None = None,
+    ) -> MediaInfo: ...
 
 
 class ASREngine(Protocol):
