@@ -45,7 +45,9 @@ class YtDlpFFmpegDownloader:
             ffprobe_path = ffprobe_path or discovered_ffprobe
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
-        self.version = f"yt-dlp:{yt_dlp.version.__version__};ffmpeg:{self._ffmpeg_version()}"
+        self.downloader_version = f"yt-dlp:{yt_dlp.version.__version__}"
+        self.normalizer_version = f"ffmpeg:{self._ffmpeg_version()}"
+        self.version = f"{self.downloader_version};{self.normalizer_version}"
 
     def download(self, url: str, work_dir: Path) -> MediaInfo:
         downloaded = self.download_media(url, work_dir)
@@ -85,7 +87,9 @@ class YtDlpFFmpegDownloader:
         return DownloadedMedia(media_path=downloaded, title=title)
 
     def normalize_audio(self, media: DownloadedMedia, work_dir: Path) -> MediaInfo:
-        downloaded = ensure_within_root(media.media_path, work_dir)
+        downloaded = media.media_path
+        if downloaded.is_symlink() or not downloaded.is_file():
+            raise LVTError("MEDIA_INVALID", "下载阶段输入不存在或不是普通文件")
         audio_path = ensure_within_root(work_dir / "audio.normalized.wav", work_dir)
         command = [
             os.fspath(self.ffmpeg_path),
@@ -113,6 +117,9 @@ class YtDlpFFmpegDownloader:
         if not audio_path.is_file() or audio_path.stat().st_size == 0 or duration_ms <= 0:
             raise LVTError("MEDIA_INVALID", "规范化音频无效")
         return MediaInfo(audio_path=audio_path, title=media.title, duration_ms=duration_ms)
+
+    def probe_duration_ms(self, path: Path) -> int:
+        return self._probe_duration_ms(path)
 
     def _probe_duration_ms(self, path: Path) -> int:
         command = [

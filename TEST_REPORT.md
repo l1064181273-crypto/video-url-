@@ -570,6 +570,72 @@ manifest_fingerprint
 - 未实现 lifespan worker、启动恢复或控制 API。
 - 本轮使用确定性 Fake Engine 验证 checkpoint，没有运行真实 Ollama 或五样本媒体 E2E。
 
+## Phase 2 Checkpoint 3 独立审查修复
+
+根因与修复：
+
+- Pipeline 在 stage 目录 rename 后继续使用临时目录中的 `DownloadedMedia.media_path`
+  和 `MediaInfo.audio_path`。现改为每阶段 publish 后从 manifest 重载最终路径。
+- FFmpeg normalizer 错误要求输入位于当前输出临时目录。现保留输出 containment，
+  输入则必须是 Pipeline 已验证、非 symlink、存在的上游 checkpoint 普通文件。
+- API 默认 `"default"` 不是 mlx-whisper 模型名。JobOptions 现持久化 canonical
+  `mlx-community/whisper-small-mlx`，同时在输入边界解析旧 `default` alias。
+- checkpoint 路径此前先 resolve 再检查 symlink，可能丢失链接身份。现对工作根以下
+  每个现有组件执行 `lstat`，读取、marker、manifest 和删除均 no-follow。
+- 导出此前只验证文件存在和数量。现于 export manifest 发布前及 DB complete 前，
+  回读 JSON/SRT/VTT/TXT 并验证全部 Segment 语义。
+- manifest 缺少媒体和 transcript schema 信息。现增加 `media_duration_ms` 和
+  `transcript_schema_version`，恢复 normalized audio 时真实读取 WAV 时长。
+- downloader/normalizer 曾共享组合版本。现分离 yt-dlp 与 FFmpeg fingerprint。
+
+专项证据：
+
+```bash
+cd backend
+../.venv-smoke/bin/python -m pytest tests/integration/test_pipeline_checkpoints.py
+# 33 passed
+
+../.venv-smoke/bin/python -m pytest \
+  tests/integration/test_pipeline_checkpoints.py \
+  tests/integration/test_api.py \
+  tests/unit/test_job_options.py \
+  tests/unit/test_pipeline_factory.py \
+  tests/unit/test_real_engines.py
+# 44 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m pytest
+# 433 passed，1 条第三方 StarletteDeprecationWarning
+
+../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# All checks passed!
+
+../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# 52 files already formatted
+
+../.venv-smoke/bin/python -m mypy src/lvt
+# Success: no issues found in 30 source files
+```
+
+反例结果：
+
+- Strict downloader/ASR 会真实打开上游文件，并确认路径位于 published
+  `downloaded_media` / `normalized_audio` 目录。
+- API 默认模型和自定义模型均传到 configurable MLX adapter；Transcript 和 manifest
+  记录对应实际模型版本。
+- 工作根内部 output、manifest、published marker symlink 均使缓存失效。
+- stale run 目录指向 current run 的 symlink 时 cleanup 抛错，current 文件不变。
+- normalized audio 即使伪造匹配 hash/size，WAV probe 失败仍从 extracting 重跑。
+- downloader、normalizer、ASR、diarization、segmenter、translation、exporter
+  各自版本变化分别从 downloading 至 exporting 的对应阶段失效。
+- 故意修改 Speaker、时间戳、ID、段落顺序、source_text、SRT 时间和 VTT 时间的
+  exporter 全部被拒绝；Job 不进入 completed，artifact 表和 completed event 均为空。
+
+范围限制：
+
+- 没有实现进程组、TERM/KILL、lifespan worker、启动恢复或控制 API。
+- 未修改 Phase 1 strict-token 文件，也未扩展翻译 token 边界。
+- 本轮未运行真实 Ollama 或五样本媒体 E2E；验证聚焦确定性 checkpoint 和 Repository。
+
 ## 已验证的产物不变量
 
 对全部 6 个成功的真实媒体任务（共 48 个导出文件）完成以下验证：

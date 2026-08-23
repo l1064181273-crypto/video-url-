@@ -177,7 +177,23 @@
     ID、时间戳、Speaker、语言、source_text、metadata、顺序和数量保持一致。
   - ✅ Checkpoint 3 专项测试 16 passed；全量 `pytest` 410 passed（1 条第三方警告）；
     Ruff lint/format 通过；mypy 29 个源码文件通过。
-  - ⏭️ 下一步：等待 Checkpoint 3 独立审查；未开始 Checkpoint 4 进程控制，也未实现
+  - ✅ Checkpoint 3 独立审查阻塞已修复：阶段目录 rename 后立即从 manifest 重载
+    published path；Strict Fake 会真实打开 downloaded media 和 normalized WAV。
+  - ✅ 默认 `asr_model` 持久化为 canonical
+    `mlx-community/whisper-small-mlx`；`default` alias 在 JobOptions 边界解析；
+    manifest、fingerprint 和 Transcript 记录本次实际模型版本。
+  - ✅ `create_real_pipeline` 支持注入 Repository；API 默认和自定义模型均验证传入
+    configurable MLX adapter。
+  - ✅ checkpoint 路径改为逐组件 `lstat` no-follow；内部 output/manifest/marker
+    symlink 被拒绝，stale-run 指向 current-run 的清理尝试失败且 current 数据保持。
+  - ✅ 最终 artifact validator 在 export manifest 发布前及 DB 完成前回读
+    JSON/SRT/VTT/TXT；Speaker、时间、ID、顺序、source_text 或 cue 时间被修改时，
+    Job 保持 exporting，且无 artifact/completed event。
+  - ✅ manifest 增加 `media_duration_ms` 和 `transcript_schema_version`；恢复时真实探测
+    WAV；downloader 与 normalizer 版本指纹分离，七类 engine 变更均从正确阶段失效。
+  - ✅ Checkpoint 3 专项测试 33 passed；全量 `pytest` 433 passed（1 条第三方警告）；
+    Ruff lint/format 通过；mypy 30 个源码文件通过。
+  - ⏭️ 下一步：等待 Checkpoint 3 修复独立审查；未开始 Checkpoint 4 进程控制，也未实现
     lifespan worker、启动恢复或控制 API。
 
 ## 已知阻塞

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from lvt.core.models import DEFAULT_ASR_MODEL
+from lvt.db.repository import JobRepository
 from lvt.engines.media import YtDlpFFmpegDownloader, discover_ffmpeg_binaries
 from lvt.engines.mlx_whisper import MLXWhisperASREngine
 from lvt.engines.ollama import FallbackTranslationEngine, OllamaTranslationEngine
@@ -17,14 +19,18 @@ class RealPipelineConfig:
     export_root: Path
     segmentation_model: Path
     embedding_model: Path
-    asr_model: str = "mlx-community/whisper-small-mlx"
+    asr_model: str = DEFAULT_ASR_MODEL
     ollama_url: str = "http://127.0.0.1:11434"
     primary_translation_model: str = "hy-mt2:1.8b-q4km-fixed"
     fallback_translation_model: str = "qwen2.5:1.5b"
     diarization_threshold: float = 0.5
 
 
-def create_real_pipeline(config: RealPipelineConfig) -> Pipeline:
+def create_real_pipeline(
+    config: RealPipelineConfig,
+    *,
+    repository: JobRepository | None = None,
+) -> Pipeline:
     ffmpeg, ffprobe = discover_ffmpeg_binaries()
     return Pipeline(
         downloader=YtDlpFFmpegDownloader(
@@ -54,4 +60,5 @@ def create_real_pipeline(config: RealPipelineConfig) -> Pipeline:
         ),
         work_root=config.work_root,
         export_root=config.export_root,
+        repository=repository,
     )

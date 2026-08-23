@@ -2,15 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+DEFAULT_ASR_MODEL = "mlx-community/whisper-small-mlx"
 
 
 class JobOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    asr_model: str = "default"
+    asr_model: str = DEFAULT_ASR_MODEL
     translate_to: str = "zh-CN"
     diarization: bool = True
+
+    @field_validator("asr_model", mode="before")
+    @classmethod
+    def resolve_default_asr_model(cls, value: object) -> object:
+        if value == "default":
+            return DEFAULT_ASR_MODEL
+        return value
 
 
 class Segment(BaseModel):

@@ -66,6 +66,8 @@ class ASREngine(Protocol):
 class ConfigurableASREngine(ASREngine, Protocol):
     def transcribe_with_model(self, audio_path: Path, model: str) -> ASRResult: ...
 
+    def version_for_model(self, model: str) -> str: ...
+
 
 class DiarizationEngine(Protocol):
     version: str

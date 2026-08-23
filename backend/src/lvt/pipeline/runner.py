@@ -28,6 +28,7 @@ from lvt.engines.base import (
     TranslationEngine,
 )
 from lvt.exporters.files import export_transcript
+from lvt.pipeline.artifact_validation import validate_export_artifacts
 from lvt.pipeline.checkpoints import (
     CHECKPOINT_STAGE_ORDER,
     STAGE_JOB_STATUS,
@@ -264,7 +265,7 @@ class Pipeline:
                     detected_language=asr_result.language,
                     engine_versions={
                         "downloader": self.downloader.version,
-                        "asr": self.asr.version,
+                        "asr": self._asr_version(options.asr_model),
                         "diarization": (
                             self.diarizer.version if options.diarization else "disabled"
                         ),
@@ -284,6 +285,7 @@ class Pipeline:
                 if transcript is None:
                     raise RuntimeError("translated transcript checkpoint is missing")
                 artifact_paths = self.exporter(transcript, workspace.temporary_dir)
+                validate_export_artifacts(transcript, artifact_paths)
                 outputs = [
                     PendingOutput(path, path.name, len(transcript.segments))
                     for path in artifact_paths
@@ -296,7 +298,34 @@ class Pipeline:
                 requirement=requirements[stage],
                 previous=previous,
                 outputs=outputs,
+                media_duration_ms=(
+                    media.duration_ms
+                    if stage is not CheckpointStage.DOWNLOADED_MEDIA and media is not None
+                    else None
+                ),
+                transcript_schema_version=(
+                    transcript.schema_version
+                    if stage
+                    in {
+                        CheckpointStage.TRANSLATED_TRANSCRIPT,
+                        CheckpointStage.EXPORT_MANIFEST,
+                    }
+                    and transcript is not None
+                    else None
+                ),
             )
+            if stage is CheckpointStage.DOWNLOADED_MEDIA:
+                downloaded = self._load_downloaded(manifest)
+            elif stage is CheckpointStage.NORMALIZED_AUDIO:
+                media = self._load_media(manifest)
+            elif stage is CheckpointStage.ASR_RESULT:
+                asr_result = self._load_asr(manifest)
+            elif stage is CheckpointStage.DIARIZATION_RESULT:
+                intervals = self._load_diarization(manifest)
+            elif stage is CheckpointStage.SOURCE_TRANSCRIPT:
+                source_segments = self._load_segments(manifest)
+            elif stage is CheckpointStage.TRANSLATED_TRANSCRIPT:
+                transcript = self._load_transcript(manifest)
             worker_title: str | None = None
             worker_duration_ms: int | None = None
             worker_language: str | None = None
@@ -339,11 +368,12 @@ class Pipeline:
         artifact_paths = [
             self.checkpoints.resolve_output_path(output) for output in export_manifest.outputs
         ]
+        validate_export_artifacts(transcript, artifact_paths)
         artifact_specs = [
             ArtifactSpec(
                 artifact_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"lvt:{job_id}:{path.name}")),
                 kind=path.name,
-                path=path.relative_to(self.work_root.resolve()).as_posix(),
+                path=path.relative_to(self.checkpoints.work_root).as_posix(),
             )
             for path in artifact_paths
         ]
@@ -360,15 +390,15 @@ class Pipeline:
         definitions: dict[CheckpointStage, tuple[dict[str, object], dict[str, str]]] = {
             CheckpointStage.DOWNLOADED_MEDIA: (
                 {},
-                {"downloader": self.downloader.version},
+                {"downloader": self._downloader_version()},
             ),
             CheckpointStage.NORMALIZED_AUDIO: (
                 {"audio": "mono-16khz-pcm-s16le"},
-                {"normalizer": self.downloader.version},
+                {"normalizer": self._normalizer_version()},
             ),
             CheckpointStage.ASR_RESULT: (
                 {"asr_model": options.asr_model},
-                {"asr": self.asr.version},
+                {"asr": self._asr_version(options.asr_model)},
             ),
             CheckpointStage.DIARIZATION_RESULT: (
                 {"diarization": options.diarization},
@@ -408,6 +438,17 @@ class Pipeline:
         if hasattr(self.asr, "transcribe_with_model"):
             return cast(ConfigurableASREngine, self.asr).transcribe_with_model(audio_path, model)
         return self.asr.transcribe(audio_path)
+
+    def _asr_version(self, model: str) -> str:
+        if hasattr(self.asr, "version_for_model"):
+            return cast(ConfigurableASREngine, self.asr).version_for_model(model)
+        return f"{self.asr.version};model={model}"
+
+    def _downloader_version(self) -> str:
+        return str(getattr(self.downloader, "downloader_version", self.downloader.version))
+
+    def _normalizer_version(self) -> str:
+        return str(getattr(self.downloader, "normalizer_version", self.downloader.version))
 
     def _repository(self) -> JobRepository:
         if self.repository is None:

@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from lvt.api.app import create_app
+from lvt.core.models import DEFAULT_ASR_MODEL
 
 
 def test_batch_create_accepts_valid_and_rejects_invalid_urls(tmp_path: Path) -> None:
@@ -49,3 +50,16 @@ def test_batch_create_accepts_valid_and_rejects_invalid_urls(tmp_path: Path) -> 
         headers={"X-LVT-Token": "test-token"},
     ).json()
     assert restored["options"] == jobs[0]["options"]
+
+
+def test_api_default_job_persists_canonical_asr_model(tmp_path: Path) -> None:
+    client = TestClient(create_app(db_path=tmp_path / "default.sqlite3", api_token="test-token"))
+
+    response = client.post(
+        "/api/v1/jobs",
+        headers={"X-LVT-Token": "test-token"},
+        json={"urls": ["https://example.test/default"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"][0]["options"]["asr_model"] == DEFAULT_ASR_MODEL

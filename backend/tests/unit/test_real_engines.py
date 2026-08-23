@@ -1,4 +1,6 @@
+import json
 import struct
+import subprocess
 import wave
 from pathlib import Path
 from typing import Any
@@ -6,6 +8,8 @@ from typing import Any
 import pytest
 
 from lvt.core.errors import LVTError
+from lvt.engines.base import DownloadedMedia
+from lvt.engines.media import YtDlpFFmpegDownloader
 from lvt.engines.mlx_whisper import MLXWhisperASREngine
 from lvt.engines.sherpa_diarization import SherpaOnnxDiarizationEngine
 
@@ -51,6 +55,64 @@ def test_mlx_whisper_rejects_empty_transcript(tmp_path: Path) -> None:
     )
     with pytest.raises(LVTError, match="没有可导出的语音文本"):
         engine.transcribe(audio)
+
+
+def test_mlx_whisper_uses_requested_persisted_model(tmp_path: Path) -> None:
+    audio = tmp_path / "audio.wav"
+    write_wav(audio, [0] * 16_000)
+    captured: dict[str, Any] = {}
+
+    def transcribe(_audio: str, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "Hello."}],
+        }
+
+    engine = MLXWhisperASREngine(transcribe_fn=transcribe)
+    engine.transcribe_with_model(audio, "mlx-community/custom-model")
+
+    assert captured["path_or_hf_repo"] == "mlx-community/custom-model"
+    assert engine.version_for_model("mlx-community/custom-model").endswith(
+        "model=mlx-community/custom-model"
+    )
+
+
+def test_ffmpeg_normalizer_accepts_verified_sibling_checkpoint_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    downloaded_dir = tmp_path / "run" / "downloaded_media"
+    normalized_dir = tmp_path / "run" / ".normalized_audio.tmp"
+    downloaded_dir.mkdir(parents=True)
+    normalized_dir.mkdir(parents=True)
+    downloaded = downloaded_dir / "download.bin"
+    downloaded.write_bytes(b"media")
+
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "-version" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="ffmpeg version 7.0\n")
+        if "-show_entries" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"format": {"duration": "1.0"}}),
+            )
+        write_wav(Path(command[-1]), [0] * 16_000)
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr("lvt.engines.media.subprocess.run", run)
+    engine = YtDlpFFmpegDownloader(
+        ffmpeg_path=Path("/tools/ffmpeg"),
+        ffprobe_path=Path("/tools/ffprobe"),
+    )
+
+    result = engine.normalize_audio(
+        DownloadedMedia(downloaded, "Sibling input"),
+        normalized_dir,
+    )
+
+    assert result.audio_path.parent == normalized_dir
+    assert result.duration_ms == 1_000
 
 
 def test_sherpa_diarization_returns_empty_for_silence_without_loading_models(

@@ -35,7 +35,11 @@ class MLXWhisperASREngine:
             package_version = metadata.version("mlx-whisper")
         except metadata.PackageNotFoundError:
             package_version = "missing"
-        self.version = f"mlx-whisper:{package_version};model={model}"
+        self.package_version = package_version
+        self.version = self.version_for_model(model)
+
+    def version_for_model(self, model: str) -> str:
+        return f"mlx-whisper:{self.package_version};model={model}"
 
     def transcribe(self, audio_path: Path) -> ASRResult:
         return self.transcribe_with_model(audio_path, self.model)
