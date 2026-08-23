@@ -15,6 +15,50 @@
       </div>
     </header>
     <main>
+      <section class="connection-section" aria-labelledby="connection-title">
+        <div class="section-heading">
+          <h2 id="connection-title">本地连接</h2>
+          <span id="token-state" class="token-state">未保存 Token</span>
+        </div>
+        <form id="connection-form" novalidate>
+          <div class="connection-fields">
+            <label>
+              <span>主机</span>
+              <span class="fixed-host">127.0.0.1</span>
+            </label>
+            <label>
+              <span>端口</span>
+              <input
+                id="connection-port"
+                name="port"
+                type="number"
+                min="1"
+                max="65535"
+                step="1"
+                inputmode="numeric"
+                required
+              />
+            </label>
+          </div>
+          <label class="token-field">
+            <span>配对 Token</span>
+            <input
+              id="connection-token"
+              name="token"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="输入或替换 Token"
+            />
+          </label>
+          <p id="connection-detail" class="connection-detail"></p>
+          <div class="connection-actions">
+            <button id="save-connection" type="submit">保存并连接</button>
+            <button id="reconnect" type="button" class="secondary">重新连接</button>
+            <button id="clear-token" type="button" class="danger">清除 Token</button>
+          </div>
+        </form>
+      </section>
       <section aria-labelledby="workspace-title">
         <h2 id="workspace-title">任务</h2>
         <div class="empty-state">

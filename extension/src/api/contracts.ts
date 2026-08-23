@@ -1,4 +1,4 @@
-export const CONTRACT_VERSION = "phase-3-checkpoint-1";
+export const CONTRACT_VERSION = "phase-3-checkpoint-2";
 
 export const JOB_STATUSES = [
   "queued",

@@ -73,7 +73,7 @@ test("unpacked extension reads frozen local API contracts without leaking its to
     page.on("console", (message) => consoleMessages.push(message.text()));
     await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
     await expect(page.getByRole("heading", { name: "Local Video Transcriber" })).toBeVisible();
-    await expect(page.getByRole("status")).toHaveText("尚未连接");
+    await expect(page.locator("#connection-status")).toHaveText("请先设置本地端口和配对 Token");
 
     const panelBehavior = await worker.evaluate(async () => chrome.sidePanel.getPanelBehavior());
     const panelOptions = await worker.evaluate(async () => chrome.sidePanel.getOptions({}));
@@ -140,6 +140,56 @@ test("unpacked extension reads frozen local API contracts without leaking its to
     expect(Object.values(responses).every((response) => !response.url.includes(TOKEN))).toBe(true);
     expect(await page.locator("body").innerText()).not.toContain(TOKEN);
     expect(consoleMessages.join("\n")).not.toContain(TOKEN);
+  } finally {
+    await context?.close();
+    await rm(profile, { force: true, recursive: true });
+  }
+});
+
+test("side panel restores connection summary and clears its trusted token", async () => {
+  const profile = await mkdtemp(resolve(tmpdir(), "lvt-chromium-profile-"));
+  let context: BrowserContext | undefined;
+  try {
+    context = await chromium.launchPersistentContext(profile, {
+      channel: "chromium",
+      headless: true,
+      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    });
+    const worker = await extensionWorker(context);
+    const extensionId = new URL(worker.url()).host;
+    await worker.evaluate(
+      async ({ port, token }) =>
+        chrome.storage.local.set({
+          lvtConnection: { port, token },
+        }),
+      { port: Number(new URL(baseUrl).port), token: TOKEN },
+    );
+    const authenticatedPaths = new Set<string>();
+    context.on("request", (request) => {
+      if (request.url().startsWith(baseUrl) && request.headers()["x-lvt-token"] === TOKEN) {
+        authenticatedPaths.add(new URL(request.url()).pathname);
+      }
+    });
+
+    const page = await context.newPage();
+    await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+
+    await expect(page.locator("#connection-port")).toHaveValue(new URL(baseUrl).port);
+    await expect(page.locator("#connection-token")).toHaveValue("");
+    await expect(page.locator("#token-state")).toHaveText("Token 已保存");
+    await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
+    await expect
+      .poll(() => [...authenticatedPaths].sort())
+      .toEqual(["/api/v1/capabilities", "/api/v1/jobs", "/api/v1/settings"]);
+    await expect(page.locator("body")).not.toContainText(TOKEN);
+
+    await page.getByRole("button", { name: "清除 Token" }).click();
+    await expect(page.locator("#token-state")).toHaveText("未保存 Token");
+    await expect(page.locator("#connection-status")).toHaveText("请先设置本地端口和配对 Token");
+    const persisted = await worker.evaluate(async () => chrome.storage.local.get("lvtConnection"));
+    expect(persisted).toEqual({
+      lvtConnection: { port: Number(new URL(baseUrl).port) },
+    });
   } finally {
     await context?.close();
     await rm(profile, { force: true, recursive: true });
