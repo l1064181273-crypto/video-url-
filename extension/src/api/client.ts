@@ -195,14 +195,10 @@ export function buildLocalApiUrl(port: number, path: string): URL {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new ApiClientError("notConfigured", "本地端口必须是 1 到 65535 的整数");
   }
-  if (
-    !path.startsWith("/") ||
-    path.startsWith("//") ||
-    path.includes("\\") ||
-    /(?:^|\/)\.\.(?:\/|$|\?|#)/u.test(path)
-  ) {
-    throw new ApiClientError("invalidResponse", "本地 API 路径无效");
+  if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) {
+    throw invalidApiPath();
   }
+  assertSafePathSegments(path);
   const baseUrl = new URL("http://127.0.0.1/");
   baseUrl.port = String(port);
   const origin = baseUrl.origin;
@@ -216,6 +212,31 @@ export function buildLocalApiUrl(port: number, path: string): URL {
     throw new ApiClientError("invalidResponse", "本地 API 地址无效");
   }
   return url;
+}
+
+function assertSafePathSegments(path: string): void {
+  try {
+    decodeURIComponent(path);
+  } catch {
+    throw invalidApiPath();
+  }
+  const suffixIndex = path.search(/[?#]/u);
+  const pathname = suffixIndex === -1 ? path : path.slice(0, suffixIndex);
+  for (const segment of pathname.split("/")) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      throw invalidApiPath();
+    }
+    if (segment === "." || segment === ".." || decoded === "." || decoded === "..") {
+      throw invalidApiPath();
+    }
+  }
+}
+
+function invalidApiPath(): ApiClientError {
+  return new ApiClientError("invalidResponse", "本地 API 路径无效");
 }
 
 function isJsonResponse(response: Response): boolean {

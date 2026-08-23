@@ -26,10 +26,56 @@ class MutableConnectionSource implements ConnectionSource {
 describe("local API transport security", () => {
   it("constructs only the validated loopback origin", () => {
     expect(buildLocalApiUrl(PORT, "/api/v1/jobs").href).toBe("http://127.0.0.1:9123/api/v1/jobs");
+    expect(buildLocalApiUrl(PORT, "/api/v1/jobs?offset=0#details").href).toBe(
+      "http://127.0.0.1:9123/api/v1/jobs?offset=0#details",
+    );
     expect(() => buildLocalApiUrl(0, "/health")).toThrow();
     expect(() => buildLocalApiUrl(PORT, "http://evil.test/jobs")).toThrow();
     expect(() => buildLocalApiUrl(PORT, "//evil.test/jobs")).toThrow();
     expect(() => buildLocalApiUrl(PORT, "/../secret")).toThrow();
+  });
+
+  it.each([
+    ["/api/%2e%2e/health", "/health"],
+    ["/api/%2E%2E/health", "/health"],
+    ["/api/%2e./health", "/health"],
+    ["/api/.%2e/health", "/health"],
+    ["/api/%2e/health", "/api/health"],
+    ["/api/./health", "/api/health"],
+  ])("rejects encoded or literal dot path segment %s before fetch", async (path, normalized) => {
+    const fetcher = vi.fn<typeof fetch>(() => Promise.resolve(jsonResponse({ status: "healthy" })));
+    const transport = new LocalApiTransport(new MutableConnectionSource(), fetcher);
+
+    await expect(transport.requestJson(path, "health")).rejects.toMatchObject({
+      kind: "invalidResponse",
+    });
+
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(new URL(path, "http://127.0.0.1:9123/").pathname).toBe(normalized);
+  });
+
+  it.each([
+    "/api/%/health",
+    "/api/%2/health",
+    "/api/%GG/health",
+    "/api/v1/jobs?cursor=%GG",
+    "/api/v1/jobs#view-%2",
+  ])("rejects malformed percent encoding %s before fetch", async (path) => {
+    const fetcher = vi.fn<typeof fetch>(() => Promise.resolve(jsonResponse({ status: "healthy" })));
+    const transport = new LocalApiTransport(new MutableConnectionSource(), fetcher);
+
+    await expect(transport.requestJson(path, "health")).rejects.toMatchObject({
+      kind: "invalidResponse",
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("keeps percent encoding in query and fragment without treating it as a path segment", () => {
+    const url = buildLocalApiUrl(PORT, "/api/v1/jobs?cursor=%2e%2e#view-%2E");
+
+    expect(url.pathname).toBe("/api/v1/jobs");
+    expect(url.search).toBe("?cursor=%2e%2e");
+    expect(url.hash).toBe("#view-%2E");
   });
 
   it("reads the current token for every request and never places it in the URL", async () => {
