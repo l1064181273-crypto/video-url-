@@ -712,6 +712,83 @@ def test_settings_update_applies_to_new_claims_in_running_pool(tmp_path: Path) -
         assert app.state.worker_pool.concurrency == 1
 
 
+def test_settings_same_value_rejects_recorded_fatal_before_worker_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(
+        db_path=tmp_path / "settings-same-value-fatal.sqlite3",
+        api_token="token",
+        pipeline_builder=lambda _repository: PassivePipeline(),
+        worker_concurrency=2,
+        worker_poll_interval=60,
+    )
+    repository: JobRepository = app.state.repository
+    worker_pool = app.state.worker_pool
+    assert worker_pool is not None
+    failure_enabled = threading.Event()
+    fatal_recorded = threading.Event()
+    release_fatal_worker = threading.Event()
+    injection_lock = threading.Lock()
+    failure_injected = False
+    original_peek = repository.peek_next_queued
+
+    def fail_once(*args: Any, **kwargs: Any) -> Any:
+        nonlocal failure_injected
+        if failure_enabled.is_set():
+            with injection_lock:
+                if not failure_injected:
+                    failure_injected = True
+                    raise RuntimeError("injected worker loop failure")
+        return original_peek(*args, **kwargs)
+
+    original_record_fatal = worker_pool._record_fatal
+
+    def record_fatal_and_block(
+        worker_index: int | None,
+        phase: str,
+        error: BaseException,
+    ) -> None:
+        original_record_fatal(worker_index, phase, error)
+        fatal_recorded.set()
+        assert release_fatal_worker.wait(timeout=5)
+
+    monkeypatch.setattr(repository, "peek_next_queued", fail_once)
+    monkeypatch.setattr(worker_pool, "_record_fatal", record_fatal_and_block)
+    with TestClient(app) as client:
+        try:
+            healthy_no_op = client.patch(
+                "/api/v1/settings",
+                headers=TOKEN_HEADER,
+                json={"worker_concurrency": 2},
+            )
+            assert healthy_no_op.status_code == 200
+
+            failure_enabled.set()
+            worker_pool.notify()
+            assert fatal_recorded.wait(timeout=2)
+            assert all(thread.is_alive() for thread in worker_pool._threads)
+
+            failed_no_op = client.patch(
+                "/api/v1/settings",
+                headers=TOKEN_HEADER,
+                json={"worker_concurrency": 2},
+            )
+            assert failed_no_op.status_code == 503
+            assert _detail_code(failed_no_op) == "SETTINGS_APPLY_FAILED"
+
+            health = client.get("/health")
+            assert health.status_code == 503
+            assert health.json()["worker"] == {
+                "status": "unhealthy",
+                "configured_workers": 2,
+                "live_workers": 2,
+                "fatal_count": 1,
+            }
+        finally:
+            release_fatal_worker.set()
+
+
 def test_settings_runtime_increase_failure_keeps_previous_value(tmp_path: Path) -> None:
     calls = 0
 

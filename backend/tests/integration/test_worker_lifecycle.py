@@ -387,6 +387,64 @@ def test_runtime_concurrency_increase_failure_rolls_back_setting_and_thread(
     pool.stop()
 
 
+def test_same_concurrency_rejects_recorded_fatal_before_worker_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(tmp_path / "same-concurrency-fatal.sqlite3")
+    failure_enabled = threading.Event()
+    fatal_recorded = threading.Event()
+    release_fatal_worker = threading.Event()
+    injection_lock = threading.Lock()
+    failure_injected = False
+    original_peek = repository.peek_next_queued
+
+    def fail_once(*args: Any, **kwargs: Any) -> Any:
+        nonlocal failure_injected
+        if failure_enabled.is_set():
+            with injection_lock:
+                if not failure_injected:
+                    failure_injected = True
+                    raise RuntimeError("injected worker loop failure")
+        return original_peek(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "peek_next_queued", fail_once)
+    pool = JobWorkerPool(
+        repository=repository,
+        pipeline_factory=PassivePipeline,
+        concurrency=2,
+        poll_interval=60,
+    )
+    original_record_fatal = pool._record_fatal
+
+    def record_fatal_and_block(
+        worker_index: int | None,
+        phase: str,
+        error: BaseException,
+    ) -> None:
+        original_record_fatal(worker_index, phase, error)
+        fatal_recorded.set()
+        assert release_fatal_worker.wait(timeout=5)
+
+    monkeypatch.setattr(pool, "_record_fatal", record_fatal_and_block)
+    pool.start()
+    try:
+        assert pool.live_thread_count == 2
+        failure_enabled.set()
+        pool.notify()
+        assert fatal_recorded.wait(timeout=2)
+        assert all(thread.is_alive() for thread in pool._threads)
+
+        with pytest.raises(
+            WorkerStartupError,
+            match="configured worker capacity is unhealthy",
+        ):
+            pool.update_concurrency(2)
+    finally:
+        release_fatal_worker.set()
+        pool.stop()
+
+
 @pytest.mark.parametrize("failure_point", ["resolver", "peek", "claim"])
 def test_worker_loop_records_fatal_errors_without_hot_loop(
     tmp_path: Path,

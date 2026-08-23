@@ -228,13 +228,13 @@ class JobWorkerPool:
                 index < len(self._threads) and self._threads[index].is_alive()
                 for index in range(concurrency)
             )
+            if concurrency == previous and self.fatal_errors:
+                raise WorkerStartupError("configured worker capacity is unhealthy")
             if concurrency == previous and required_threads_alive:
                 self.repository.set_worker_concurrency(concurrency)
                 self._capacity_condition.notify_all()
                 self._wake.set()
                 return
-            if concurrency == previous and self.fatal_errors:
-                raise WorkerStartupError("configured worker capacity is unhealthy")
             if concurrency < previous:
                 self.repository.set_worker_concurrency(concurrency)
                 self.concurrency = concurrency
