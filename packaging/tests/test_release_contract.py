@@ -64,6 +64,7 @@ def _copy_license_contract(destination: Path) -> None:
 
 def validate_dependencies(payload: dict[str, Any]) -> None:
     license_inventory.validate_dependency_manifest(payload)
+    license_inventory.validate_component_license_evidence(ROOT, payload)
 
 
 def test_versions_are_consistent() -> None:
@@ -103,6 +104,76 @@ def test_each_version_source_mismatch_is_rejected(
 
 def test_dependency_manifest_is_fully_pinned() -> None:
     validate_dependencies(_dependencies())
+
+
+@pytest.mark.parametrize("size", [True, False, 0, -1, "1", 1.0])
+def test_artifact_size_must_be_a_positive_non_boolean_integer(size: Any) -> None:
+    payload = copy.deepcopy(_dependencies())
+    payload["artifacts"][0]["size"] = size
+    with pytest.raises(ValueError, match="dependency size is invalid"):
+        validate_dependencies(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda item: item.pop("media_type"),
+        lambda item: item.update(media_type=""),
+        lambda item: item.update(media_type=1),
+    ],
+    ids=["missing", "empty", "integer"],
+)
+def test_artifact_media_type_must_be_a_nonempty_string(mutation: Any) -> None:
+    payload = copy.deepcopy(_dependencies())
+    mutation(payload["artifacts"][0])
+    with pytest.raises(ValueError, match="dependency media type is invalid"):
+        validate_dependencies(payload)
+
+
+@pytest.mark.parametrize(
+    "expected_files",
+    [
+        "bin/tool",
+        [],
+        [1],
+        ["/absolute/path"],
+        ["../escape"],
+        ["."],
+        [".."],
+        [r"bin\tool"],
+    ],
+    ids=[
+        "string",
+        "empty-list",
+        "non-string-entry",
+        "absolute",
+        "traversal",
+        "dot",
+        "dot-dot",
+        "backslash",
+    ],
+)
+def test_artifact_expected_files_must_be_safe_relative_paths(expected_files: Any) -> None:
+    payload = copy.deepcopy(_dependencies())
+    payload["artifacts"][0]["expected_files"] = expected_files
+    with pytest.raises(ValueError, match="dependency expected file"):
+        validate_dependencies(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("path", "docs/LICENSES/Apache-2.0.txt"),
+        ("sha256", "0" * 64),
+        ("size", 1),
+        ("required_notice", "changed notice"),
+    ],
+)
+def test_component_license_evidence_metadata_drift_is_rejected(field: str, value: Any) -> None:
+    payload = copy.deepcopy(_dependencies())
+    payload["ollama_models"][0]["license_evidence"][field] = value
+    with pytest.raises(ValueError, match="component license evidence metadata mismatch"):
+        validate_dependencies(payload)
 
 
 @pytest.mark.parametrize(

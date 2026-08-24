@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -106,6 +106,21 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _validate_expected_files(value: Any, identifier: str) -> None:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"dependency expected files are invalid: {identifier}")
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(f"dependency expected file is invalid: {identifier}")
+        if (
+            "\\" in entry
+            or PurePosixPath(entry).is_absolute()
+            or PureWindowsPath(entry).is_absolute()
+            or any(part in {"", ".", ".."} for part in entry.split("/"))
+        ):
+            raise ValueError(f"dependency expected file path is unsafe: {identifier}")
+
+
 def validate_dependency_manifest(payload: dict[str, Any]) -> None:
     if payload.get("schema_version") != 1 or payload.get("target") != "macos-arm64":
         raise ValueError("dependency manifest schema or target is invalid")
@@ -135,10 +150,15 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
             raise ValueError(f"dependency architecture is not arm64: {identifier}")
         if not isinstance(item.get("sha256"), str) or not SHA256.fullmatch(item["sha256"]):
             raise ValueError(f"dependency SHA-256 is invalid: {identifier}")
-        if not isinstance(item.get("size"), int) or item["size"] <= 0:
+        if (
+            not isinstance(item.get("size"), int)
+            or isinstance(item.get("size"), bool)
+            or item["size"] <= 0
+        ):
             raise ValueError(f"dependency size is invalid: {identifier}")
-        if not item.get("media_type") or not item.get("expected_files"):
-            raise ValueError(f"dependency metadata is incomplete: {identifier}")
+        if not isinstance(item.get("media_type"), str) or not item["media_type"].strip():
+            raise ValueError(f"dependency media type is invalid: {identifier}")
+        _validate_expected_files(item.get("expected_files"), identifier)
         if item.get("license") not in KNOWN_LICENSES:
             raise ValueError(f"unknown license for {identifier}: {item.get('license')!r}")
         license_url = item.get("license_url")
@@ -212,7 +232,8 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
             or FLOATING.search(license_url)
         ):
             raise ValueError(f"license source is not immutable HTTPS: {identifier}")
-        if not model.get("expected_files") or not model.get("blobs"):
+        _validate_expected_files(model.get("expected_files"), identifier)
+        if not model.get("blobs"):
             raise ValueError(f"Ollama model metadata is incomplete: {identifier}")
         for blob in model["blobs"]:
             if not isinstance(blob.get("digest"), str) or not re.fullmatch(
