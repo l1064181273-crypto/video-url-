@@ -1,5 +1,14 @@
 import { LocalApiClient, LocalApiTransport } from "./api/client";
-import type { ArtifactKind, Job, JobArtifact, JobEvent, JobOptions } from "./api/contracts";
+import type {
+  ArtifactKind,
+  CapabilitiesResponse,
+  CapabilityComponentName,
+  Job,
+  JobArtifact,
+  JobEvent,
+  JobOptions,
+  SettingsResponse,
+} from "./api/contracts";
 import { ApiClientError } from "./api/errors";
 import { ArtifactDownloadService } from "./artifacts/download";
 import {
@@ -31,6 +40,12 @@ import {
   jobActionAvailability,
 } from "./ui/job-actions";
 import { eventMessageSummary, eventStatusLabel, mergeEventPages } from "./ui/events";
+import {
+  capabilityPresentations,
+  jobErrorAdvice,
+  settingsErrorMessage,
+  SettingsUpdateGate,
+} from "./ui/diagnostics";
 
 document.documentElement.dataset.contractVersion = CONTRACT_VERSION;
 
@@ -43,6 +58,11 @@ const tokenInput = requireElement("#connection-token", HTMLInputElement);
 const saveButton = requireElement("#save-connection", HTMLButtonElement);
 const reconnectButton = requireElement("#reconnect", HTMLButtonElement);
 const clearButton = requireElement("#clear-token", HTMLButtonElement);
+const concurrencyControl = requireElement("#concurrency-control", HTMLDivElement);
+const runtimeEffect = requireElement("#runtime-effect", HTMLSpanElement);
+const settingsMessage = requireElement("#settings-message", HTMLParagraphElement);
+const capabilitiesCheckedAt = requireElement("#capabilities-checked-at", HTMLTimeElement);
+const capabilitiesList = requireElement("#capabilities-list", HTMLDivElement);
 const jobForm = requireElement("#job-form", HTMLFormElement);
 const urlsInput = requireElement("#job-urls", HTMLTextAreaElement);
 const urlCount = requireElement("#url-count", HTMLSpanElement);
@@ -73,6 +93,9 @@ const detailRetryCycle = requireElement("#detail-retry-cycle", HTMLElement);
 const detailAsrModel = requireElement("#detail-asr-model", HTMLElement);
 const detailTranslateTo = requireElement("#detail-translate-to", HTMLElement);
 const detailDiarization = requireElement("#detail-diarization", HTMLElement);
+const detailErrorAdvice = requireElement("#detail-error-advice", HTMLElement);
+const detailErrorCode = requireElement("#detail-error-code", HTMLElement);
+const detailErrorNextStep = requireElement("#detail-error-next-step", HTMLElement);
 const detailActions = requireElement("#detail-actions", HTMLDivElement);
 const detailActionMessage = requireElement("#detail-action-message", HTMLParagraphElement);
 const eventCount = requireElement("#event-count", HTMLSpanElement);
@@ -116,6 +139,15 @@ let deleteTargetJobId: string | null = null;
 let deleteReturnFocus: HTMLButtonElement | null = null;
 const jobRows = new Map<string, HTMLElement>();
 const actionGate = new JobActionGate();
+const settingsGate = new SettingsUpdateGate();
+const capabilityRows = new Map<CapabilityComponentName, HTMLElement>();
+let confirmedSettings: SettingsResponse | null = null;
+let pendingSettings:
+  | {
+      generation: number;
+      value: SettingsResponse;
+    }
+  | undefined;
 
 const connectionStorage = new ConnectionSettingsStorage();
 const apiClient = new LocalApiClient(new LocalApiTransport(connectionStorage));
@@ -132,6 +164,27 @@ const unsubscribe = store.subscribe((state) => {
   status.textContent = state.connection.message;
   status.dataset.status = state.connection.status;
   connected = state.connection.status === "healthy";
+  if (state.connection.status === "notConfigured") {
+    confirmedSettings = null;
+    pendingSettings = undefined;
+  }
+  if (
+    pendingSettings !== undefined &&
+    state.connection.status === "healthy" &&
+    state.generation >= pendingSettings.generation
+  ) {
+    pendingSettings = undefined;
+  }
+  if (pendingSettings === undefined && state.settings !== null) {
+    confirmedSettings = state.settings;
+  }
+  renderRuntimeSettings(
+    state.connection.status === "notConfigured"
+      ? null
+      : (pendingSettings?.value ?? confirmedSettings),
+    connected,
+  );
+  renderCapabilities(state.connection.status === "notConfigured" ? null : state.capabilities);
   renderJobs(state.jobs, state.connection.status);
   if (selectedJobId !== null) {
     const selected = state.jobs.find((job) => job.uuid === selectedJobId);
@@ -155,6 +208,17 @@ reconnectButton.addEventListener("click", () => {
 
 clearButton.addEventListener("click", () => {
   void clearToken();
+});
+
+concurrencyControl.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement)) {
+    return;
+  }
+  const concurrency = Number(target.dataset.concurrency);
+  if (concurrency === 1 || concurrency === 2) {
+    void updateWorkerConcurrency(concurrency);
+  }
 });
 
 urlsInput.addEventListener("input", () => {
@@ -411,6 +475,111 @@ function startPolling(): void {
   detail.textContent = "";
   const generation = poller.restart();
   store.beginGeneration(generation);
+}
+
+async function updateWorkerConcurrency(workerConcurrency: 1 | 2): Promise<void> {
+  if (
+    !connected ||
+    settingsGate.isBusy() ||
+    confirmedSettings?.workerConcurrency === workerConcurrency
+  ) {
+    return;
+  }
+  poller.stop();
+  const request = settingsGate.run(() => apiClient.updateSettings(workerConcurrency));
+  if (request === undefined) {
+    return;
+  }
+  settingsMessage.textContent = "";
+  renderRuntimeSettings(confirmedSettings, connected);
+  try {
+    const response = await request;
+    confirmedSettings = response;
+    settingsMessage.textContent = "后端运行设置已更新";
+    const generation = poller.restart();
+    pendingSettings = { generation, value: response };
+    store.beginGeneration(generation);
+  } catch (error) {
+    settingsMessage.textContent = settingsErrorMessage(error);
+    const generation = poller.restart();
+    store.beginGeneration(generation);
+  } finally {
+    renderRuntimeSettings(pendingSettings?.value ?? confirmedSettings, connected);
+  }
+}
+
+function renderRuntimeSettings(settings: SettingsResponse | null, isConnected: boolean): void {
+  for (const button of concurrencyControl.querySelectorAll<HTMLButtonElement>(
+    "[data-concurrency]",
+  )) {
+    const selected =
+      settings !== null && Number(button.dataset.concurrency) === settings.workerConcurrency;
+    button.setAttribute("aria-pressed", String(selected));
+    button.disabled = !isConnected || settingsGate.isBusy();
+  }
+  runtimeEffect.textContent =
+    settings === null
+      ? "等待连接"
+      : settings.runtimeEffect === "new_claims_only"
+        ? "新任务领取立即生效"
+        : "下次 worker 启动生效";
+}
+
+function renderCapabilities(capabilities: CapabilitiesResponse | null): void {
+  if (capabilities === null) {
+    capabilitiesCheckedAt.removeAttribute("datetime");
+    capabilitiesCheckedAt.textContent = "等待连接";
+    capabilitiesList.replaceChildren();
+    capabilityRows.clear();
+    return;
+  }
+  capabilitiesCheckedAt.dateTime = capabilities.checkedAt;
+  capabilitiesCheckedAt.textContent = `检查 ${formatCheckedAt(capabilities.checkedAt)}`;
+  for (const presentation of capabilityPresentations(capabilities)) {
+    const row = capabilityRows.get(presentation.name) ?? createCapabilityRow(presentation.name);
+    capabilityField(row, "name").textContent = presentation.label;
+    const statusElement = capabilityField(row, "status");
+    statusElement.textContent = presentation.statusLabel;
+    statusElement.dataset.status = presentation.status;
+    capabilityField(row, "advice").textContent = presentation.advice;
+  }
+}
+
+function formatCheckedAt(value: string): string {
+  return value.slice(0, 19).replace("T", " ");
+}
+
+function createCapabilityRow(name: CapabilityComponentName): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "capability-row";
+  row.dataset.capability = name;
+  row.append(
+    capabilityElement("span", "capability-name", "name"),
+    capabilityElement("span", "capability-status", "status"),
+    capabilityElement("span", "capability-advice", "advice"),
+  );
+  capabilityRows.set(name, row);
+  capabilitiesList.append(row);
+  return row;
+}
+
+function capabilityElement<K extends keyof HTMLElementTagNameMap>(
+  tagName: K,
+  className: string,
+  field: string,
+): HTMLElementTagNameMap[K] {
+  const element = document.createElement(tagName);
+  element.className = className;
+  element.dataset.capabilityField = field;
+  return element;
+}
+
+function capabilityField(row: HTMLElement, field: string): HTMLElement {
+  const element = row.querySelector<HTMLElement>(`[data-capability-field="${field}"]`);
+  if (element === null) {
+    throw new Error(`Missing capability field: ${field}`);
+  }
+  return element;
 }
 
 async function submitJobs(): Promise<void> {
@@ -702,6 +871,9 @@ function renderJobDetail(job: Job): void {
   detailAsrModel.textContent = job.options.asrModel;
   detailTranslateTo.textContent = job.options.translateTo;
   detailDiarization.textContent = job.options.diarization ? "已启用" : "未启用";
+  detailErrorAdvice.hidden = job.errorCode === null;
+  detailErrorCode.textContent = job.errorCode ?? "";
+  detailErrorNextStep.textContent = job.errorCode === null ? "" : jobErrorAdvice(job.errorCode);
 
   const availability = jobActionAvailability(job.status);
   const buttons = (["cancel", "retry", "delete"] as const)

@@ -5,9 +5,19 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { chromium, expect, test, type BrowserContext, type Worker } from "@playwright/test";
+import {
+  chromium,
+  expect,
+  test,
+  type BrowserContext,
+  type Page,
+  type Route,
+  type Worker,
+} from "@playwright/test";
 
 import {
+  type CapabilityComponentName,
+  type CapabilityStatus,
   parseApiErrorResponse,
   parseCapabilitiesResponse,
   parseCreateJobsResponse,
@@ -195,6 +205,283 @@ test("side panel restores connection summary and clears its trusted token", asyn
     });
   } finally {
     await context?.close();
+    await rm(profile, { force: true, recursive: true });
+  }
+});
+
+test("settings, dynamic capabilities, and safe errors remain backend-authoritative", async () => {
+  const profile = await mkdtemp(resolve(tmpdir(), "lvt-chromium-profile-"));
+  let context: BrowserContext | undefined;
+  let eventJobId: string | undefined;
+  try {
+    context = await chromium.launchPersistentContext(profile, {
+      channel: "chromium",
+      headless: true,
+      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    });
+    const worker = await extensionWorker(context);
+    const extensionId = new URL(worker.url()).host;
+    await worker.evaluate(
+      async ({ port, token }) =>
+        chrome.storage.local.set({
+          lvtConnection: { port, token },
+        }),
+      { port: Number(new URL(baseUrl).port), token: TOKEN },
+    );
+    const consoleMessages: string[] = [];
+    const page = await context.newPage();
+    page.on("console", (message) => consoleMessages.push(message.text()));
+    await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
+    await expect(page.locator(".capability-row")).toHaveCount(7);
+    const concurrencyOne = page.locator('[data-concurrency="1"]');
+    const concurrencyTwo = page.locator('[data-concurrency="2"]');
+    await expect(concurrencyOne).toHaveAttribute("aria-pressed", "true");
+
+    const capabilitySecret = "CapabilityRecursiveSecret";
+    let capabilityResponse = capabilityFixture("2026-08-24T01:02:03+00:00", {
+      ffmpeg: "available",
+      ollama: "unavailable",
+      asr_package: "missing",
+      asr_model: "missing",
+      diarization: "missing",
+      translation_primary: "unchecked",
+      translation_fallback: "unchecked",
+    });
+    const capabilitiesHandler = async (route: Route): Promise<void> => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify(capabilityResponse),
+      });
+    };
+    await page.locator('[data-capability="ffmpeg"]').evaluate((element) => {
+      element.dataset.identityMarker = "preserved";
+    });
+    await page.route(`${baseUrl}/api/v1/capabilities`, capabilitiesHandler);
+    await page.getByRole("button", { name: "重新连接" }).click();
+    await expect(page.locator("#capabilities-checked-at")).toHaveAttribute(
+      "datetime",
+      "2026-08-24T01:02:03+00:00",
+    );
+    await expect(page.locator('[data-capability="ollama"]')).toContainText(
+      "不可用Ollama 未运行，请启动 Ollama",
+    );
+    await expect(page.locator('[data-capability="asr_package"]')).toContainText(
+      "ASR Python 包缺失",
+    );
+    await expect(page.locator('[data-capability="asr_model"]')).toContainText("ASR 模型缺失");
+    await expect(page.locator('[data-capability="diarization"]')).toContainText("说话人模型缺失");
+    await expect(page.locator('[data-capability="translation_primary"]')).toContainText(
+      "等待 Ollama",
+    );
+    await expect(page.locator("body")).not.toContainText(capabilitySecret);
+    await expect(page.locator("body")).not.toContainText("/Users/private");
+    await page.setViewportSize({ width: 360, height: 900 });
+    await expect(page.locator(".runtime-settings-section")).toHaveScreenshot(
+      "checkpoint-5b-runtime-settings-360.png",
+      { animations: "disabled" },
+    );
+    await expect(page.locator(".capabilities-section")).toHaveScreenshot(
+      "checkpoint-5b-capabilities-360.png",
+      { animations: "disabled" },
+    );
+
+    await page.locator("#capabilities-list").evaluate((element) => {
+      const target = element as HTMLElement & { __childMutations?: number };
+      target.__childMutations = 0;
+      new MutationObserver((records) => {
+        target.__childMutations =
+          (target.__childMutations ?? 0) +
+          records.filter((record) => record.type === "childList").length;
+      }).observe(element, { childList: true });
+    });
+    capabilityResponse = capabilityFixture("2026-08-24T01:02:08+00:00", {
+      ffmpeg: "available",
+      ollama: "available",
+      asr_package: "available",
+      asr_model: "available",
+      diarization: "available",
+      translation_primary: "available",
+      translation_fallback: "available",
+    });
+    await page.getByRole("button", { name: "重新连接" }).click();
+    await expect(page.locator("#capabilities-checked-at")).toHaveAttribute(
+      "datetime",
+      "2026-08-24T01:02:08+00:00",
+    );
+    await expect(page.locator('[data-capability="ffmpeg"]')).toHaveAttribute(
+      "data-identity-marker",
+      "preserved",
+    );
+    expect(
+      await page.locator("#capabilities-list").evaluate((element) => {
+        return (element as HTMLElement & { __childMutations?: number }).__childMutations ?? -1;
+      }),
+    ).toBe(0);
+
+    const settingsUrl = `${baseUrl}/api/v1/settings`;
+    let releasePatch!: () => void;
+    let markPatchStarted!: () => void;
+    const patchRelease = new Promise<void>((resolvePromise) => {
+      releasePatch = resolvePromise;
+    });
+    const patchStarted = new Promise<void>((resolvePromise) => {
+      markPatchStarted = resolvePromise;
+    });
+    const delayedPatch = async (route: Route): Promise<void> => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      markPatchStarted();
+      await patchRelease;
+      await route.continue();
+    };
+    await page.route(settingsUrl, delayedPatch);
+    await concurrencyTwo.click();
+    await patchStarted;
+    await expect(concurrencyOne).toHaveAttribute("aria-pressed", "true");
+    await expect(concurrencyTwo).toHaveAttribute("aria-pressed", "false");
+    await expect(concurrencyTwo).toBeDisabled();
+    releasePatch();
+    await expect(concurrencyTwo).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#settings-message")).toHaveText("后端运行设置已更新");
+    await page.unroute(settingsUrl, delayedPatch);
+
+    const recursiveSecret = "Recursive422SecretToken";
+    const privateUrl = "https://private.example/path?token=Recursive422SecretToken";
+    const malicious422 = {
+      detail: [
+        {
+          loc: ["body", "worker_concurrency"],
+          msg: `private ${recursiveSecret}`,
+          input: { url: privateUrl, token: recursiveSecret },
+          ctx: { nested: { traceback: `/Users/private/${recursiveSecret}` } },
+        },
+      ],
+    };
+    await expectSettingsFailure(page, settingsUrl, 422, malicious422, "并发数只能为 1 或 2");
+    await expectSettingsFailure(
+      page,
+      settingsUrl,
+      409,
+      { detail: { error_code: "JOB_STATE_CONFLICT", message: recursiveSecret } },
+      "后端设置已变化，正在刷新，请重试",
+    );
+    await expectSettingsFailure(
+      page,
+      settingsUrl,
+      503,
+      { detail: { error_code: "SETTINGS_APPLY_FAILED", message: recursiveSecret } },
+      "无法应用并发设置，请检查本地 worker 后重试",
+    );
+    await expectSettingsNetworkFailure(page, settingsUrl);
+
+    const jobsHandler = async (route: Route): Promise<void> => {
+      if (route.request().method() === "POST") {
+        await route.fulfill({
+          status: 422,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...malicious422,
+            detail: [{ ...malicious422.detail[0], loc: ["body", "urls"] }],
+          }),
+        });
+      } else {
+        await route.continue();
+      }
+    };
+    await page.route(`${baseUrl}/api/v1/jobs`, jobsHandler);
+    await page.locator("#job-urls").fill("https://example.test/safe-input");
+    await page.getByRole("button", { name: "提交任务" }).click();
+    await expect(page.locator("#submission-result")).toHaveText(
+      "提交内容格式不正确，请检查 URL 数量和任务选项",
+    );
+    await page.unroute(`${baseUrl}/api/v1/jobs`, jobsHandler);
+
+    const eventJob = parseCreateJobsResponse(
+      await page.evaluate(
+        async ({ origin, token }) => {
+          const response = await fetch(`${origin}/api/v1/jobs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-LVT-Token": token },
+            body: JSON.stringify({ urls: ["https://example.test/events-422"] }),
+          });
+          return response.json() as Promise<unknown>;
+        },
+        { origin: baseUrl, token: TOKEN },
+      ),
+    ).accepted[0];
+    if (eventJob === undefined) {
+      throw new Error("events 422 fixture Job was not created");
+    }
+    eventJobId = eventJob.uuid;
+    const eventsPattern = `${baseUrl}/api/v1/jobs/${eventJob.uuid}/events?*`;
+    const eventsHandler = async (route: Route): Promise<void> => {
+      await route.fulfill({
+        status: 422,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...malicious422,
+          detail: [{ ...malicious422.detail[0], loc: ["query", "limit"] }],
+        }),
+      });
+    };
+    await page.route(eventsPattern, eventsHandler);
+    const eventRow = page.locator(`[data-job-id="${eventJob.uuid}"]`);
+    await expect(eventRow).toBeVisible();
+    await eventRow.locator('button[data-action="details"]').click();
+    await expect(page.locator("#timeline-message")).toHaveText(
+      "事件分页参数无效，请重新加载时间线",
+    );
+    await page.unroute(eventsPattern, eventsHandler);
+
+    const serializedDom = await page.locator("html").evaluate((element) => element.outerHTML);
+    expect(serializedDom).not.toContain(recursiveSecret);
+    expect(serializedDom).not.toContain(privateUrl);
+    expect(serializedDom).not.toContain("/Users/private");
+    expect(consoleMessages.join("\n")).not.toContain(recursiveSecret);
+    expect(consoleMessages.join("\n")).not.toContain(privateUrl);
+
+    const replacementToken = "ReplacementInputSecret";
+    await page.locator("#connection-token").fill(replacementToken);
+    await page.getByRole("button", { name: "保存并连接" }).click();
+    await expect(page.locator("#connection-token")).toHaveValue("");
+    expect(
+      await worker.evaluate(
+        async () =>
+          (
+            (await chrome.storage.local.get("lvtConnection")).lvtConnection as {
+              token?: string;
+            }
+          ).token,
+      ),
+    ).toBe(replacementToken);
+    await expect(page.locator("body")).not.toContainText(replacementToken);
+
+    await page.locator("#connection-token").fill(TOKEN);
+    await page.getByRole("button", { name: "保存并连接" }).click();
+    await expect(page.locator("#connection-token")).toHaveValue("");
+    await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
+    await concurrencyOne.click();
+    await expect(concurrencyOne).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "清除 Token" }).click();
+    await expect(page.locator("#connection-token")).toHaveValue("");
+    await expect(page.locator("#connection-status")).toHaveText("请先设置本地端口和配对 Token");
+    expect(
+      await worker.evaluate(async () => {
+        const stored = (await chrome.storage.local.get("lvtConnection")).lvtConnection as {
+          token?: string;
+        };
+        return stored.token;
+      }),
+    ).toBeUndefined();
+    await page.unroute(`${baseUrl}/api/v1/capabilities`, capabilitiesHandler);
+  } finally {
+    await context?.close();
+    if (eventJobId !== undefined) {
+      await deleteJobFixture(eventJobId);
+    }
     await rm(profile, { force: true, recursive: true });
   }
 });
@@ -415,6 +702,12 @@ test("job controls, confirmed delete, and paginated events use the real backend"
     await retryRow.getByRole("button", { name: "查看详情 Retry Target" }).click();
     await expect(page.locator("#detail-job-title")).toHaveText("Retry Target");
     await expect(page.locator("#detail-status")).toHaveText("失败");
+    await expect(page.locator("#detail-error-code")).toHaveText("DOWNLOAD_FAILED");
+    await expect(page.locator("#detail-error-next-step")).toHaveText(
+      "更换公开地址，或检查网络后重试",
+    );
+    await expect(page.locator("body")).not.toContainText("RawBackendTraceSecret");
+    await expect(page.locator("body")).not.toContainText("/Users/private");
     await expect(page.locator("#detail-asr-model")).toHaveText("mlx-community/whisper-small-mlx");
     await expect(page.locator("#event-count")).toHaveText("50 / 55 条");
     await page.getByRole("button", { name: "加载更多" }).click();
@@ -656,6 +949,84 @@ test("completed Job previews and downloads eight artifacts through authenticated
   }
 });
 
+async function expectSettingsFailure(
+  page: Page,
+  settingsUrl: string,
+  status: number,
+  body: unknown,
+  expectedMessage: string,
+): Promise<void> {
+  const handler = async (route: Route): Promise<void> => {
+    if (route.request().method() === "PATCH") {
+      await route.fulfill({
+        status,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+    } else {
+      await route.continue();
+    }
+  };
+  await page.route(settingsUrl, handler);
+  const concurrencyOne = page.locator('[data-concurrency="1"]');
+  const concurrencyTwo = page.locator('[data-concurrency="2"]');
+  await concurrencyOne.click();
+  await expect(page.locator("#settings-message")).toHaveText(expectedMessage);
+  await expect(concurrencyTwo).toHaveAttribute("aria-pressed", "true");
+  await page.unroute(settingsUrl, handler);
+  await expect(concurrencyOne).toBeEnabled();
+}
+
+async function expectSettingsNetworkFailure(page: Page, settingsUrl: string): Promise<void> {
+  const handler = async (route: Route): Promise<void> => {
+    if (route.request().method() === "PATCH") {
+      await route.abort("failed");
+    } else {
+      await route.continue();
+    }
+  };
+  await page.route(settingsUrl, handler);
+  const concurrencyOne = page.locator('[data-concurrency="1"]');
+  const concurrencyTwo = page.locator('[data-concurrency="2"]');
+  await concurrencyOne.click();
+  await expect(page.locator("#settings-message")).toHaveText(
+    "本地服务未启动，请先启动 Local Video Transcriber",
+  );
+  await expect(concurrencyTwo).toHaveAttribute("aria-pressed", "true");
+  await page.unroute(settingsUrl, handler);
+  await expect(concurrencyOne).toBeEnabled();
+}
+
+function capabilityFixture(
+  checkedAt: string,
+  statuses: Record<CapabilityComponentName, CapabilityStatus>,
+): Record<string, unknown> {
+  const component = (name: CapabilityComponentName): Record<string, unknown> => {
+    const value: Record<string, unknown> = {
+      status: statuses[name],
+      checked_at: checkedAt,
+    };
+    if (name === "asr_model" || name === "translation_primary" || name === "translation_fallback") {
+      value.model =
+        name === "asr_model"
+          ? "/Users/private/CapabilityRecursiveSecret"
+          : `env:CapabilityRecursiveSecret:${name}`;
+    }
+    return value;
+  };
+  return {
+    checked_at: checkedAt,
+    ttl_seconds: 5,
+    ffmpeg: component("ffmpeg"),
+    ollama: component("ollama"),
+    asr_package: component("asr_package"),
+    asr_model: component("asr_model"),
+    diarization: component("diarization"),
+    translation_primary: component("translation_primary"),
+    translation_fallback: component("translation_fallback"),
+  };
+}
+
 async function extensionWorker(context: BrowserContext): Promise<Worker> {
   const existing = context.serviceWorkers()[0];
   return existing ?? context.waitForEvent("serviceworker");
@@ -688,6 +1059,26 @@ async function seedCompletedJobForLayout(jobId: string, title: string): Promise<
   ]);
 }
 
+async function deleteJobFixture(jobId: string): Promise<void> {
+  if (dataRoot === undefined) {
+    throw new Error("E2E data root was not initialized");
+  }
+  const database = resolve(dataRoot, "db/lvt.sqlite3");
+  await execFileAsync(PYTHON, [
+    "-c",
+    [
+      "import sqlite3, sys",
+      "connection = sqlite3.connect(sys.argv[1])",
+      "connection.execute('PRAGMA foreign_keys = ON')",
+      "connection.execute('DELETE FROM jobs WHERE uuid = ?', (sys.argv[2],))",
+      "connection.commit()",
+      "connection.close()",
+    ].join("; "),
+    database,
+    jobId,
+  ]);
+}
+
 async function seedControlJobs(
   cancelJobId: string,
   retryJobId: string,
@@ -712,7 +1103,8 @@ async function seedControlJobs(
       [
         "connection.execute(",
         "\"UPDATE jobs SET title = 'Retry Target', status = 'failed', \"",
-        "\"error_code = 'DOWNLOAD_FAILED', error_message = 'download failed', \"",
+        "\"error_code = 'DOWNLOAD_FAILED', \"",
+        "\"error_message = 'Traceback /Users/private/RawBackendTraceSecret', \"",
         "\"active_run_id = NULL, finished_at = '2026-08-23T10:02:03+00:00' WHERE uuid = ?\",",
         "(sys.argv[3],))",
       ].join(""),

@@ -159,6 +159,31 @@ describe("local API transport security", () => {
 });
 
 describe("typed API client", () => {
+  it("updates worker concurrency with a validated PATCH response", async () => {
+    const requests: RequestInit[] = [];
+    const fetcher = vi.fn<typeof fetch>((_input, init) => {
+      requests.push(init ?? {});
+      return Promise.resolve(
+        jsonResponse({
+          worker_concurrency: 2,
+          runtime_effect: "new_claims_only",
+        }),
+      );
+    });
+    const client = new LocalApiClient(
+      new LocalApiTransport(new MutableConnectionSource(), fetcher),
+    );
+
+    await expect(client.updateSettings(2)).resolves.toEqual({
+      workerConcurrency: 2,
+      runtimeEffect: "new_claims_only",
+    });
+    expect(requests[0]?.method).toBe("PATCH");
+    const requestBody = requests[0]?.body;
+    expect(typeof requestBody).toBe("string");
+    expect(JSON.parse(requestBody as string)).toEqual({ worker_concurrency: 2 });
+  });
+
   it("submits batch URLs and JobOptions as authenticated JSON", async () => {
     const requests: { init: RequestInit; url: string }[] = [];
     const fetcher = vi.fn<typeof fetch>((input, init) => {

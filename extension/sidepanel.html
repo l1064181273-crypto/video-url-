@@ -17,7 +17,7 @@
     <main>
       <section class="connection-section" aria-labelledby="connection-title">
         <div class="section-heading">
-          <h2 id="connection-title">本地连接</h2>
+          <h2 id="connection-title">扩展本地设置</h2>
           <span id="token-state" class="token-state">未保存 Token</span>
         </div>
         <form id="connection-form" novalidate>
@@ -58,6 +58,35 @@
             <button id="clear-token" type="button" class="danger">清除 Token</button>
           </div>
         </form>
+      </section>
+      <section class="runtime-settings-section" aria-labelledby="runtime-settings-title">
+        <div class="section-heading">
+          <h2 id="runtime-settings-title">后端运行设置</h2>
+          <span id="runtime-effect" class="input-summary">等待连接</span>
+        </div>
+        <div class="runtime-setting-row">
+          <div>
+            <span class="setting-label">Worker concurrency</span>
+            <p class="setting-description">输出目录由本地服务管理</p>
+          </div>
+          <div
+            id="concurrency-control"
+            class="segmented-control"
+            role="group"
+            aria-label="Worker concurrency"
+          >
+            <button type="button" data-concurrency="1" aria-pressed="false" disabled>1</button>
+            <button type="button" data-concurrency="2" aria-pressed="false" disabled>2</button>
+          </div>
+        </div>
+        <p id="settings-message" class="form-message" role="status"></p>
+      </section>
+      <section class="capabilities-section" aria-labelledby="capabilities-title">
+        <div class="section-heading">
+          <h2 id="capabilities-title">本地能力</h2>
+          <time id="capabilities-checked-at">等待连接</time>
+        </div>
+        <div id="capabilities-list" class="capabilities-list"></div>
       </section>
       <section class="submission-section" aria-labelledby="submission-title">
         <div class="section-heading">
@@ -158,6 +187,10 @@
             <dd id="detail-retry-cycle"></dd>
           </div>
         </dl>
+        <div id="detail-error-advice" class="detail-error-advice" hidden>
+          <strong id="detail-error-code"></strong>
+          <span id="detail-error-next-step"></span>
+        </div>
         <dl class="detail-options">
           <div>
             <dt>ASR 模型</dt>

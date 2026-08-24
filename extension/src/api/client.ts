@@ -181,6 +181,17 @@ export class LocalApiClient {
     );
   }
 
+  async updateSettings(workerConcurrency: 1 | 2, signal?: AbortSignal): Promise<SettingsResponse> {
+    return parseContract(
+      await this.transport.requestJson("/api/v1/settings", "settings", {
+        method: "PATCH",
+        body: { worker_concurrency: workerConcurrency },
+        signal,
+      }),
+      parseSettingsResponse,
+    );
+  }
+
   async getCapabilities(signal?: AbortSignal): Promise<CapabilitiesResponse> {
     return parseContract(
       await this.transport.requestJson("/api/v1/capabilities", "capabilities", { signal }),
