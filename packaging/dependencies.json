@@ -51,8 +51,17 @@
       "size": 188366366,
       "media_type": "application/zip",
       "license": "MIT",
-      "license_url": "https://github.com/ollama/ollama/blob/v0.32.15/LICENSE",
-      "expected_files": ["Ollama.app/Contents/MacOS/ollama"]
+      "license_url": "https://raw.githubusercontent.com/ollama/ollama/v0.32.15/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Ollama-MIT.txt",
+        "sha256": "5934ed2ce0d15154bcdb9c85203210abac0da4314af34081e36df4599f90b226",
+        "required_notice": "Copyright (c) Ollama"
+      },
+      "expected_files": [
+        "Ollama.app/Contents/MacOS/Ollama",
+        "Ollama.app/Contents/Resources/ollama"
+      ],
+      "executable": "Ollama.app/Contents/Resources/ollama"
     },
     {
       "id": "asr-whisper-small-mlx-config",
@@ -65,6 +74,11 @@
       "media_type": "application/json",
       "license": "MIT",
       "license_url": "https://raw.githubusercontent.com/openai/whisper/5f86d1d86363843179951550570367b37c5d6f78/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Whisper-MIT.txt",
+        "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+        "required_notice": "Copyright (c) 2022 OpenAI"
+      },
       "expected_files": ["models/asr/whisper-small-mlx/config.json"]
     },
     {
@@ -78,6 +92,11 @@
       "media_type": "application/octet-stream",
       "license": "MIT",
       "license_url": "https://raw.githubusercontent.com/openai/whisper/5f86d1d86363843179951550570367b37c5d6f78/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Whisper-MIT.txt",
+        "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+        "required_notice": "Copyright (c) 2022 OpenAI"
+      },
       "expected_files": ["models/asr/whisper-small-mlx/weights.npz"]
     },
     {
@@ -91,6 +110,11 @@
       "media_type": "application/x-bzip2",
       "license": "MIT",
       "license_url": "https://huggingface.co/pyannote/segmentation-3.0/resolve/e66f3d3b9eb0873085418a7b813d3b369bf160bb/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Pyannote-Segmentation-MIT.txt",
+        "sha256": "63a777ad4b3c7aed4b260b084d8fb49ec781c46c70c6b599ca5d2402ef7ebe50",
+        "required_notice": "Copyright (c) 2023 CNRS"
+      },
       "expected_files": ["models/diarization/segmentation/model.onnx"]
     },
     {
@@ -116,7 +140,19 @@
       "size": 1133080448,
       "media_type": "application/octet-stream",
       "license": "Apache-2.0",
-      "license_url": "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/blob/1cd5208700acedef4ef93019b6cfc148b8522d45/LICENSE",
+      "license_url": "https://huggingface.co/tencent/Hy-MT2-1.8B/resolve/9a341cd1b679d3efd23b46e847b01745a71ed792/LICENSE.txt",
+      "license_evidence": {
+        "path": "docs/LICENSES/Hy-MT2-Apache-2.0.txt",
+        "sha256": "1af3c6dc0c697277cbb6b68720787c1caa43a79c5626bf9f19cd8c00de9c8cd4",
+        "required_notice": "Copyright (C) 2026 Tencent. All rights reserved."
+      },
+      "license_basis": {
+        "base_model": "tencent/Hy-MT2-1.8B",
+        "readme_url": "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/1cd5208700acedef4ef93019b6cfc148b8522d45/README.md",
+        "readme_sha256": "4c37a2e6b69773b102027c71e1d5377946d697c927c2604f91af5cdd5624f91f",
+        "evidence_path": "docs/LICENSES/Hy-MT2-GGUF-README.md",
+        "evidence_sha256": "4319879604ecb49e6998d3e2623525600b346e75501ebd0c1ce25abec0c9f05f"
+      },
       "expected_files": ["models/ollama/blobs/sha256-dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699"]
     }
   ],
@@ -130,7 +166,13 @@
       "manifest_size": 857,
       "manifest_media_type": "application/vnd.docker.distribution.manifest.v2+json",
       "license": "Apache-2.0",
-      "license_url": "https://raw.githubusercontent.com/QwenLM/Qwen2.5/7a2f61ffc7a20d47efcd2bf97f6f2bf52729042e/LICENSE",
+      "license_url": "https://registry.ollama.ai/v2/library/qwen2.5/blobs/sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+      "license_evidence": {
+        "path": "docs/LICENSES/Qwen2.5-Apache-2.0.txt",
+        "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+        "size": 11343,
+        "required_notice": "Copyright 2024 Alibaba Cloud"
+      },
       "expected_files": ["models/ollama/manifests/registry.ollama.ai/library/qwen2.5/1.5b"],
       "blobs": [
         {"digest": "sha256:377ac4d7aeefd5b870c9fccff9a6d4df36901d99fe3277c2f755bc401601ba1c", "size": 487, "media_type": "application/vnd.docker.container.image.v1+json"},

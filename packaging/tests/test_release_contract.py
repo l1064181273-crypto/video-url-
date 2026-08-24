@@ -50,6 +50,12 @@ def _copy_license_contract(destination: Path) -> None:
         "docs/LICENSES/Apache-2.0.txt",
         "docs/LICENSES/GPL-3.0-or-later.txt",
         "docs/LICENSES/PSF-2.0.txt",
+        "docs/LICENSES/Ollama-MIT.txt",
+        "docs/LICENSES/Whisper-MIT.txt",
+        "docs/LICENSES/Pyannote-Segmentation-MIT.txt",
+        "docs/LICENSES/Hy-MT2-Apache-2.0.txt",
+        "docs/LICENSES/Hy-MT2-GGUF-README.md",
+        "docs/LICENSES/Qwen2.5-Apache-2.0.txt",
     ):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -180,17 +186,107 @@ def test_ffmpeg_uses_pinned_media_archive() -> None:
 def test_qwen_manifest_and_blobs_remain_frozen() -> None:
     dependencies = _dependencies()
     qwen = dependencies["ollama_models"][0]
-    assert qwen["manifest_sha256"] == (
-        "65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b"
-    )
-    assert [blob["digest"] for blob in qwen["blobs"]] == [
-        "sha256:377ac4d7aeefd5b870c9fccff9a6d4df36901d99fe3277c2f755bc401601ba1c",
-        "sha256:183715c435899236895da3869489cc30ac241476b4971a20285b1a462818a5b4",
-        "sha256:66b9ea09bd5b7099cbb4fc820f31b575c0366fa439b08245566692c6784e281e",
-        "sha256:eb4402837c7829a690fa845de4d7f3fd842c2adee476d5341da8a46ea9255175",
-        "sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
-    ]
+    for field in ("manifest_sha256", "manifest_size", "manifest_media_type", "blobs"):
+        assert qwen[field] == license_inventory.QWEN_MANIFEST[field]
     assert dependencies["trust_policy"]["allow_runtime_digest_rewrite"] is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda model: model.pop("manifest_size"),
+        lambda model: model.update(manifest_size=0),
+        lambda model: model.update(manifest_size="857"),
+        lambda model: model.pop("manifest_media_type"),
+        lambda model: model.update(manifest_media_type=""),
+        lambda model: model.update(manifest_media_type="application/json"),
+    ],
+)
+def test_qwen_manifest_size_and_media_type_mutations_are_rejected(mutation: Any) -> None:
+    payload = copy.deepcopy(_dependencies())
+    mutation(payload["ollama_models"][0])
+    with pytest.raises(ValueError):
+        validate_dependencies(payload)
+
+
+def test_hy_and_qwen_license_sources_are_fixed_and_reachable_by_contract() -> None:
+    dependencies = _dependencies()
+    hy = next(item for item in dependencies["artifacts"] if item["id"] == "hy-mt2")
+    qwen = dependencies["ollama_models"][0]
+    assert hy["license_url"] == (
+        "https://huggingface.co/tencent/Hy-MT2-1.8B/resolve/"
+        "9a341cd1b679d3efd23b46e847b01745a71ed792/LICENSE.txt"
+    )
+    assert hy["license_basis"]["base_model"] == "tencent/Hy-MT2-1.8B"
+    assert qwen["license_url"] == (
+        "https://registry.ollama.ai/v2/library/qwen2.5/blobs/"
+        "sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"
+    )
+    serialized = json.dumps(dependencies)
+    assert (
+        "Hy-MT2-1.8B-GGUF/blob/1cd5208700acedef4ef93019b6cfc148b8522d45/LICENSE" not in serialized
+    )
+    assert "QwenLM/Qwen2.5/7a2f61ffc7a20d47efcd2bf97f6f2bf52729042e/LICENSE" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("component", "known_404_url"),
+    [
+        (
+            "hy-mt2",
+            "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/blob/"
+            "1cd5208700acedef4ef93019b6cfc148b8522d45/LICENSE",
+        ),
+        (
+            "qwen2.5-1.5b",
+            "https://raw.githubusercontent.com/QwenLM/Qwen2.5/"
+            "7a2f61ffc7a20d47efcd2bf97f6f2bf52729042e/LICENSE",
+        ),
+    ],
+)
+def test_known_404_license_sources_are_rejected(component: str, known_404_url: str) -> None:
+    payload = copy.deepcopy(_dependencies())
+    items = [*payload["artifacts"], *payload["ollama_models"]]
+    target = next(item for item in items if item["id"] == component)
+    target["license_url"] = known_404_url
+    with pytest.raises(ValueError):
+        validate_dependencies(payload)
+
+
+def test_ollama_contract_distinguishes_gui_and_cli_paths() -> None:
+    dependencies = _dependencies()
+    ollama = next(item for item in dependencies["artifacts"] if item["id"] == "ollama")
+    assert ollama["expected_files"] == [
+        "Ollama.app/Contents/MacOS/Ollama",
+        "Ollama.app/Contents/Resources/ollama",
+    ]
+    assert ollama["executable"] == "Ollama.app/Contents/Resources/ollama"
+
+    invalid = copy.deepcopy(dependencies)
+    invalid_ollama = next(item for item in invalid["artifacts"] if item["id"] == "ollama")
+    invalid_ollama["expected_files"] = ["Ollama.app/Contents/MacOS/ollama"]
+    invalid_ollama["executable"] = "Ollama.app/Contents/MacOS/ollama"
+    with pytest.raises(ValueError):
+        validate_dependencies(invalid)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/LICENSES/Ollama-MIT.txt",
+        "docs/LICENSES/Whisper-MIT.txt",
+        "docs/LICENSES/Pyannote-Segmentation-MIT.txt",
+        "docs/LICENSES/Hy-MT2-Apache-2.0.txt",
+        "docs/LICENSES/Qwen2.5-Apache-2.0.txt",
+        "docs/LICENSES/Hy-MT2-GGUF-README.md",
+    ],
+)
+def test_component_license_evidence_tampering_is_rejected(tmp_path: Path, path: str) -> None:
+    _copy_license_contract(tmp_path)
+    evidence = tmp_path / path
+    evidence.write_bytes(evidence.read_bytes() + b"\ntampered\n")
+    with pytest.raises(ValueError):
+        license_inventory.check_inventory(tmp_path, _uv())
 
 
 def test_owner_approved_license_is_explicit() -> None:

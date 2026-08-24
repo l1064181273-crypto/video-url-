@@ -31,6 +31,71 @@ PROJECT_LICENSE = {
     "confirmed_at": "2026-08-24",
     "copyright": "Copyright (c) 2026 Leoy",
 }
+QWEN_MANIFEST = {
+    "manifest_sha256": "65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b",
+    "manifest_size": 857,
+    "manifest_media_type": "application/vnd.docker.distribution.manifest.v2+json",
+    "blobs": [
+        {
+            "digest": "sha256:377ac4d7aeefd5b870c9fccff9a6d4df36901d99fe3277c2f755bc401601ba1c",
+            "size": 487,
+            "media_type": "application/vnd.docker.container.image.v1+json",
+        },
+        {
+            "digest": "sha256:183715c435899236895da3869489cc30ac241476b4971a20285b1a462818a5b4",
+            "size": 986048512,
+            "media_type": "application/vnd.ollama.image.model",
+        },
+        {
+            "digest": "sha256:66b9ea09bd5b7099cbb4fc820f31b575c0366fa439b08245566692c6784e281e",
+            "size": 68,
+            "media_type": "application/vnd.ollama.image.system",
+        },
+        {
+            "digest": "sha256:eb4402837c7829a690fa845de4d7f3fd842c2adee476d5341da8a46ea9255175",
+            "size": 1482,
+            "media_type": "application/vnd.ollama.image.template",
+        },
+        {
+            "digest": "sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+            "size": 11343,
+            "media_type": "application/vnd.ollama.image.license",
+        },
+    ],
+}
+COMPONENT_EVIDENCE = {
+    "ollama": {
+        "path": "docs/LICENSES/Ollama-MIT.txt",
+        "sha256": "5934ed2ce0d15154bcdb9c85203210abac0da4314af34081e36df4599f90b226",
+        "required_notice": "Copyright (c) Ollama",
+    },
+    "asr-whisper-small-mlx-config": {
+        "path": "docs/LICENSES/Whisper-MIT.txt",
+        "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+        "required_notice": "Copyright (c) 2022 OpenAI",
+    },
+    "asr-whisper-small-mlx-weights": {
+        "path": "docs/LICENSES/Whisper-MIT.txt",
+        "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+        "required_notice": "Copyright (c) 2022 OpenAI",
+    },
+    "diarization-segmentation": {
+        "path": "docs/LICENSES/Pyannote-Segmentation-MIT.txt",
+        "sha256": "63a777ad4b3c7aed4b260b084d8fb49ec781c46c70c6b599ca5d2402ef7ebe50",
+        "required_notice": "Copyright (c) 2023 CNRS",
+    },
+    "hy-mt2": {
+        "path": "docs/LICENSES/Hy-MT2-Apache-2.0.txt",
+        "sha256": "1af3c6dc0c697277cbb6b68720787c1caa43a79c5626bf9f19cd8c00de9c8cd4",
+        "required_notice": "Copyright (C) 2026 Tencent. All rights reserved.",
+    },
+    "qwen2.5-1.5b": {
+        "path": "docs/LICENSES/Qwen2.5-Apache-2.0.txt",
+        "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+        "size": 11343,
+        "required_notice": "Copyright 2024 Alibaba Cloud",
+    },
+}
 
 
 def _normalize(name: str) -> str:
@@ -83,6 +148,35 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
             or FLOATING.search(license_url)
         ):
             raise ValueError(f"license source is not immutable HTTPS: {identifier}")
+        if identifier == "ollama":
+            if item.get("expected_files") != [
+                "Ollama.app/Contents/MacOS/Ollama",
+                "Ollama.app/Contents/Resources/ollama",
+            ]:
+                raise ValueError("Ollama expected files must preserve GUI and CLI paths")
+            if item.get("executable") != "Ollama.app/Contents/Resources/ollama":
+                raise ValueError("Ollama executable must be the CLI/daemon")
+        if identifier == "hy-mt2":
+            if item.get("license_url") != (
+                "https://huggingface.co/tencent/Hy-MT2-1.8B/resolve/"
+                "9a341cd1b679d3efd23b46e847b01745a71ed792/LICENSE.txt"
+            ):
+                raise ValueError("Hy-MT2 license URL must use the fixed base-model license")
+            if item.get("license_basis") != {
+                "base_model": "tencent/Hy-MT2-1.8B",
+                "readme_url": (
+                    "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/"
+                    "1cd5208700acedef4ef93019b6cfc148b8522d45/README.md"
+                ),
+                "readme_sha256": (
+                    "4c37a2e6b69773b102027c71e1d5377946d697c927c2604f91af5cdd5624f91f"
+                ),
+                "evidence_path": "docs/LICENSES/Hy-MT2-GGUF-README.md",
+                "evidence_sha256": (
+                    "4319879604ecb49e6998d3e2623525600b346e75501ebd0c1ce25abec0c9f05f"
+                ),
+            }:
+                raise ValueError("Hy-MT2 GGUF base-model evidence is invalid")
 
     for model in payload["ollama_models"]:
         identifier = model.get("id")
@@ -98,6 +192,17 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
             model["manifest_sha256"]
         ):
             raise ValueError(f"Ollama manifest SHA-256 is invalid: {identifier}")
+        if (
+            not isinstance(model.get("manifest_size"), int)
+            or isinstance(model.get("manifest_size"), bool)
+            or model["manifest_size"] <= 0
+        ):
+            raise ValueError(f"Ollama manifest size is invalid: {identifier}")
+        if (
+            not isinstance(model.get("manifest_media_type"), str)
+            or not model["manifest_media_type"]
+        ):
+            raise ValueError(f"Ollama manifest media type is invalid: {identifier}")
         if model.get("license") not in KNOWN_LICENSES:
             raise ValueError(f"unknown license for {identifier}: {model.get('license')!r}")
         license_url = model.get("license_url")
@@ -118,6 +223,41 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
                 raise ValueError(f"Ollama blob size is invalid: {identifier}")
             if not blob.get("media_type"):
                 raise ValueError(f"Ollama blob media type is missing: {identifier}")
+        if identifier == "qwen2.5-1.5b":
+            if any(
+                model.get(key) != value for key, value in QWEN_MANIFEST.items() if key != "blobs"
+            ):
+                raise ValueError("qwen manifest metadata changed")
+            if model.get("blobs") != QWEN_MANIFEST["blobs"]:
+                raise ValueError("qwen blob metadata changed")
+            if model.get("license_url") != (
+                "https://registry.ollama.ai/v2/library/qwen2.5/blobs/"
+                "sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"
+            ):
+                raise ValueError("qwen license URL must use the content-addressed license blob")
+
+
+def validate_component_license_evidence(root: Path, payload: dict[str, Any]) -> None:
+    components = {item["id"]: item for item in [*payload["artifacts"], *payload["ollama_models"]]}
+    for identifier, expected in COMPONENT_EVIDENCE.items():
+        evidence = components[identifier].get("license_evidence")
+        if evidence != expected:
+            raise ValueError(f"component license evidence metadata mismatch: {identifier}")
+        path = root / expected["path"]
+        content = path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != expected["sha256"]:
+            raise ValueError(f"component license evidence digest mismatch: {identifier}")
+        if "size" in expected and len(content) != expected["size"]:
+            raise ValueError(f"component license evidence size mismatch: {identifier}")
+        if expected["required_notice"] not in content.decode("utf-8"):
+            raise ValueError(f"component license notice missing: {identifier}")
+
+    hy_basis = components["hy-mt2"]["license_basis"]
+    readme = root / hy_basis["evidence_path"]
+    if _sha256(readme) != hy_basis["evidence_sha256"]:
+        raise ValueError("Hy-MT2 GGUF README digest mismatch")
+    if "- tencent/Hy-MT2-1.8B" not in readme.read_text(encoding="utf-8"):
+        raise ValueError("Hy-MT2 GGUF README does not prove the base-model relationship")
 
 
 def _export_packages(root: Path, uv: str, *, dev: bool) -> dict[str, str]:
@@ -247,6 +387,7 @@ def check_inventory(root: Path, uv: str) -> tuple[int, int]:
 
     dependencies = json.loads((root / "packaging/dependencies.json").read_text(encoding="utf-8"))
     validate_dependency_manifest(dependencies)
+    validate_component_license_evidence(root, dependencies)
     python_count = validate_python_inventory(root, uv)
     npm_count = validate_npm_inventory(root)
 
@@ -258,6 +399,12 @@ def check_inventory(root: Path, uv: str) -> tuple[int, int]:
         "166 development/build-only",
         "docs/LICENSES/python-runtime.json",
         "docs/LICENSES/npm-all.json",
+        "docs/LICENSES/Ollama-MIT.txt",
+        "docs/LICENSES/Whisper-MIT.txt",
+        "docs/LICENSES/Pyannote-Segmentation-MIT.txt",
+        "docs/LICENSES/Hy-MT2-Apache-2.0.txt",
+        "docs/LICENSES/Hy-MT2-GGUF-README.md",
+        "docs/LICENSES/Qwen2.5-Apache-2.0.txt",
     ):
         if marker not in notice:
             raise ValueError(f"THIRD_PARTY_NOTICES missing coverage marker: {marker}")
