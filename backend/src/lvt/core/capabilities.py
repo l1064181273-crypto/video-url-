@@ -67,6 +67,9 @@ class LocalCapabilitiesConfig:
     primary_translation_model: str
     fallback_translation_model: str
     model_cache_root: Path
+    ffmpeg_path: Path | None = None
+    ffprobe_path: Path | None = None
+    strict_ffmpeg: bool = False
 
 
 JsonRequester = Callable[[str, float], Mapping[str, Any]]
@@ -104,11 +107,26 @@ class LocalCapabilityProbes:
 
     def ffmpeg(self, timeout: float) -> CapabilityProbeResult:
         try:
-            ffmpeg = self._which("ffmpeg")
-            ffprobe = self._which("ffprobe")
-            if ffmpeg is None or ffprobe is None:
-                return CapabilityProbeResult(CapabilityStatus.MISSING)
-            return_code, output = self._run_command([ffmpeg, "-version"], timeout)
+            if self.config.strict_ffmpeg:
+                ffmpeg_path = self.config.ffmpeg_path
+                ffprobe_path = self.config.ffprobe_path
+                if (
+                    ffmpeg_path is None
+                    or ffprobe_path is None
+                    or ffmpeg_path.is_symlink()
+                    or ffprobe_path.is_symlink()
+                    or not ffmpeg_path.is_file()
+                    or not ffprobe_path.is_file()
+                ):
+                    return CapabilityProbeResult(CapabilityStatus.MISSING)
+                ffmpeg_command = str(ffmpeg_path)
+            else:
+                discovered_ffmpeg = self._which("ffmpeg")
+                discovered_ffprobe = self._which("ffprobe")
+                if discovered_ffmpeg is None or discovered_ffprobe is None:
+                    return CapabilityProbeResult(CapabilityStatus.MISSING)
+                ffmpeg_command = discovered_ffmpeg
+            return_code, output = self._run_command([ffmpeg_command, "-version"], timeout)
             if return_code != 0:
                 return CapabilityProbeResult(CapabilityStatus.UNAVAILABLE)
             version = _extract_ffmpeg_version(output)

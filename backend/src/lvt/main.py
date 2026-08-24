@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import uvicorn
 
@@ -10,7 +9,6 @@ from lvt.core.capabilities import (
     CapabilitiesProvider,
     LocalCapabilitiesConfig,
     LocalCapabilityProbes,
-    default_model_cache_root,
 )
 from lvt.core.config import Settings
 from lvt.db.repository import JobRepository
@@ -19,15 +17,25 @@ from lvt.pipeline.runner import Pipeline
 from lvt.security.token import load_or_create_token
 
 settings = Settings.from_env()
+settings.configure_model_environment()
 settings.ensure_directories()
-project_root = Path(__file__).resolve().parents[3]
+assert settings.model_root is not None
 pipeline_config = RealPipelineConfig(
     work_root=settings.data_root / "work",
     export_root=settings.data_root / "exports",
-    segmentation_model=project_root
-    / "vendor/diarization-models/sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
-    embedding_model=project_root / "vendor/diarization-models/embed.onnx",
+    segmentation_model=settings.model_root / "diarization" / "segmentation" / "model.onnx",
+    embedding_model=settings.model_root
+    / "diarization"
+    / "embedding"
+    / "nemo_en_titanet_small.onnx",
+    ollama_url=settings.ollama_url,
+    installed_mode=settings.installed_mode,
+    ffmpeg_dir=settings.ffmpeg_dir,
+    app_root=settings.data_root / "app",
+    install_state=settings.install_state,
 )
+ffmpeg_path = settings.ffmpeg_dir / "ffmpeg" if settings.ffmpeg_dir else None
+ffprobe_path = settings.ffmpeg_dir / "ffprobe" if settings.ffmpeg_dir else None
 local_capability_probes = LocalCapabilityProbes(
     LocalCapabilitiesConfig(
         asr_model=pipeline_config.asr_model,
@@ -36,7 +44,10 @@ local_capability_probes = LocalCapabilityProbes(
         ollama_url=pipeline_config.ollama_url,
         primary_translation_model=pipeline_config.primary_translation_model,
         fallback_translation_model=pipeline_config.fallback_translation_model,
-        model_cache_root=default_model_cache_root(),
+        model_cache_root=settings.model_root / "huggingface",
+        ffmpeg_path=ffmpeg_path,
+        ffprobe_path=ffprobe_path,
+        strict_ffmpeg=settings.installed_mode,
     )
 )
 capabilities_provider = CapabilitiesProvider(

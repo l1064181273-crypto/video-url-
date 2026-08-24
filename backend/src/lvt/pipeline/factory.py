@@ -20,10 +20,14 @@ class RealPipelineConfig:
     segmentation_model: Path
     embedding_model: Path
     asr_model: str = DEFAULT_ASR_MODEL
-    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_url: str = "http://127.0.0.1:11435"
     primary_translation_model: str = "hy-mt2:1.8b-q4km-fixed"
     fallback_translation_model: str = "qwen2.5:1.5b"
     diarization_threshold: float = 0.5
+    installed_mode: bool = False
+    ffmpeg_dir: Path | None = None
+    app_root: Path | None = None
+    install_state: Path | None = None
 
 
 def create_real_pipeline(
@@ -31,7 +35,15 @@ def create_real_pipeline(
     *,
     repository: JobRepository | None = None,
 ) -> Pipeline:
-    ffmpeg, ffprobe = discover_ffmpeg_binaries()
+    if config.installed_mode:
+        ffmpeg, ffprobe = discover_ffmpeg_binaries(
+            installed_mode=True,
+            ffmpeg_dir=config.ffmpeg_dir,
+            app_root=config.app_root,
+            install_state=config.install_state,
+        )
+    else:
+        ffmpeg, ffprobe = discover_ffmpeg_binaries()
     return Pipeline(
         downloader=YtDlpFFmpegDownloader(
             ffmpeg_path=ffmpeg,

@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import sys
+from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import yt_dlp  # type: ignore[import-untyped]
 
@@ -19,7 +22,16 @@ from lvt.engines.base import DownloadedMedia, MediaInfo
 from lvt.security.paths import ensure_within_root, safe_filename
 
 
-def discover_ffmpeg_binaries() -> tuple[Path, Path]:
+def discover_ffmpeg_binaries(
+    *,
+    installed_mode: bool = False,
+    ffmpeg_dir: Path | None = None,
+    app_root: Path | None = None,
+    install_state: Path | None = None,
+) -> tuple[Path, Path]:
+    if installed_mode:
+        return _discover_installed_ffmpeg(ffmpeg_dir, app_root, install_state)
+
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
@@ -34,6 +46,100 @@ def discover_ffmpeg_binaries() -> tuple[Path, Path]:
     if not ffmpeg or not ffprobe:
         raise LVTError("FFMPEG_NOT_FOUND", "未找到 FFmpeg/ffprobe")
     return Path(ffmpeg), Path(ffprobe)
+
+
+def _discover_installed_ffmpeg(
+    ffmpeg_dir: Path | None,
+    app_root: Path | None,
+    install_state: Path | None,
+) -> tuple[Path, Path]:
+    try:
+        if ffmpeg_dir is None or app_root is None or install_state is None:
+            raise ValueError("installed FFmpeg configuration is incomplete")
+        if ffmpeg_dir.is_symlink() or install_state.is_symlink() or not install_state.is_file():
+            raise ValueError("installed FFmpeg path is unsafe")
+
+        resolved_app_root = app_root.resolve(strict=True)
+        resolved_install_state = install_state.resolve(strict=True)
+        expected_install_state = (
+            resolved_app_root.parent / "runtime" / "install-state.json"
+        ).resolve(strict=True)
+        if resolved_install_state != expected_install_state:
+            raise ValueError("install state is outside the app data root")
+        resolved_directory = ffmpeg_dir.resolve(strict=True)
+        relative_directory = resolved_directory.relative_to(resolved_app_root).as_posix()
+        state = json.loads(resolved_install_state.read_text(encoding="utf-8"))
+        ffmpeg_state = _validated_ffmpeg_state(state, relative_directory)
+
+        binaries: list[Path] = []
+        for name in ("ffmpeg", "ffprobe"):
+            candidate = ffmpeg_dir / name
+            metadata_before = candidate.lstat()
+            if candidate.is_symlink() or not stat.S_ISREG(metadata_before.st_mode):
+                raise ValueError(f"{name} is not an app-owned regular file")
+            if metadata_before.st_mode & 0o111 == 0:
+                raise ValueError(f"{name} is not executable")
+            resolved_candidate = candidate.resolve(strict=True)
+            resolved_candidate.relative_to(resolved_app_root)
+            if resolved_candidate.parent != resolved_directory:
+                raise ValueError(f"{name} escaped the configured directory")
+            digest = _file_sha256(resolved_candidate)
+            metadata_after = candidate.lstat()
+            if (
+                metadata_before.st_dev,
+                metadata_before.st_ino,
+                metadata_before.st_size,
+                metadata_before.st_mtime_ns,
+            ) != (
+                metadata_after.st_dev,
+                metadata_after.st_ino,
+                metadata_after.st_size,
+                metadata_after.st_mtime_ns,
+            ):
+                raise ValueError(f"{name} changed during verification")
+            if digest != ffmpeg_state["sha256"][name]:
+                raise ValueError(f"{name} digest does not match install state")
+            binaries.append(candidate)
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise LVTError("FFMPEG_NOT_FOUND", "已安装的 FFmpeg/ffprobe 无效") from exc
+
+    return binaries[0], binaries[1]
+
+
+def _validated_ffmpeg_state(state: Any, relative_directory: str) -> dict[str, Any]:
+    if not isinstance(state, dict) or state.get("schema_version") != 1:
+        raise ValueError("install state schema is invalid")
+    ffmpeg_state = state.get("ffmpeg")
+    if not isinstance(ffmpeg_state, dict):
+        raise ValueError("install state FFmpeg metadata is missing")
+    version = ffmpeg_state.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError("install state FFmpeg version is invalid")
+    if ffmpeg_state.get("directory") != relative_directory:
+        raise ValueError("install state FFmpeg directory does not match")
+    if Path(relative_directory).parts[-2:] != (version, "bin"):
+        raise ValueError("installed FFmpeg version path does not match")
+    digests = ffmpeg_state.get("sha256")
+    if (
+        not isinstance(digests, dict)
+        or set(digests) != {"ffmpeg", "ffprobe"}
+        or any(
+            not isinstance(digests.get(name), str)
+            or len(digests[name]) != 64
+            or any(character not in "0123456789abcdef" for character in digests[name])
+            for name in ("ffmpeg", "ffprobe")
+        )
+    ):
+        raise ValueError("install state FFmpeg digests are invalid")
+    return ffmpeg_state
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class YtDlpFFmpegDownloader:
