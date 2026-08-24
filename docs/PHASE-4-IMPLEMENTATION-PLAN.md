@@ -575,7 +575,8 @@ live/next/previous 同时存在等额外组合先按预期 identity 分类为 ol
 SERVICES_STOPPED
 DB_BACKUP_WRITING
 DB_BACKED_UP
-MIGRATING
+MIGRATION_INTENT
+MIGRATION_MAINTENANCE_RETURNED
 MIGRATED
 DB_RESTORE_QUARANTINING
 DB_RESTORE_WRITING
@@ -598,12 +599,53 @@ DB_RESTORED
    - fsync backup file 和 backup directory；
    - 独立打开 backup，`quick_check=ok` 后关闭，写 `DB_BACKED_UP`；
    - 不把 live DB/WAL/SHM 当作三个普通文件复制。
-3. 使用 candidate 的 migration-only/maintenance entrypoint：
+3. 调用 candidate migration 前，先把 `MIGRATION_INTENT` 作为新的 journal
+   generation durable 写入双槽。intent 必须绑定 transaction ID、candidate version、
+   旧 schema version、预期新 schema version，以及已经 `quick_check=ok` 的
+   pre-upgrade backup identity/checksum。
+   - `migration_intent` 是单调且不可变的 journal 字段；从 MIGRATION_INTENT 到
+     ACTIVATED 的每个后续 generation 都必须原样携带，transaction 清理完成前不得
+     删除、重写 backup identity 或只用当前 state 替代该 intent；
+   - 只有 MIGRATION_INTENT slot 完成 temp write、file fsync、slot rename 和 journal
+     directory fsync，成为最高有效 generation 后，才允许调用 maintenance entrypoint；
+   - candidate entrypoint 启动时必须重新读取最高有效 generation，验证 transaction ID、
+     backup identity 和 `state=MIGRATION_INTENT` 匹配；任一不匹配都必须在打开 SQLite
+     write transaction 前退出；
+   - MIGRATION_INTENT 尚未 durable 时禁止启动 migration process、打开 migration
+     connection 或执行任何 DDL。
+4. 使用 candidate 的 migration-only/maintenance entrypoint：
    - 获取同一个 DB instance lock；
    - 只执行 schema initialize/migration 和兼容性检查；
    - 不创建 Pipeline、不启动 JobWorkerPool、不 claim、不恢复 queued Job；
-   - 所有 SQLite connections 关闭后写 `MIGRATED`。
-4. 复用通用 current/extension/precommit/commit/activation 流程。
+   - SQLite transaction commit 不等同于升级 transaction `COMMITTED`，也不构成保留
+     live DB 的恢复依据；
+   - maintenance 成功返回后，先 durable 写 `MIGRATION_MAINTENANCE_RETURNED`；
+   - 验证新 schema、`quick_check=ok` 且所有 SQLite connections 已关闭后，才 durable
+     写 `MIGRATED`；
+   - 只要全局 `COMMITTED` 尚未 durable，无论 maintenance 是否开始、SQLite
+     transaction 是否 commit、maintenance 是否返回或 MIGRATED 是否 durable，崩溃
+     对账都必须从 MIGRATION_INTENT 指向的已验证 backup 恢复旧 DB。
+   - upgrade 只有在最高有效 generation 为同 transaction/intent 的 durable MIGRATED
+     后才允许写 COMMITTED；缺失 MIGRATED、intent 不同或 backup identity 变化均禁止
+     commit。
+5. 复用通用 current/extension/precommit/commit/activation 流程。
+
+Migration 专项 SIGKILL failpoint 必须精确覆盖：
+
+1. MIGRATION_INTENT slot temp write、file fsync、slot rename、journal directory fsync
+   的前后。
+2. 调用 candidate maintenance entrypoint 的紧前和紧后；紧前 failpoint 必须证明
+   durable intent 已存在，intent 不存在时入口调用计数必须为零。
+3. maintenance 内 SQLite migration transaction `commit()` 的紧前和紧后。
+4. maintenance 关闭最后一个 SQLite connection 后、成功返回前，以及 parent 收到
+   成功返回后的紧后。
+5. `MIGRATION_MAINTENANCE_RETURNED` generation 的 slot write、file fsync、rename、
+   directory fsync 前后。
+6. `MIGRATED` generation 的 slot write、file fsync、rename、directory fsync 前后。
+
+上述每个 failpoint 只要全局 COMMITTED 尚未 durable，重启结果必须完全相同：验证
+pre-upgrade backup、恢复旧 schema、恢复旧 current 和 stable extension、启动旧
+service。测试不得依据 live schema version 或 MIGRATED slot 是否可见选择“跳过恢复”。
 
 DB restore 为每个 DB/WAL/SHM 文件维护独立
 `quarantine_intent → renamed → parent_synced` substate，并为 restore temp 维护
@@ -632,12 +674,23 @@ WAL 和 SHM 各自按相同 substate 独立恢复；文件不存在是 journal �
 
 全局恢复决策矩阵：
 
-| operation/decision | DB | current/extension | service |
+| operation/crash window | DB 决策 | current/extension | service |
 | --- | --- | --- | --- |
 | first_install，未 COMMITTED | 无 DB rollback | 自动回到未安装/旧 identity | 停 candidate |
-| upgrade，未 COMMITTED 且未 MIGRATED | 保持旧 DB | 自动回 old | 启动旧 service |
-| upgrade，未 COMMITTED 且已 MIGRATED | 自动完成 DB restore | DB 完成后自动回 old | runtime-full 后启动旧 service |
-| 任一 operation，已 COMMITTED | 不恢复旧 schema | 自动收敛 committed new | 启动/激活新 service |
+| upgrade，MIGRATION_INTENT 未 durable | migration 被禁止；保持已验证旧 DB | 自动回 old | 启动旧 service |
+| upgrade，intent durable、migration 尚未开始 | 仍从 intent 指向的 backup 恢复旧 DB | 自动回 old | restore + runtime-full 后启动旧 service |
+| upgrade，SQLite transaction 尚未 commit | SQLite 自身 rollback 后，仍从 backup 恢复旧 DB | 自动回 old | restore + runtime-full 后启动旧 service |
+| upgrade，SQLite transaction 已 commit、maintenance 尚未返回 | 不信任 live DB；从 backup 恢复旧 schema | 自动回 old | restore + runtime-full 后启动旧 service |
+| upgrade，SQLite transaction 已 commit、maintenance 已返回、MIGRATED slot 尚未写或尚未完成 fsync/rename/dir-fsync | 不依据缺失/半写 MIGRATED 推断；从 backup 恢复旧 DB | 自动回 old | restore + runtime-full 后启动旧 service |
+| upgrade，MIGRATED 已 durable、全局 COMMITTED 未 durable | MIGRATED 仅表示 migration 完成，仍从 backup 恢复旧 DB | 自动回 old | restore + runtime-full 后启动旧 service |
+| 任一 operation，全局 COMMITTED 已 durable | 不恢复旧 schema | 自动收敛 committed new | 启动/激活新 service |
+
+恢复器不需要也不得猜测 SQLite commit 是否发生。最高有效 generation 中只要存在该
+transaction 的 MIGRATION_INTENT，且全局 COMMITTED 不存在，就执行同一保守动作：
+停止 maintenance/candidate、关闭并确认所有 SQLite connections、按 DB restore 矩阵
+恢复 intent 固定的 pre-upgrade backup、恢复旧 current/extension，最后启动旧 service。
+即使 live DB 的 schema 看起来仍是旧版本，也必须完成 backup restore，不能把
+“MIGRATED slot 不存在”解释为“migration 没有修改数据库”。
 
 `COMMITTED` 后不得自动回滚旧 DB/schema，因为 ACTIVATE 后可能已经 claim。如果在
 `COMMITTED` 与 `ACTIVATED` 间崩溃，启动对账必须继续新 release 并完成 ACTIVATE。
@@ -1022,6 +1075,22 @@ Phase 4: publish and manage local services
 
 - 0.1.0 → 测试版 0.1.1；默认拒绝降级。
 - migration-only 模式不构造 Pipeline/JobWorkerPool，不写 claimed event。
+- MIGRATION_INTENT 未完成 slot file fsync + rename + directory fsync 时，candidate
+  migration invocation count、SQLite write connection count 和 DDL count 均为零。
+- MIGRATION_INTENT durable 后，在 migration 调用前、SQLite transaction commit
+  前后、maintenance 返回前后、MIGRATION_MAINTENANCE_RETURNED 和 MIGRATED 的每个
+  slot write/file-fsync/rename/dir-fsync 前后注入 SIGKILL。
+- 验证 MIGRATION_MAINTENANCE_RETURNED、MIGRATED、COMMITTED 和 ACTIVATED
+  generations 原样保留不可变 migration_intent；任一 successor 丢失或改变 intent
+  必须被 schema/validator 拒绝。
+- 参数化断言七类状态：intent 未写、intent 已写但 migration 未开始、transaction
+  未 commit、transaction 已 commit 但 maintenance 未返回、transaction 已 commit
+  但 MIGRATED slot 未 durable、MIGRATED durable、全局 COMMITTED durable。
+- 前六类状态最终都恢复旧 schema/current/extension/service：intent 未写时保持未经
+  migration 的已验证旧 DB；intent 已写的其余 pre-COMMITTED 状态一律从 intent 固定
+  的 pre-upgrade backup 恢复。只有全局 COMMITTED durable 后收敛新版本。
+- 将 live DB 伪装成旧 schema 或新 schema，且删除/截断 MIGRATED slot，恢复结果仍由
+  MIGRATION_INTENT + COMMITTED 决定，证明没有使用“无 MIGRATED 即未迁移”的推断。
 - DB/WAL/SHM 每个 quarantine intent、rename、file fsync、directory fsync，以及
   restore temp write/fsync/rename/directory fsync 前后 SIGKILL；重启按 DB 矩阵自动
   恢复且幂等。
@@ -1050,6 +1119,9 @@ Phase 4: publish and manage local services
 - 每个 commit 前 failpoint 后完整回旧版本；COMMITTED 后完整收敛到新版本。
 - DB、current、stable extension 和 service 不出现可观察混合状态。
 - migration-only 和 precommit barrier 证明 commit 前零任务 claim。
+- MIGRATION_INTENT 是 DB rollback 的保守边界：intent durable 且 COMMITTED 未
+  durable 的所有 failpoint 均恢复旧 schema、旧 current、旧 extension 和旧 service。
+- 全局 COMMITTED durable 后不再恢复旧 DB，只向 candidate release 收敛。
 - Checkpoint 7 的首次发布 transaction tests 无修改继续通过，证明不存在反向依赖。
 - purge 删除完数据后 parent-scoped lock inode 仍存在且后续 install/start 使用同一
   inode。
