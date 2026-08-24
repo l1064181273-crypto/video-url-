@@ -4,6 +4,13 @@
     "name": "Local Video Transcriber",
     "version": "0.1.0"
   },
+  "project_license": {
+    "spdx": "MIT",
+    "owner_approved": true,
+    "confirmed_by": "Leoy",
+    "confirmed_at": "2026-08-24",
+    "copyright": "Copyright (c) 2026 Leoy"
+  },
   "platform": {
     "os": "macos",
     "minimum_version": "13.0",

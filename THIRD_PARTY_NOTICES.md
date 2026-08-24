@@ -1,43 +1,33 @@
 # Third-Party Notices
 
-Local Video Transcriber is licensed under the MIT License. Dependencies and models
-remain subject to their own licenses. Runtime artifacts are downloaded after
-installation and are not included in the release ZIP.
+Local Video Transcriber is licensed under the MIT License with the owner-approved
+copyright line `Copyright (c) 2026 Leoy`. Dependencies and models remain subject
+to their own licenses. Runtime artifacts are downloaded after installation and
+are not included in the release ZIP.
 
-## Python runtime dependencies
+## Complete Python inventory
 
-- `python:fastapi` - MIT
-- `python:mlx-whisper` - MIT
-- `python:numpy` - BSD-3-Clause
-- `python:pydantic` - MIT
-- `python:sherpa-onnx` - Apache-2.0
-- `python:srt` - MIT
-- `python:static-ffmpeg` - MIT
-- `python:uvicorn` - BSD-3-Clause
-- `python:webvtt-py` - MIT
-- `python:yt-dlp` - Unlicense
+`docs/LICENSES/python-runtime.json` is the normative package-level inventory for
+the macOS arm64 Python 3.11 environment. It contains all 77 frozen distributions:
 
-All transitive Python distributions are fixed, including artifact hashes, by
-`backend/uv.lock`. The source gate installs that lock in isolation before license
-inspection.
+- 67 runtime distributions selected by `uv export --frozen --no-dev`;
+- 10 development-only distributions added by the frozen `dev` extra.
 
-## Chrome extension development dependencies
+Each entry records normalized package name, exact version, license, immutable
+versioned PyPI source, license metadata source, scope, and an `uv.lock` trace.
+This includes the known non-blocking `static-ffmpeg` → `twine` runtime closure.
 
-- `npm:@eslint/js` - MIT
-- `npm:@playwright/test` - Apache-2.0
-- `npm:@types/chrome` - MIT
-- `npm:@types/node` - MIT
-- `npm:eslint` - MIT
-- `npm:eslint-config-prettier` - MIT
-- `npm:globals` - MIT
-- `npm:prettier` - MIT
-- `npm:typescript` - Apache-2.0
-- `npm:typescript-eslint` - MIT
-- `npm:vite` - MIT
-- `npm:vitest` - MIT
+## Complete Chrome extension inventory
 
-The complete transitive npm inventory and its declared license fields are fixed
-by `extension/package-lock.json` and checked by the source verification gate.
+`docs/LICENSES/npm-all.json` is the normative package-level inventory for all
+166 package paths in `extension/package-lock.json`. All 166 development/build-only
+packages are excluded from the extension bundle. Each entry
+records package, package-lock path, exact version, license, resolved tarball,
+integrity, scope, and lock trace.
+
+The source gate compares both inventories as exact sets against their lockfiles.
+A missing package, changed version, unknown license, changed source, changed
+integrity, or stale lock fingerprint is fatal.
 
 ## Tools and models
 

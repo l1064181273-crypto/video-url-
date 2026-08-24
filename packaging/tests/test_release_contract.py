@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -28,6 +29,31 @@ license_inventory = _load_module("license_inventory", "packaging/tools/license_i
 
 def _dependencies() -> dict[str, Any]:
     return json.loads((ROOT / "packaging/dependencies.json").read_text(encoding="utf-8"))
+
+
+def _uv() -> str:
+    return os.environ.get("UV", "uv")
+
+
+def _copy_license_contract(destination: Path) -> None:
+    for relative in (
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+        "backend/pyproject.toml",
+        "backend/uv.lock",
+        "extension/package-lock.json",
+        "packaging/dependencies.json",
+        "packaging/release-manifest.json",
+        "docs/LICENSES/python-runtime.json",
+        "docs/LICENSES/npm-all.json",
+        "docs/LICENSES/MIT.txt",
+        "docs/LICENSES/Apache-2.0.txt",
+        "docs/LICENSES/GPL-3.0-or-later.txt",
+        "docs/LICENSES/PSF-2.0.txt",
+    ):
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
 
 
 def validate_dependencies(payload: dict[str, Any]) -> None:
@@ -83,6 +109,13 @@ def test_dependency_manifest_is_fully_pinned() -> None:
             url="https://github.com/example/releases/latest/download/tool.zip"
         ),
         lambda data: data["artifacts"][0].update(license="UNKNOWN"),
+        lambda data: data["artifacts"][2].update(
+            url="https://raw.githubusercontent.com/zackees/ffmpeg_bins/"
+            "df95abcb0ce6efff710dda5ef28a2f6f1dc21493/v8.0/darwin_arm64.zip"
+        ),
+        lambda data: data["artifacts"][4].update(
+            license_url="https://github.com/openai/whisper/blob/main/LICENSE"
+        ),
         lambda data: data["ollama_models"][0]["blobs"][0].update(digest=""),
         lambda data: data["trust_policy"].update(allow_runtime_digest_rewrite=True),
     ],
@@ -97,6 +130,7 @@ def test_dependency_manifest_rejects_unsafe_mutations(mutation: Any) -> None:
 def test_release_manifest_defines_arm64_allowlist_and_exclusions() -> None:
     payload = json.loads((ROOT / "packaging/release-manifest.json").read_text(encoding="utf-8"))
     assert payload["product"] == {"name": "Local Video Transcriber", "version": "0.1.0"}
+    assert payload["project_license"] == license_inventory.PROJECT_LICENSE
     assert payload["platform"] == {
         "os": "macos",
         "minimum_version": "13.0",
@@ -122,7 +156,88 @@ def test_uv_lock_is_complete_and_has_no_machine_paths() -> None:
 
 
 def test_license_inventory_matches_notices() -> None:
-    license_inventory.check_inventory(ROOT)
+    assert license_inventory.check_inventory(ROOT, _uv()) == (77, 166)
+
+
+def test_ffmpeg_uses_pinned_media_archive() -> None:
+    ffmpeg = next(item for item in _dependencies()["artifacts"] if item["id"] == "ffmpeg")
+    assert ffmpeg == {
+        "id": "ffmpeg",
+        "kind": "tool",
+        "version": "8.0",
+        "architecture": "arm64",
+        "url": "https://media.githubusercontent.com/media/zackees/ffmpeg_bins/"
+        "df95abcb0ce6efff710dda5ef28a2f6f1dc21493/v8.0/darwin_arm64.zip",
+        "sha256": "b2da44a8169c4d09a97db996250690c3346f72e4795521d23d3dbb1e72421207",
+        "size": 41925556,
+        "media_type": "application/zip",
+        "license": "GPL-3.0-or-later",
+        "license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0/COPYING.GPLv3",
+        "expected_files": ["darwin_arm64/ffmpeg", "darwin_arm64/ffprobe"],
+    }
+
+
+def test_qwen_manifest_and_blobs_remain_frozen() -> None:
+    dependencies = _dependencies()
+    qwen = dependencies["ollama_models"][0]
+    assert qwen["manifest_sha256"] == (
+        "65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b"
+    )
+    assert [blob["digest"] for blob in qwen["blobs"]] == [
+        "sha256:377ac4d7aeefd5b870c9fccff9a6d4df36901d99fe3277c2f755bc401601ba1c",
+        "sha256:183715c435899236895da3869489cc30ac241476b4971a20285b1a462818a5b4",
+        "sha256:66b9ea09bd5b7099cbb4fc820f31b575c0366fa439b08245566692c6784e281e",
+        "sha256:eb4402837c7829a690fa845de4d7f3fd842c2adee476d5341da8a46ea9255175",
+        "sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+    ]
+    assert dependencies["trust_policy"]["allow_runtime_digest_rewrite"] is False
+
+
+def test_owner_approved_license_is_explicit() -> None:
+    assert "Copyright (c) 2026 Leoy" in (ROOT / "LICENSE").read_text(encoding="utf-8")
+    release = json.loads((ROOT / "packaging/release-manifest.json").read_text(encoding="utf-8"))
+    assert release["project_license"] == license_inventory.PROJECT_LICENSE
+
+
+@pytest.mark.parametrize(
+    ("inventory", "mutation"),
+    [
+        ("python-runtime.json", lambda data: data["packages"].pop()),
+        ("python-runtime.json", lambda data: data["packages"][0].update(version="0.0.0")),
+        ("python-runtime.json", lambda data: data["packages"][0].update(license="UNKNOWN")),
+        (
+            "python-runtime.json",
+            lambda data: data["packages"][0].update(source="https://example.invalid"),
+        ),
+        ("npm-all.json", lambda data: data["packages"].pop()),
+        ("npm-all.json", lambda data: data["packages"][0].update(version="0.0.0")),
+        ("npm-all.json", lambda data: data["packages"][0].update(license="UNKNOWN")),
+        ("npm-all.json", lambda data: data["packages"][0].update(source="https://example.invalid")),
+    ],
+)
+def test_transitive_inventory_mutations_are_rejected(
+    tmp_path: Path, inventory: str, mutation: Any
+) -> None:
+    _copy_license_contract(tmp_path)
+    path = tmp_path / "docs/LICENSES" / inventory
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutation(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError):
+        license_inventory.check_inventory(tmp_path, _uv())
+
+
+def test_normative_license_texts_are_complete() -> None:
+    expected = {
+        "MIT.txt": ("MIT License", 1000),
+        "Apache-2.0.txt": ("Apache License", 10000),
+        "GPL-3.0-or-later.txt": ("GNU GENERAL PUBLIC LICENSE", 30000),
+        "PSF-2.0.txt": ("PYTHON SOFTWARE FOUNDATION LICENSE", 10000),
+    }
+    for filename, (marker, minimum) in expected.items():
+        text = (ROOT / "docs/LICENSES" / filename).read_text(encoding="utf-8")
+        assert marker in text
+        assert len(text) >= minimum
 
 
 @pytest.mark.parametrize("target", ["package", "verify-archive", "extracted-smoke", "verify"])

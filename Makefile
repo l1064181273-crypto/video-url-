@@ -12,7 +12,7 @@ setup:
 
 lint:
 	$(CHECK_VERSIONS)
-	$(PYTHON) packaging/tools/license_inventory.py
+	$(PYTHON) packaging/tools/license_inventory.py --uv $(UV)
 	cd backend && ../$(PYTHON) -m ruff check src tests ../scripts
 	cd backend && ../$(PYTHON) -m ruff format --check src tests ../scripts
 	$(PYTHON) -m ruff check --config backend/pyproject.toml packaging/tools packaging/tests

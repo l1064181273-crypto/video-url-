@@ -25,7 +25,7 @@
       "size": 27115717,
       "media_type": "application/gzip",
       "license": "PSF-2.0",
-      "license_url": "https://docs.python.org/3.11/license.html",
+      "license_url": "https://raw.githubusercontent.com/python/cpython/v3.11.15/LICENSE",
       "expected_files": ["python/bin/python3.11"]
     },
     {
@@ -33,12 +33,12 @@
       "kind": "tool",
       "version": "8.0",
       "architecture": "arm64",
-      "url": "https://raw.githubusercontent.com/zackees/ffmpeg_bins/df95abcb0ce6efff710dda5ef28a2f6f1dc21493/v8.0/darwin_arm64.zip",
+      "url": "https://media.githubusercontent.com/media/zackees/ffmpeg_bins/df95abcb0ce6efff710dda5ef28a2f6f1dc21493/v8.0/darwin_arm64.zip",
       "sha256": "b2da44a8169c4d09a97db996250690c3346f72e4795521d23d3dbb1e72421207",
       "size": 41925556,
       "media_type": "application/zip",
       "license": "GPL-3.0-or-later",
-      "license_url": "https://ffmpeg.org/legal.html",
+      "license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0/COPYING.GPLv3",
       "expected_files": ["darwin_arm64/ffmpeg", "darwin_arm64/ffprobe"]
     },
     {
@@ -64,7 +64,7 @@
       "size": 266,
       "media_type": "application/json",
       "license": "MIT",
-      "license_url": "https://github.com/openai/whisper/blob/main/LICENSE",
+      "license_url": "https://raw.githubusercontent.com/openai/whisper/5f86d1d86363843179951550570367b37c5d6f78/LICENSE",
       "expected_files": ["models/asr/whisper-small-mlx/config.json"]
     },
     {
@@ -77,7 +77,7 @@
       "size": 481307592,
       "media_type": "application/octet-stream",
       "license": "MIT",
-      "license_url": "https://github.com/openai/whisper/blob/main/LICENSE",
+      "license_url": "https://raw.githubusercontent.com/openai/whisper/5f86d1d86363843179951550570367b37c5d6f78/LICENSE",
       "expected_files": ["models/asr/whisper-small-mlx/weights.npz"]
     },
     {
@@ -90,7 +90,7 @@
       "size": 6958444,
       "media_type": "application/x-bzip2",
       "license": "MIT",
-      "license_url": "https://huggingface.co/pyannote/segmentation-3.0/blob/main/LICENSE",
+      "license_url": "https://huggingface.co/pyannote/segmentation-3.0/resolve/e66f3d3b9eb0873085418a7b813d3b369bf160bb/LICENSE",
       "expected_files": ["models/diarization/segmentation/model.onnx"]
     },
     {
@@ -130,7 +130,7 @@
       "manifest_size": 857,
       "manifest_media_type": "application/vnd.docker.distribution.manifest.v2+json",
       "license": "Apache-2.0",
-      "license_url": "https://github.com/QwenLM/Qwen2.5/blob/main/LICENSE",
+      "license_url": "https://raw.githubusercontent.com/QwenLM/Qwen2.5/7a2f61ffc7a20d47efcd2bf97f6f2bf52729042e/LICENSE",
       "expected_files": ["models/ollama/manifests/registry.ollama.ai/library/qwen2.5/1.5b"],
       "blobs": [
         {"digest": "sha256:377ac4d7aeefd5b870c9fccff9a6d4df36901d99fe3277c2f755bc401601ba1c", "size": 487, "media_type": "application/vnd.docker.container.image.v1+json"},
