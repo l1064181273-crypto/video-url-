@@ -129,46 +129,53 @@ ZIP 严禁包含：
 保持代码、extension 和用户数据隔离：
 
 ```text
-~/Library/Application Support/LocalVideoTranscriber/
-  app/
-    tools/
-      uv/<uv-version>/uv
-      python/
-    releases/
-      0.1.0/
-        backend/
-        .venv/
-        scripts/
-        packaging/
-        docs/
-        VERSION
-    current -> releases/0.1.0
-  extension/
-    manifest.json
-    sidepanel.html
-    assets...
-  runtime/
-    backend.pid
-    ollama.pid
-    install-state.json
-    lifecycle.lock
+~/Library/Application Support/
+  .LocalVideoTranscriber.lifecycle/
+    lock
     bootstrap.lock/
-    upgrade-journal.json
-    processes/
-  config/
-    api-token
-    runtime.env
-  db/
-    lvt.sqlite3
-  models/
-    huggingface/
-    diarization/
-    ollama/
-    downloads/
-  work/
-  exports/
-  logs/
-  backups/
+    uninstall-journal/
+      slot-a.json
+      slot-b.json
+  LocalVideoTranscriber/
+    app/
+      tools/
+        uv/<uv-version>/uv
+        python/
+      releases/
+        0.1.0/
+          backend/
+          .venv/
+          scripts/
+          packaging/
+          docs/
+          VERSION
+      current -> releases/0.1.0
+    extension/
+      manifest.json
+      sidepanel.html
+      assets...
+    runtime/
+      backend.pid
+      ollama.pid
+      install-state.json
+      transaction-journal/
+        slot-a.json
+        slot-b.json
+      processes/
+    config/
+      api-token
+      runtime.env
+    db/
+      lvt.sqlite3
+    models/
+      huggingface/
+      diarization/
+      ollama/
+      downloads/
+    work/
+    exports/
+    logs/
+    backups/
 ```
 
 约束：
@@ -187,12 +194,16 @@ ZIP 严禁包含：
 
 生命周期排他锁：
 
+- lifecycle inode 和 bootstrap lease 永久位于待安装/删除目标的 parent 下：
+  `~/Library/Application Support/.LocalVideoTranscriber.lifecycle/`。purge、rollback
+  或重装均不得 unlink、rename 或替换该 `lock` inode。
 - 第一次安装尚无 app-owned Python 时，先通过同一文件系统上的原子
-  `mkdir runtime/bootstrap.lock` 取得 bootstrap lease；目录记录 PID、start time 和
-  release nonce，只有 ownership 全部匹配或确认进程不存在时才允许清理 stale lease。
+  `mkdir .LocalVideoTranscriber.lifecycle/bootstrap.lock` 取得 bootstrap lease；
+  目录记录 PID、start time 和 release nonce，只有 ownership 全部匹配或确认进程
+  不存在时才允许清理 stale lease。
 - app-owned Python 可用后，在仍持有 bootstrap lease 时取得
-  `fcntl.flock(LOCK_EX)` 的 `runtime/lifecycle.lock`，再释放 bootstrap lease，锁切换
-  不得出现无锁窗口。
+  `fcntl.flock(LOCK_EX)` 的 parent-scoped `lifecycle/lock`，再释放 bootstrap lease，
+  锁切换不得出现无锁窗口。lock file 首次创建后永久保留，mode 固定 `0600`。
 - 后续 install/upgrade/start/stop/uninstall 全程由 app-owned Python lock runner
   持有同一 flock FD；子进程继承关闭该 FD，不能意外延长锁生命周期。
 - `doctor` 默认只读且不取排他锁；执行 DB quick check 时取共享锁。`package.command`
@@ -313,12 +324,13 @@ ZIP 严禁包含：
 11. runtime/full 通过并完成事务 commit 后激活 worker claim，复制 Token 到剪贴板。
 12. 输出下一步：Chrome 加载稳定 extension 路径、端口和 Token 已复制提示。
 
-三类验证器必须显式接收 phase，不允许根据文件是否存在自动降级：
+四类验证器必须显式接收 phase，不允许根据文件是否存在自动降级：
 
 | phase | 可依赖 current | 可依赖 backend | 可要求模型 | 可启动 worker |
 | --- | --- | --- | --- | --- |
 | staging-core | 否 | 否 | 否 | 否 |
 | dependencies | 否 | 否 | 是 | 否 |
+| installed-prerequisites | 是 | 否 | 是 | 否 |
 | runtime-full | 是 | 是，precommit/normal 均有明确状态 | 是 | commit 前否 |
 
 幂等要求：
@@ -332,8 +344,18 @@ ZIP 严禁包含：
 
 ### 4.3 `start.command`
 
-- 启动前运行默认 `runtime-full` doctor；未安装时不得回退成 staging 检查并返回成功。
-- 若 backend 已健康且 PID ownership 匹配，返回成功，不创建第二实例。
+- 取得 parent-scoped lifecycle lock 并完成 transaction/uninstall journal 对账后，先运行
+  `verify_install --phase installed-prerequisites`；该阶段检查 current、stable
+  extension、app-owned Python/venv、Token metadata、模型、strict FFmpeg、11435
+  端口 ownership、DB/export/log 目录，但明确禁止要求 backend health。
+- prestart 退出契约固定：
+  - `exit 0` 且 JSON `status=ready_to_start`：唯一允许创建 Ollama/backend 进程的状态；
+  - `exit 10` 且 `status=already_running`：不创建任何进程，改为执行 runtime-full；
+    runtime-full 通过后 start 整体返回 0；
+  - `exit 1` 且 `status=missing_prerequisite`：显示固定中文修复建议并中止，不启动
+    部分服务；backend stopped 本身不是缺失项；
+  - `exit 2` 且 `status=unsafe_or_corrupt`：fail closed，中止且不得修改安装；
+  - 其他退出码或 status/exit 不匹配视为内部错误，退出 2。
 - 处理 stale PID 和 PID reuse，不能仅靠 `kill -0`。
 - 先确认/启动 11435 上的项目-owned Ollama，再启动当前 release backend；不探测、
   复用或停止用户 11434 daemon。
@@ -341,6 +363,9 @@ ZIP 严禁包含：
 - 日志写入 `logs/backend.log`；输出使用 `~/...` 形式的日志和 extension 路径。
 - 使用有界 health 重试，不用任意 sleep 猜测；成功后显示
   `http://127.0.0.1:8765/health`。
+- backend health 成功后才执行默认 `doctor --phase runtime-full`；runtime-full 通过
+  才向用户报告启动成功。失败时停止本次创建的 backend/Ollama，保留已安装数据并返回
+  doctor 对应非零退出码。
 - 启动失败必须清理本次创建的 backend/owned Ollama，不影响任何用户 Ollama。
 
 ### 4.4 `stop.command`
@@ -374,14 +399,15 @@ ZIP 严禁包含：
   - 任一字段不匹配、PID 已复用或 leader 不存在时绝不发送信号，隔离 record 并由
     doctor 报告 `PROCESS_OWNERSHIP_UNVERIFIED`；
   - 不使用旧 record 推断同名进程属于本项目。
-- start/stop/upgrade/uninstall 均持有 lifecycle lock，并在切换 service 前等待
+- install/start/stop/upgrade/uninstall 均持有 lifecycle lock，并在切换 service 前等待
   ownership records 收敛；未收敛则失败，不带病切换 release。
 
 ### 4.6 `doctor.command`
 
-支持默认人类输出和 `--json`。默认命令只执行已安装系统的 `runtime-full`；安装内部
-验证通过 `packaging/tools/verify_install.py --phase ...` 调用，不复用默认 doctor
-并偷偷放宽必需项。
+支持默认人类输出和 `--json`。默认命令只执行已安装且已启动系统的 `runtime-full`；
+安装和 start 前检查通过
+`packaging/tools/verify_install.py --phase staging-core|dependencies|installed-prerequisites`
+调用，不复用默认 doctor 并偷偷放宽必需项。
 
 - schema version、app version、OS、arch、Rosetta、内存、磁盘。
 - release/current symlink 和 manifest 完整性。
@@ -423,104 +449,203 @@ JSON 只包含状态、版本、布尔值、错误码和去敏建议；不包含
 - 明确提供“删除所有数据”选项，必须输入固定中文确认短语。
 - purge 前显示将删除的 canonical root，不接受任意参数路径。
 - 用户 11434 Ollama 及其模型永不删除；项目 11435 Ollama 模型只有 purge 才删除。
+- purge 全程持有 parent-scoped lifecycle flock，并先 durable 写
+  `.LocalVideoTranscriber.lifecycle/uninstall-journal/{slot-a.json,slot-b.json}`；
+  使用第 4.9 节相同的 generation/checksum/temp-write/file-fsync/rename/dir-fsync
+  双槽协议。
+- uninstall journal substate 固定为
+  `INTENT_WRITTEN → ROOT_TO_TOMBSTONE_RENAMED → PARENT_SYNCED_AFTER_RENAME →
+  DELETE_STARTED → TOMBSTONE_REMOVED → PARENT_SYNCED_AFTER_DELETE → COMPLETE`；
+  每次 rename/delete 和 parent fsync 前后均有 SIGKILL failpoint。
+- 确认服务和 ownership records 收敛后，将
+  `LocalVideoTranscriber` 原子 rename 为同 parent 下的
+  `.LocalVideoTranscriber.tombstone.<nonce>`，fsync parent，再递归删除 tombstone，
+  最后再次 fsync parent；整个删除完成前不得释放 flock。
+- purge 不删除 `.LocalVideoTranscriber.lifecycle/lock`。即使最终只剩这个 0600
+  lock inode，也必须保留，确保等待中的 install/start 不可能创建不同 inode 并越过
+  当前 purge。
+- purge 崩溃后，下一命令先取得同一 parent lock，再根据 uninstall journal 和
+  root/tombstone 状态幂等完成删除或恢复；禁止在未对账时创建新安装根。
+- purge 恢复矩阵：
+  - root 存在、tombstone 不存在且已确认 purge：继续 root → tombstone；
+  - root 不存在、tombstone 存在：继续删除 tombstone；
+  - root/tombstone 均不存在：写 COMPLETE；
+  - root/tombstone 均存在：只有 tombstone identity 与 journal 匹配且 root 被证明是
+    purge 后外部篡改时才 fail closed；正常并发 install/start 因 parent lock 和启动
+    对账不可能创建该组合。
+- 所有等待中的 install/start 在取得相同 lock 后必须先完成 uninstall 对账，不能在
+  purge 释放后直接创建 root。
 
-### 4.9 升级事务、journal 与启动对账
+### 4.9 通用发布/升级 transaction journal 与启动对账
 
-升级不是“复制后失败再尽量恢复”，而是由 lifecycle lock 和 durable journal 驱动的
-事务。`runtime/upgrade-journal.json` 权限为 `0600`，只保存版本、相对路径、状态和
-checksum，不保存 Token、环境变量或原始异常。
+Checkpoint 7 先引入与数据库无关的通用
+`packaging/tools/transaction_journal.py` 和
+`runtime/transaction-journal/{slot-a.json,slot-b.json}`，负责首次发布的
+current、stable extension、
+precommit service、commit 和 activation。Checkpoint 8 只能复用该 API 并向 schema
+增加 services/DB/migration 状态；不得让 Checkpoint 7 import 或调用 Checkpoint 8 的
+upgrade helper。
 
-每次 journal 更新必须：
+journal 权限为 `0600`，只保存 schema、单调 generation、operation
+(`first_install|upgrade`)、事务 ID、版本、相对路径、预期 identity/checksum、
+decision 和 substate，不保存 Token、环境变量或原始异常。使用双槽而不是原地覆盖：
 
-1. 在 runtime 同目录写唯一临时文件。
-2. flush 并 `fsync` 文件。
-3. `rename` 覆盖正式 journal。
-4. 打开 runtime 目录并 `fsync` directory FD。
+1. 读取两个 slot，验证 schema、事务 ID、generation 和内容 checksum；选择最高有效
+   generation，单个损坏/截断 slot 不影响恢复。
+2. 把下一 generation 写入非活动 slot 的唯一临时文件。
+3. flush 并 `fsync` 临时文件。
+4. rename 临时文件为非活动 slot。
+5. 打开 journal directory 并 `fsync` directory FD；至此新 generation 才生效。
+6. 不删除仍是上一有效 generation 的另一 slot；下次更新才轮换。
 
-固定状态：
+任何会改变 filesystem identity 的操作均使用相同协议：
+
+1. 先 durable 写 intent，包含 source、destination、old/new identity 和预期 checksum。
+2. 执行一次 rename 或 file write。
+3. durable 写 `effect_observed`。
+4. fsync 被写文件（若有）。
+5. durable 写 `file_synced`。
+6. fsync 每个受影响 parent directory。
+7. durable 写 `parent_synced`。
+
+测试必须在上述每个 intent write、journal file fsync、journal rename、目标 rename、
+目标 file fsync、parent directory fsync 的前后注入 SIGKILL；不能只在粗粒度 state
+结束后注入。
+
+通用发布状态：
 
 ```text
 PREPARED
-SERVICES_STOPPED
-DB_BACKED_UP
-MIGRATED
+CURRENT_SWITCHING
 CURRENT_SWITCHED
+EXTENSION_SWITCHING
 EXTENSION_SWITCHED
 SERVICE_PRECOMMIT_READY
 COMMITTED
 ACTIVATED
 ```
 
-升级顺序：
+每个 current/extension switch 在 journal 中分别维护：
 
-1. 取得 lifecycle 排他锁；若存在 journal，必须先对账，禁止开始第二次升级。
-2. 完成新 release 的 staging/core 和 dependencies 验证，写 `PREPARED`。
-3. 停止 backend 和项目-owned Ollama；等待所有 ownership records 收敛，确认
+```text
+intent_written
+next_prepared
+next_parent_synced
+old_to_previous_renamed
+parent_synced_after_old
+next_to_live_renamed
+parent_synced_after_live
+identity_verified
+```
+
+current 使用 `current.next/current.previous/current`，extension 使用
+`extension.next/extension.previous/extension`；首次安装的 `previous` identity 明确为
+absent。禁止覆盖式逐文件复制。
+
+通用 current/extension 子步骤恢复矩阵：
+
+| live | next | previous | 未 COMMITTED 自动动作 | 已 COMMITTED 自动动作 |
+| --- | --- | --- | --- | --- |
+| old | new | absent | 删除 next，保持 old | 发布 new 后验证 |
+| absent | new | old | previous → live，删除 next | next → live，保留 previous 到验证完成 |
+| new | absent | old | live → next，previous → live | 保持 new，验证后删除 previous |
+| new | absent | absent（首次安装） | 删除 live，恢复未安装状态 | 保持 new |
+| old | absent | absent | 保持 old | 仅当 old identity 等于 committed new 才完成，否则按 intent 重建 new |
+| absent | absent | old | previous → live | 从 journal 指定 candidate 恢复 new，否则停止并报告缺失 artifact |
+
+每行操作都再次走 intent/substate/fsync 协议，因此恢复过程自身可重复崩溃并保持幂等。
+live/next/previous 同时存在等额外组合先按预期 identity 分类为 old/new，再归一化到上表；
+只有 checksum/identity 与 journal 均冲突、且无法归入任一合法部分完成组合时才
+`unsafe_or_corrupt` fail closed。不得把普通“rename 已发生但 journal 完成位未写”
+当作不可恢复不一致。
+
+首次发布顺序（Checkpoint 7）：
+
+1. 持 lifecycle lock，对账旧 transaction journal。
+2. staging/core 和 dependencies 通过后写 `PREPARED`。
+3. 按 substate 协议切换 current，再切换 stable extension。
+4. 启动 candidate precommit service；worker 在 claim 前 barrier 阻塞。
+5. runtime-full 通过后 durable 写 `COMMITTED`。
+6. 发送 ACTIVATE，确认 normal health，写 `ACTIVATED`。
+7. 清理 previous/candidate；清理动作本身也有 intent/substate。
+
+升级扩展状态（Checkpoint 8）：
+
+```text
+SERVICES_STOPPED
+DB_BACKUP_WRITING
+DB_BACKED_UP
+MIGRATING
+MIGRATED
+DB_RESTORE_QUARANTINING
+DB_RESTORE_WRITING
+DB_RESTORED
+```
+
+升级在 `PREPARED` 后、current switch 前执行：
+
+1. 停止 backend 和项目-owned Ollama；等待 ownership records 收敛，确认
    ProcessInstanceLock 可取得且没有 backend SQLite connection，写
    `SERVICES_STOPPED`。
-4. 数据库备份严格按以下顺序：
-   - 由已停止服务对应版本的 app-owned Python 打开唯一维护连接；
+2. 数据库备份严格按以下顺序：
+   - 由旧 release app-owned Python 打开唯一维护连接；
    - 执行 `PRAGMA wal_checkpoint(TRUNCATE)`，检查返回值，不允许 busy；
    - 执行 `PRAGMA quick_check`；
+   - durable 写 backup intent；
    - 使用 SQLite `Connection.backup()` 写同一文件系统 staging backup；
    - commit/close source 和 backup connections；
-   - 确认没有进程持有 DB、WAL、SHM，且所有 Python connection 已关闭；
+   - 确认没有进程持有 DB/WAL/SHM，且所有 Python connections 已关闭；
    - fsync backup file 和 backup directory；
-   - 不把 live `db/-wal/-shm` 作为三个普通文件直接复制。
-5. 验证 backup 可独立打开、`quick_check=ok` 后写 `DB_BACKED_UP`。
-6. 使用 candidate release 的 migration-only/maintenance entrypoint：
+   - 独立打开 backup，`quick_check=ok` 后关闭，写 `DB_BACKED_UP`；
+   - 不把 live DB/WAL/SHM 当作三个普通文件复制。
+3. 使用 candidate 的 migration-only/maintenance entrypoint：
    - 获取同一个 DB instance lock；
    - 只执行 schema initialize/migration 和兼容性检查；
    - 不创建 Pipeline、不启动 JobWorkerPool、不 claim、不恢复 queued Job；
-   - 所有 SQLite connections 关闭后才返回成功并写 `MIGRATED`。
-7. 通过同目录临时 symlink + rename 切换 `app/current`，fsync `app/`，写
-   `CURRENT_SWITCHED`。
-8. 将 stable extension candidate rename 到 `extension.next`，旧 extension rename 到
-   journal 记录的 `extension.previous`，再将 next rename 为 `extension`；每一步
-   fsync parent，写 `EXTENSION_SWITCHED`。禁止在原目录逐文件覆盖。
-9. 启动 candidate precommit service：
-   - 完成 app lifespan、instance lock、repository、pipeline factory 和所有 worker
-     thread 创建；
-   - worker 统一阻塞在 claim 前 activation barrier；
-   - 通过继承的私有 pipe 向 upgrader 发送 READY；pipe 不含 Token；
-   - pipe 在 ACTIVATE 前关闭时，进程必须无线程 claim 地退出。
-10. 运行切换后的 `runtime-full`，要求 current、stable extension、precommit health、
-    capabilities、Token 权限和 DB quick check 全部通过，写
-    `SERVICE_PRECOMMIT_READY`。
-11. 写入并 fsync `COMMITTED` 后，才通过私有 pipe 发送 ACTIVATE。所有 worker 必须在
-    观察到 durable COMMITTED 以后越过 barrier，保证 commit 前零 claim、零任务处理。
-12. 等待 normal health；写 `ACTIVATED`，再清理旧 release、extension.previous 和
-    临时 backup。备份保留策略独立执行，不能在事务内提前删除最后可用 backup。
+   - 所有 SQLite connections 关闭后写 `MIGRATED`。
+4. 复用通用 current/extension/precommit/commit/activation 流程。
 
-回滚顺序：
+DB restore 为每个 DB/WAL/SHM 文件维护独立
+`quarantine_intent → renamed → parent_synced` substate，并为 restore temp 维护
+`write_intent → written → file_synced → live_renamed → parent_synced → quick_checked`。
 
-- `PREPARED` 前后：删除未发布 staging，不动 DB/current/extension/service。
-- `SERVICES_STOPPED` 或 `DB_BACKED_UP`：确保所有服务停止，旧 current/extension
-  不变，必要时重启旧服务。
-- `MIGRATED` 至 `SERVICE_PRECOMMIT_READY`：先关闭 candidate precommit pipe 并等待
-  process/threads/SQLite connections 全部退出；恢复 DB 后再恢复 extension/current。
-- DB 恢复固定顺序：
-  1. 持锁并确认无服务、无 DB connection；
-  2. 将现有 DB、WAL、SHM rename 到 journal quarantine，不立即删除；
-  3. 将已验证 backup 复制到 DB 同目录临时文件，fsync file；
-  4. 原子 rename 为 `lvt.sqlite3`，fsync DB directory；
-  5. 确认恢复后的 DB 旁不存在旧 `-wal/-shm`；
-  6. 打开唯一连接执行 `quick_check` 后关闭；
-  7. 恢复旧 current symlink 和 stable extension，逐个 fsync parent；
-  8. 启动旧 service 并通过 runtime/full 后，才标记 rollback 完成。
-- `COMMITTED` 后不得自动回滚到旧 DB/schema，因为 ACTIVATE 之后可能已经 claim。
-  如果在 `COMMITTED` 与 `ACTIVATED` 间崩溃，启动对账必须继续启动已提交的新 release
-  并完成 ACTIVATE；不能启动旧版本。
+DB 部分完成恢复矩阵：
 
-启动对账：
+| live DB | quarantine DB | restore temp | WAL/SHM 状态 | 自动动作 |
+| --- | --- | --- | --- | --- |
+| old/migrated | absent | absent | live 或 absent | 依据 global decision 保持或开始 quarantine |
+| absent | present | absent | 任意部分 quarantine | 完成 WAL/SHM quarantine，再写 restore temp |
+| absent | present | valid temp | 已 quarantine | fsync temp 后 temp → live |
+| restored | present | absent | quarantine 存在 | 验证 restored digest/quick_check，再清理 quarantine |
+| restored | absent | absent | live WAL/SHM absent | 标记 DB_RESTORED |
+| live 与 quarantine 同时存在 | present | 任意 | 任意 | 按 journal identity 判断 live 是 old/migrated/restored，归一化到前述行 |
 
-- `start.command`、`install.command` 和 `uninstall.command` 取得 lifecycle lock 后，
-  第一动作都是读取 journal。
-- journal 与 filesystem state 不一致时 fail closed，禁止猜测 current 或删除数据。
-- 未到 `COMMITTED` 的 journal 一律按上述逆序 rollback。
-- `COMMITTED/ACTIVATED` journal 一律收敛到新版本；不得因旧 release 仍存在而回退。
-- 对账本身每个状态迁移仍使用 temp + file fsync + rename + directory fsync。
-- failpoint 测试必须覆盖每个 journal 状态之后进程被 `SIGKILL` 的重启恢复。
+WAL 和 SHM 各自按相同 substate 独立恢复；文件不存在是 journal 记录的合法 identity，
+不能与“尚未执行”混淆。恢复固定顺序仍是：
+
+1. 持锁并确认无 service、worker、tool supervisor 或 SQLite connection。
+2. 依次 quarantine live DB、WAL、SHM，每次 rename 前后更新 journal 并 fsync parent。
+3. 从已验证 backup 写 DB 同目录 temp，fsync file。
+4. temp → `lvt.sqlite3`，fsync DB directory。
+5. 确认 live `-wal/-shm` 不存在；打开唯一连接 quick_check 后关闭。
+6. 按通用矩阵恢复 extension/current，启动旧 service 并通过 runtime-full。
+
+全局恢复决策矩阵：
+
+| operation/decision | DB | current/extension | service |
+| --- | --- | --- | --- |
+| first_install，未 COMMITTED | 无 DB rollback | 自动回到未安装/旧 identity | 停 candidate |
+| upgrade，未 COMMITTED 且未 MIGRATED | 保持旧 DB | 自动回 old | 启动旧 service |
+| upgrade，未 COMMITTED 且已 MIGRATED | 自动完成 DB restore | DB 完成后自动回 old | runtime-full 后启动旧 service |
+| 任一 operation，已 COMMITTED | 不恢复旧 schema | 自动收敛 committed new | 启动/激活新 service |
+
+`COMMITTED` 后不得自动回滚旧 DB/schema，因为 ACTIVATE 后可能已经 claim。如果在
+`COMMITTED` 与 `ACTIVATED` 间崩溃，启动对账必须继续新 release 并完成 ACTIVATE。
+
+`start.command`、`install.command` 和 `uninstall.command` 取得 parent lifecycle lock
+后的第一动作都是读取 journal 并执行上述矩阵。所有合法部分完成组合必须自动 rollback
+或 converge；只有 artifact identity/checksum 真正损坏、无法映射到矩阵时才
+fail closed。failpoint 测试覆盖每个子步骤前后，且对账过程自身重复 SIGKILL 后仍幂等。
 
 ## 5. Checkpoint 计划
 
@@ -628,8 +753,8 @@ Phase 4: make runtime model paths installable
 
 - 建立共享 shell library、路径安全、日志去敏、download/checksum helper、两级
   lifecycle lock。
-- 实现 staging-core/dependencies/runtime-full 三个显式 validator，以及默认只读
-  `doctor.command` 和 `--json` schema。
+- 实现 staging-core/dependencies/installed-prerequisites/runtime-full 四个显式
+  validator，以及默认只读 `doctor.command` 和 `--json` schema。
 - 实现 macOS/arch/Rosetta/磁盘/内存/依赖/模型/权限/health 检查。
 
 计划文件：
@@ -661,7 +786,7 @@ Phase 4: make runtime model paths installable
 
 - doctor 对未安装、部分安装、健康安装给出稳定状态和中文建议。
 - 不加载模型、不联网、不修改数据库或 Token。
-- 三阶段 validator 的依赖边界由失败测试锁定，不存在 current 循环依赖。
+- 四阶段 validator 的依赖边界由失败测试锁定，不存在 current/backend 循环依赖。
 
 建议 commit：
 
@@ -802,6 +927,8 @@ Phase 4: supervise owned media processes
 - 实现 backend/项目-owned Ollama 生命周期、健康收敛和日志。
 - 将已通过 staging/core 和 dependencies 的首次安装 candidate 发布为 current 和
   stable extension，并执行切换后的 runtime/full。
+- 本 checkpoint 自己引入通用首次发布 transaction journal、双槽 durability、
+  current/extension substate 和恢复矩阵；不得依赖尚未存在的 upgrade/DB helper。
 - 引入 precommit service/worker activation barrier，保证 durable commit 前零 claim。
 - 安装完成时安全复制 Token，输出稳定 extension 路径和 Chrome 加载步骤。
 
@@ -812,11 +939,14 @@ Phase 4: supervise owned media processes
 - `scripts/install.command`
 - `scripts/lib/process.zsh`
 - `packaging/tools/process_state.py`
+- `packaging/tools/transaction_journal.py`
+- `packaging/schemas/transaction-journal-v1.schema.json`
 - `packaging/tools/publish_install.py`
 - `backend/src/lvt/api/app.py`（仅 precommit 启动模式）
 - `backend/src/lvt/workers/runner.py`（仅 claim 前 activation barrier）
 - `backend/tests/integration/test_precommit_startup.py`
 - `packaging/tests/test_service_lifecycle.py`
+- `packaging/tests/test_transaction_journal.py`
 - `packaging/tests/test_first_install_publish.py`
 - `packaging/tests/test_chrome_connection.py`
 
@@ -824,7 +954,17 @@ Phase 4: supervise owned media processes
 
 - staging/core、dependencies、current switch 后 runtime/full 的严格顺序；前两阶段均不
   读取 current/backend。
+- start prestart 四类 exit/status 组合；只有
+  `0/ready_to_start` 创建进程，`10/already_running` 只做 runtime-full，其余零启动。
+- backend 启动前 runtime-full sentinel 必须未调用；health 成功后 runtime-full 必须
+  调用且失败会清理本次服务。
 - current 或 stable extension 任一切换后 fail，恢复为旧值或首次安装的“不存在”。
+- current 和 extension 的每个 intent、journal slot write/file fsync/rename、
+  target rename、parent fsync 前后 SIGKILL；重启按通用矩阵自动恢复。
+- 双槽 journal 单槽截断、checksum 错、generation 落后均选择另一有效 generation；
+  两槽均坏才 fail closed。
+- 首次安装所有 live/next/previous 合法部分组合都自动 rollback/converge，不能仅报告
+  filesystem inconsistent。
 - precommit service 完成 repository/pipeline/thread 初始化但 activation 前
   `execution_count_total=0`、无 claimed event。
 - commit journal fsync 完成后才释放 barrier；pipe EOF/SIGKILL 在 commit 前零 claim。
@@ -839,6 +979,8 @@ Phase 4: supervise owned media processes
 完成标准：
 
 - 首次安装形成完整 current/stable extension/service 事务，无循环 doctor 依赖。
+- 通用 journal 和首次发布恢复在本 checkpoint 可独立运行，文件中没有 upgrade 模块
+  import，Checkpoint 8 未实现时仍能通过全部首次安装 failpoint。
 - 双击 start 后 `/health` healthy；双击 stop 后项目进程归零。
 - durable commit 前没有任务处理；用户可完成 Chrome 加载和 Token 粘贴。
 
@@ -852,15 +994,19 @@ Phase 4: publish and manage local services
 
 范围：
 
-- 实现第 4.9 节全部 journal 状态、migration-only、DB backup/restore、precommit
-  service、current/extension/service 整体切换和 rollback。
+- 复用 Checkpoint 7 的 `transaction_journal.py`、current/extension 恢复矩阵和
+  precommit service；只向 schema/API 添加 upgrade operation、services、DB backup、
+  migration 和 restore substates。
+- 实现 migration-only、DB backup/restore、current/extension/service 整体切换和
+  rollback；不得复制或替换 Checkpoint 7 的通用 journal。
 - `start.command` 在启动任何服务前执行 journal 对账。
 - 实现默认保留数据卸载和显式 purge。
 
 计划文件：
 
 - `packaging/tools/upgrade.py`
-- `packaging/tools/upgrade_journal.py`
+- `packaging/tools/transaction_journal.py`（仅向后兼容地扩展 upgrade substates）
+- `packaging/schemas/transaction-journal-v1.schema.json`（additive schema）
 - `packaging/tools/sqlite_backup.py`
 - `backend/src/lvt/maintenance.py`
 - `backend/tests/integration/test_maintenance_mode.py`
@@ -870,12 +1016,19 @@ Phase 4: publish and manage local services
 - `packaging/tests/test_upgrade.py`
 - `packaging/tests/test_upgrade_recovery.py`
 - `packaging/tests/test_uninstall.py`
+- `packaging/tests/test_uninstall_concurrency.py`
 
 测试：
 
 - 0.1.0 → 测试版 0.1.1；默认拒绝降级。
 - migration-only 模式不构造 Pipeline/JobWorkerPool，不写 claimed event。
-- 在每个 journal 状态 fsync 后 SIGKILL，重启对账结果唯一且幂等。
+- DB/WAL/SHM 每个 quarantine intent、rename、file fsync、directory fsync，以及
+  restore temp write/fsync/rename/directory fsync 前后 SIGKILL；重启按 DB 矩阵自动
+  恢复且幂等。
+- 参数化所有可达的 DB/WAL/SHM `live/quarantine/restore-temp` 子状态笛卡尔组合；
+  每个组合必须自动归一化为旧版本 rollback 或 committed 新版本 converge。只有
+  identity/checksum 与 journal 矛盾的不可达组合才允许 fail closed。
+- current/extension 子步骤沿用 Checkpoint 7 测试向量，upgrade 不允许改变其恢复结果。
 - commit 前所有 failpoint 均 `execution_count_total=0`；COMMITTED 后只向新版本收敛。
 - WAL active、checkpoint busy、open connection、backup quick_check 失败均阻止切换。
 - DB restore 顺序验证：无连接 → quarantine DB/WAL/SHM → restore temp/fsync/rename →
@@ -885,12 +1038,21 @@ Phase 4: publish and manage local services
 - rollback 后 DB、current、stable extension 和旧 service 均为旧版本且 health 正常。
 - Token、Job、artifact、models 和 exports 在成功升级/rollback 中保持。
 - uninstall 默认保留数据；purge 需要固定确认短语；恶意路径/symlink 全部拒绝。
+- Barrier 将 purge 阻塞在 root→tombstone rename 前后及 tombstone 删除中，同时启动
+  install/start：后两者只能等待同一 parent flock，释放后先完成 uninstall 对账。
+- purge 前后 `stat` 验证 parent lock device/inode 恒定；任何测试出现第二 lock inode
+  或等待方越过 purge 即失败。
+- purge 在每个 uninstall journal substate 后 SIGKILL；root/tombstone 恢复矩阵最终
+  自动完成删除，不能留下允许新 install 混入的窗口。
 
 完成标准：
 
 - 每个 commit 前 failpoint 后完整回旧版本；COMMITTED 后完整收敛到新版本。
 - DB、current、stable extension 和 service 不出现可观察混合状态。
 - migration-only 和 precommit barrier 证明 commit 前零任务 claim。
+- Checkpoint 7 的首次发布 transaction tests 无修改继续通过，证明不存在反向依赖。
+- purge 删除完数据后 parent-scoped lock inode 仍存在且后续 install/start 使用同一
+  inode。
 
 建议 commit：
 
