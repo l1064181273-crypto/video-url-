@@ -1,0 +1,7 @@
+Python Software Foundation License Version 2
+
+Canonical license text and bundled third-party notices:
+https://docs.python.org/3.11/license.html
+
+The app-owned CPython runtime is downloaded after installation and is not included
+in the Local Video Transcriber ZIP.

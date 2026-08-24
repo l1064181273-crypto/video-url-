@@ -1,0 +1,6 @@
+Apache License, Version 2.0
+
+Canonical license text:
+https://www.apache.org/licenses/LICENSE-2.0.txt
+
+Dependencies identified as Apache-2.0 remain copyright their respective owners.

@@ -1,0 +1,4 @@
+MIT License
+
+The project license text is reproduced in the repository root LICENSE file.
+Canonical text: https://opensource.org/license/mit

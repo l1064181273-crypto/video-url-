@@ -1,0 +1,7 @@
+GNU General Public License, version 3 or later
+
+Canonical license text:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+The selected FFmpeg binary reports a GPL-enabled build. The binary is downloaded
+after installation and is not included in the Local Video Transcriber ZIP.

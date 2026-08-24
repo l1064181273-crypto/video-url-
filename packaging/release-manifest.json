@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "product": {
+    "name": "Local Video Transcriber",
+    "version": "0.1.0"
+  },
+  "platform": {
+    "os": "macos",
+    "minimum_version": "13.0",
+    "architecture": "arm64"
+  },
+  "archive": {
+    "filename": "LocalVideoTranscriber-0.1.0-macos-arm64.zip"
+  },
+  "allowlist": [
+    "VERSION",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "README.md",
+    "backend/pyproject.toml",
+    "backend/uv.lock",
+    "backend/src/**",
+    "extension/dist/**",
+    "packaging/dependencies.json",
+    "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km",
+    "docs/INSTALLATION.md",
+    "docs/USER_GUIDE.md",
+    "docs/TROUBLESHOOTING.md",
+    "docs/KNOWN_LIMITATIONS.md",
+    "docs/LICENSES/**",
+    "install.command",
+    "start.command",
+    "stop.command",
+    "doctor.command",
+    "uninstall.command"
+  ],
+  "file_modes": {
+    "default": "0644",
+    "directories": "0755",
+    "executables": {
+      "*.command": "0755"
+    }
+  },
+  "forbidden": [
+    "**/.DS_Store",
+    "**/.env*",
+    "**/.git/**",
+    "**/.mypy_cache/**",
+    "**/.pytest_cache/**",
+    "**/.ruff_cache/**",
+    "**/.venv*/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/.coverage",
+    "**/coverage/**",
+    "**/htmlcov/**",
+    "**/node_modules/**",
+    "**/test-results/**",
+    "**/playwright-report/**",
+    "**/*.tmp",
+    "**/tmp/**",
+    "**/*.map",
+    "**/*.trace",
+    "**/*.sqlite*",
+    "**/*.db*",
+    "**/*.log",
+    "**/*.mp3",
+    "**/*.mp4",
+    "**/*.mov",
+    "**/*.wav",
+    "**/*.gguf",
+    "**/*.onnx",
+    "**/models/**",
+    "**/cache/**",
+    "**/logs/**",
+    "**/work/**",
+    "**/exports/**",
+    "**/api-token"
+  ]
+}

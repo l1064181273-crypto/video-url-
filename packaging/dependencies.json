@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "target": "macos-arm64",
+  "artifacts": [
+    {
+      "id": "uv",
+      "kind": "tool",
+      "version": "0.11.25",
+      "architecture": "arm64",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.11.25/uv-aarch64-apple-darwin.tar.gz",
+      "sha256": "5fc334bb25d19806262efd1f6e7d380155c7e817d89bf426df4ba7ae873c9471",
+      "size": 21911525,
+      "media_type": "application/gzip",
+      "license": "Apache-2.0 OR MIT",
+      "license_url": "https://github.com/astral-sh/uv/blob/0.11.25/LICENSE-APACHE",
+      "expected_files": ["uv-aarch64-apple-darwin/uv", "uv-aarch64-apple-darwin/uvx"]
+    },
+    {
+      "id": "python",
+      "kind": "runtime",
+      "version": "3.11.15+20260623",
+      "architecture": "arm64",
+      "url": "https://releases.astral.sh/github/python-build-standalone/releases/download/20260623/cpython-3.11.15%2B20260623-aarch64-apple-darwin-install_only_stripped.tar.gz",
+      "sha256": "2318799eaf104f8a29bc09a93b0851b05dbbcb4ce9a5f045ddea169c0c7ff3a5",
+      "size": 27115717,
+      "media_type": "application/gzip",
+      "license": "PSF-2.0",
+      "license_url": "https://docs.python.org/3.11/license.html",
+      "expected_files": ["python/bin/python3.11"]
+    },
+    {
+      "id": "ffmpeg",
+      "kind": "tool",
+      "version": "8.0",
+      "architecture": "arm64",
+      "url": "https://raw.githubusercontent.com/zackees/ffmpeg_bins/df95abcb0ce6efff710dda5ef28a2f6f1dc21493/v8.0/darwin_arm64.zip",
+      "sha256": "b2da44a8169c4d09a97db996250690c3346f72e4795521d23d3dbb1e72421207",
+      "size": 41925556,
+      "media_type": "application/zip",
+      "license": "GPL-3.0-or-later",
+      "license_url": "https://ffmpeg.org/legal.html",
+      "expected_files": ["darwin_arm64/ffmpeg", "darwin_arm64/ffprobe"]
+    },
+    {
+      "id": "ollama",
+      "kind": "tool",
+      "version": "0.32.15",
+      "architecture": "arm64",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.32.15/Ollama-darwin.zip",
+      "sha256": "6f01ce31e63900437944c6d3d316c34f6c45463a7d4a258ed253a1732e0e6d42",
+      "size": 188366366,
+      "media_type": "application/zip",
+      "license": "MIT",
+      "license_url": "https://github.com/ollama/ollama/blob/v0.32.15/LICENSE",
+      "expected_files": ["Ollama.app/Contents/MacOS/ollama"]
+    },
+    {
+      "id": "asr-whisper-small-mlx-config",
+      "kind": "model",
+      "version": "45f3915923c7a79a5a5b5a7d909d39aeb0e5630e",
+      "architecture": "arm64",
+      "url": "https://huggingface.co/mlx-community/whisper-small-mlx/resolve/45f3915923c7a79a5a5b5a7d909d39aeb0e5630e/config.json",
+      "sha256": "e8f58e638208af66d5d5d67801259dc7a12d199e971967a9f9d33a8e3635668e",
+      "size": 266,
+      "media_type": "application/json",
+      "license": "MIT",
+      "license_url": "https://github.com/openai/whisper/blob/main/LICENSE",
+      "expected_files": ["models/asr/whisper-small-mlx/config.json"]
+    },
+    {
+      "id": "asr-whisper-small-mlx-weights",
+      "kind": "model",
+      "version": "45f3915923c7a79a5a5b5a7d909d39aeb0e5630e",
+      "architecture": "arm64",
+      "url": "https://huggingface.co/mlx-community/whisper-small-mlx/resolve/45f3915923c7a79a5a5b5a7d909d39aeb0e5630e/weights.npz",
+      "sha256": "55b6674c9b339702d486e2b1573839a66f8ec8f821ed2886993ef717a86b09f5",
+      "size": 481307592,
+      "media_type": "application/octet-stream",
+      "license": "MIT",
+      "license_url": "https://github.com/openai/whisper/blob/main/LICENSE",
+      "expected_files": ["models/asr/whisper-small-mlx/weights.npz"]
+    },
+    {
+      "id": "diarization-segmentation",
+      "kind": "model",
+      "version": "pyannote-segmentation-3.0-onnx",
+      "architecture": "arm64",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+      "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
+      "size": 6958444,
+      "media_type": "application/x-bzip2",
+      "license": "MIT",
+      "license_url": "https://huggingface.co/pyannote/segmentation-3.0/blob/main/LICENSE",
+      "expected_files": ["models/diarization/segmentation/model.onnx"]
+    },
+    {
+      "id": "diarization-embedding",
+      "kind": "model",
+      "version": "nemo-en-titanet-small",
+      "architecture": "arm64",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+      "sha256": "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
+      "size": 40257283,
+      "media_type": "application/onnx",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/NVIDIA/NeMo/blob/v1.19.0/LICENSE",
+      "expected_files": ["models/diarization/embedding/nemo_en_titanet_small.onnx"]
+    },
+    {
+      "id": "hy-mt2",
+      "kind": "model",
+      "version": "1cd5208700acedef4ef93019b6cfc148b8522d45",
+      "architecture": "arm64",
+      "url": "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/1cd5208700acedef4ef93019b6cfc148b8522d45/Hy-MT2-1.8B-Q4_K_M.gguf",
+      "sha256": "dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699",
+      "size": 1133080448,
+      "media_type": "application/octet-stream",
+      "license": "Apache-2.0",
+      "license_url": "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/blob/1cd5208700acedef4ef93019b6cfc148b8522d45/LICENSE",
+      "expected_files": ["models/ollama/blobs/sha256-dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699"]
+    }
+  ],
+  "ollama_models": [
+    {
+      "id": "qwen2.5-1.5b",
+      "version": "1.5b",
+      "architecture": "arm64",
+      "manifest_url": "https://registry.ollama.ai/v2/library/qwen2.5/manifests/1.5b",
+      "manifest_sha256": "65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b",
+      "manifest_size": 857,
+      "manifest_media_type": "application/vnd.docker.distribution.manifest.v2+json",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/QwenLM/Qwen2.5/blob/main/LICENSE",
+      "expected_files": ["models/ollama/manifests/registry.ollama.ai/library/qwen2.5/1.5b"],
+      "blobs": [
+        {"digest": "sha256:377ac4d7aeefd5b870c9fccff9a6d4df36901d99fe3277c2f755bc401601ba1c", "size": 487, "media_type": "application/vnd.docker.container.image.v1+json"},
+        {"digest": "sha256:183715c435899236895da3869489cc30ac241476b4971a20285b1a462818a5b4", "size": 986048512, "media_type": "application/vnd.ollama.image.model"},
+        {"digest": "sha256:66b9ea09bd5b7099cbb4fc820f31b575c0366fa439b08245566692c6784e281e", "size": 68, "media_type": "application/vnd.ollama.image.system"},
+        {"digest": "sha256:eb4402837c7829a690fa845de4d7f3fd842c2adee476d5341da8a46ea9255175", "size": 1482, "media_type": "application/vnd.ollama.image.template"},
+        {"digest": "sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e", "size": 11343, "media_type": "application/vnd.ollama.image.license"}
+      ]
+    }
+  ],
+  "trust_policy": {
+    "allow_runtime_digest_rewrite": false,
+    "allow_floating_tags": false,
+    "allowed_schemes": ["https"],
+    "allowed_architectures": ["arm64"]
+  }
+}
