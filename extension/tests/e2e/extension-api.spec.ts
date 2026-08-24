@@ -609,10 +609,64 @@ test("side panel submits a mixed batch and restores the real backend job list", 
     await expect(row).toHaveScreenshot("checkpoint-3-job-row-320.png", {
       animations: "disabled",
     });
+    await expectNoHorizontalOverflow(page);
+    await page.setViewportSize({ width: 400, height: 800 });
+    await expect(row).toHaveScreenshot("checkpoint-7-job-row-400.png", {
+      animations: "disabled",
+    });
+    await expectNoHorizontalOverflow(page);
     await page.setViewportSize({ width: 420, height: 800 });
     await expect(row).toHaveScreenshot("checkpoint-3-job-row-420.png", {
       animations: "disabled",
     });
+    await expectNoHorizontalOverflow(page);
+    await page.setViewportSize({ width: 600, height: 800 });
+    await expect(row).toHaveScreenshot("checkpoint-7-job-row-600.png", {
+      animations: "disabled",
+    });
+    await expectNoHorizontalOverflow(page);
+    const contrastRatios = await row
+      .locator(".job-title, .job-url, .job-status, .job-meta, button")
+      .evaluateAll((elements) => {
+        const rgb = (value: string): [number, number, number] => {
+          const channels = value
+            .match(/\d+(?:\.\d+)?/gu)
+            ?.slice(0, 3)
+            .map(Number);
+          if (channels?.length !== 3) {
+            throw new Error(`unsupported computed color: ${value}`);
+          }
+          return channels as [number, number, number];
+        };
+        const luminance = (color: [number, number, number]): number => {
+          const linearize = (channel: number): number => {
+            const normalized = channel / 255;
+            return normalized <= 0.04045
+              ? normalized / 12.92
+              : ((normalized + 0.055) / 1.055) ** 2.4;
+          };
+          return (
+            0.2126 * linearize(color[0]) +
+            0.7152 * linearize(color[1]) +
+            0.0722 * linearize(color[2])
+          );
+        };
+        return elements.map((element) => {
+          const foreground = luminance(rgb(getComputedStyle(element).color));
+          let backgroundElement: Element | null = element;
+          let background = "rgba(0, 0, 0, 0)";
+          while (background.endsWith(", 0)")) {
+            if (backgroundElement === null) {
+              break;
+            }
+            background = getComputedStyle(backgroundElement).backgroundColor;
+            backgroundElement = backgroundElement.parentElement;
+          }
+          const backdrop = luminance(rgb(background));
+          return (Math.max(foreground, backdrop) + 0.05) / (Math.min(foreground, backdrop) + 0.05);
+        });
+      });
+    expect(Math.min(...contrastRatios)).toBeGreaterThanOrEqual(4.5);
 
     await page.close();
     const reopened = await context.newPage();
@@ -748,23 +802,31 @@ test("job controls, confirmed delete, and paginated events use the real backend"
     await page.getByRole("button", { name: "返回任务" }).click();
 
     const deleteButton = deleteRow.getByRole("button", { name: "删除 Delete Target" });
-    await deleteButton.click();
+    await deleteButton.focus();
+    await page.keyboard.press("Enter");
     await expect(page.locator("#delete-dialog")).toBeVisible();
     await expect(page.locator("#delete-job-title")).toHaveText("Delete Target");
     await expect(page.locator("#delete-cancel")).toBeFocused();
-    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
     await expect(page.locator("#delete-confirm")).toBeFocused();
     await page.keyboard.press("Tab");
-    expect(
-      await page.locator("#delete-dialog").evaluate((dialog) => {
-        return dialog.contains(document.activeElement);
-      }),
-    ).toBe(true);
-    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await expect(page.locator("#delete-cancel")).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#delete-confirm")).toBeFocused();
+    await page.keyboard.press("Escape");
     await expect(page.locator("#delete-dialog")).toBeHidden();
     await expect(deleteButton).toBeFocused();
+    const completedTab = page.getByRole("tab", { name: "已完成" });
+    await completedTab.focus();
+    await completedTab.press("Space");
+    await expect(completedTab).toHaveAttribute("aria-selected", "true");
     await deleteButton.click();
-    await page.getByRole("button", { name: "确认删除" }).dblclick();
+    await expect(page.locator("#delete-dialog")).toBeVisible();
+    const deleteConfirmButton = page.locator("#delete-confirm");
+    await deleteConfirmButton.focus();
+    await expect(deleteConfirmButton).toBeFocused();
+    await expect(deleteConfirmButton).toBeEnabled();
+    await deleteConfirmButton.click();
     await expect
       .poll(
         () =>
@@ -975,6 +1037,14 @@ async function expectSettingsFailure(
   await expect(concurrencyTwo).toHaveAttribute("aria-pressed", "true");
   await page.unroute(settingsUrl, handler);
   await expect(concurrencyOne).toBeEnabled();
+}
+
+async function expectNoHorizontalOverflow(page: Page): Promise<void> {
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+    ),
+  ).toBe(true);
 }
 
 async function expectSettingsNetworkFailure(page: Page, settingsUrl: string): Promise<void> {

@@ -8,6 +8,10 @@ import playwrightConfig from "../../playwright.config";
 const EXTENSION_ROOT = resolve(import.meta.dirname, "../..");
 
 describe("Playwright output isolation", () => {
+  it("disables traces so runtime tokens cannot be persisted", () => {
+    expect(playwrightConfig.use?.trace).toBe("off");
+  });
+
   it("resolves outputDir outside the extension build directory", () => {
     expect(playwrightConfig.outputDir).toBe("./test-results");
     if (playwrightConfig.outputDir === undefined) {

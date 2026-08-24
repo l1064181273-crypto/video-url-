@@ -1196,3 +1196,98 @@ cd backend
 - FastAPI `TestClient` 会输出一条来自上游 `httpx` 的弃用警告，不影响测试结果。
 - 队列、取消、重启恢复、Chrome 扩展、安装器和打包明确不属于 Phase 1，本报告
   未将这些能力描述为已实现或已通过。
+
+## Phase 3 Checkpoint 7：Chrome 集成与最终验收
+
+冻结基线：`36143e571349ffc2ca8c13a07fe0a33aec9658fb`。
+
+机器报告：`docs/PHASE-3-CHECKPOINT-7-ACCEPTANCE.json`。
+
+### 最终验收新增覆盖
+
+- 使用独立 persistent Chromium profile 加载 `extension/dist`，连接真实 Phase 2
+  Uvicorn API。
+- 后端未启动时显示固定中文错误；后端启动后手工重连成功。
+- 真实提交 Job 后，通过 deferred GET route 建立请求中断窗口；收到请求后确定性停止
+  Uvicorn，再释放 route。UI 报告断线但保留最后 Job 快照。
+- 同一 data root 和端口重启 Uvicorn 后，UI 重新连接并恢复 Job；关闭再打开 Side
+  Panel 后仍从真实 API 重建状态，Token 输入保持为空。
+- 使用 browser CDP 获取未被默认过滤的 tab target，通过
+  `Extensions.triggerAction` 触发浏览器 action。
+- 使用 page CDP `ServiceWorker.workerVersionUpdated` 获取 version ID，
+  `ServiceWorker.stopWorker` 停止指定 extension worker，并等待对应 target 消失。
+- action 打开 Side Panel 后 worker 复活；连续触发 action 时 Side Panel target 始终
+  只有一个。
+- worker 再次停止后，Side Panel 通过 `runtime.sendMessage` 触发复活并收到唯一固定
+  `lvt.lifecycle.ready` 握手。端口和 Token 从 `chrome.storage.local` 重建，未依赖
+  worker 全局易失状态。
+- 扩展原有真实后端 E2E 继续覆盖批量 accepted/rejected、真实任务状态、四类筛选、
+  详情、cancel/retry/confirmed delete、55 条事件分页去重、8 artifact、source/zh-CN
+  JSON 预览及全部下载、concurrency 1/2、七项动态 capabilities 和 Token 替换/清除。
+
+### 键盘与布局
+
+- Enter 打开删除确认框；Tab 和 Shift+Tab 在 modal 内循环；Escape 关闭并把焦点返回
+  删除按钮；Space 激活任务筛选 tab。
+- 删除确认使用稳定 locator click 单独验证真实 DELETE。曾尝试在同一原生 dialog
+  二次打开后用 Enter 确认，重复测试出现 1/3 偶发不派发 click，因此没有把该不稳定
+  Chrome 组合行为作为验收同步手段。
+- 320、400、420、600 px 宽度快照覆盖长中文、俄文标题、长 URL、进度和操作按钮；
+  人工检查无文字溢出、控件重叠或布局跳动。每个宽度均断言无页面横向溢出；
+  Chromium computed style 的正文与按钮前景/背景对比度均不低于 4.5:1。
+
+### 安全修复与反例
+
+- 最终验收发现原 service worker 没有 message listener，无法满足计划定义的 message
+  复活握手。新增顶层无状态 listener，并让 Side Panel 启动时发送固定 ping；消息和
+  响应均不含 Token、端口或业务数据。
+- Playwright 原配置 `trace: retain-on-failure` 会把运行态 DOM/storage 数据写入
+  trace。现改为 `trace: off`；受控失败 fixture 把合成 Token 写入 localStorage，
+  随后验证 diagnostics 中无 trace，error context 和 dist 也不含该 Token。
+- 所有真实 API 请求仍只发送到验证后的 `http://127.0.0.1:<port>`，Token 只在
+  `X-LVT-Token` header 和 trusted `chrome.storage.local` 中存在。
+- dist 仅包含 manifest、Side Panel HTML/JS/CSS 和 background.js；无 source map、
+  trace、Markdown、测试凭证、绝对路径、原始异常或 traceback。
+
+### 最终命令
+
+```text
+cd extension && npm ci
+# exit 0；142 packages；0 vulnerabilities
+
+cd extension && npm run lint
+# exit 0；ESLint 与 Prettier 通过
+
+cd extension && npm run typecheck
+# exit 0
+
+cd extension && npm test
+# exit 0；12 files，166 passed
+
+cd extension && npm run build
+# exit 0；18 modules transformed
+
+cd extension && npm run test:e2e
+# exit 0；10 passed；dist 白名单通过
+
+cd backend && ../.venv-smoke/bin/python -m pytest
+# exit 0；594 passed，1 条第三方 StarletteDeprecationWarning
+
+cd backend && ../.venv-smoke/bin/python -m ruff check src tests ../scripts
+# exit 0；All checks passed
+
+cd backend && ../.venv-smoke/bin/python -m ruff format --check src tests ../scripts
+# exit 0；71 files already formatted
+
+cd backend && ../.venv-smoke/bin/python -m mypy src/lvt
+# exit 0；Success: no issues found in 37 source files
+```
+
+### 已知限制
+
+- Chrome 原生 Side Panel target 可由 CDP 观察，但 Playwright 不把它暴露为普通
+  `context.pages()`；生命周期测试分别使用 browser-level Target domain 和普通扩展页。
+- 为防止 Token 进入失败产物，Playwright trace 已关闭；失败时保留不含秘密的
+  `error-context.md` 和命令输出。
+- Phase 4 尚未实施：无安装器、ZIP、签名、公证、自动启动、升级和 Chrome Web Store
+  发布流程。

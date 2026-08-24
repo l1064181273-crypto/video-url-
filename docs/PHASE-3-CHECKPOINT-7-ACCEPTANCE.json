@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "checkpoint": "phase-3-checkpoint-7",
+  "status": "passed",
+  "generated_at": "2026-08-24T04:26:12Z",
+  "baseline": "36143e571349ffc2ca8c13a07fe0a33aec9658fb",
+  "environment": {
+    "os": "macOS",
+    "node": "v24.10.0",
+    "npm": "10.9.8",
+    "python": "3.11.15",
+    "playwright": "1.62.1",
+    "chrome_for_testing": "151.0.7922.34"
+  },
+  "scope": {
+    "phase": 3,
+    "phase_4_started": false,
+    "installation_or_packaging_started": false,
+    "backend_production_changed": false,
+    "manifest_changed": false,
+    "checkpoint_4_changed": false,
+    "checkpoint_5a_changed": false,
+    "checkpoint_5b_business_logic_changed": false
+  },
+  "blocking_fixes": [
+    {
+      "id": "service-worker-message-revival",
+      "reason": "The frozen worker had no runtime message listener, so Checkpoint 7 could not verify message-triggered revival.",
+      "change": "Register one top-level stateless lifecycle listener and send a fixed ping when the Side Panel starts.",
+      "sensitive_data_in_message": false
+    },
+    {
+      "id": "playwright-trace-token-persistence",
+      "reason": "retain-on-failure traces can persist runtime tokens.",
+      "change": "Disable Playwright traces and verify a controlled failed test does not persist its synthetic token in diagnostics or dist.",
+      "trace_files_after_final_run": 0
+    }
+  ],
+  "acceptance": {
+    "real_unpacked_extension": true,
+    "real_phase_2_api": true,
+    "batch_submission": true,
+    "polling_and_disconnect_recovery": true,
+    "request_time_disconnect": true,
+    "job_filters_and_details": true,
+    "retry": true,
+    "cancel": true,
+    "confirmed_delete": true,
+    "event_pagination": true,
+    "eight_artifacts": true,
+    "source_preview": true,
+    "zh_cn_preview": true,
+    "authenticated_downloads": true,
+    "worker_concurrency_1_2": true,
+    "dynamic_capabilities": true,
+    "token_save_replace_clear": true,
+    "side_panel_close_reopen": true,
+    "service_worker_action_revival": true,
+    "service_worker_message_revival": true,
+    "single_side_panel_target_after_repeated_action": true,
+    "trusted_storage_rebuilt_after_worker_revival": true,
+    "responsive_widths": [320, 400, 420, 600],
+    "horizontal_overflow_absent_at_all_widths": true,
+    "minimum_text_contrast_ratio": 4.5,
+    "keyboard": {
+      "enter": true,
+      "space": true,
+      "tab": true,
+      "shift_tab": true,
+      "escape": true,
+      "modal_focus_trap": true,
+      "return_focus": true
+    }
+  },
+  "security": {
+    "token_in_url": false,
+    "token_in_dom": false,
+    "token_in_console": false,
+    "token_in_error": false,
+    "token_in_filename": false,
+    "token_in_trace": false,
+    "token_in_dist": false,
+    "absolute_path_in_dom": false,
+    "absolute_path_in_dist": false,
+    "source_maps_in_dist": false,
+    "remote_code_in_dist": false,
+    "broad_host_permissions": false
+  },
+  "quality_gates": [
+    {
+      "command": "npm ci",
+      "cwd": "extension",
+      "exit_code": 0,
+      "result": "142 packages installed; 0 vulnerabilities"
+    },
+    {
+      "command": "npm run lint",
+      "cwd": "extension",
+      "exit_code": 0,
+      "result": "ESLint and Prettier passed"
+    },
+    {
+      "command": "npm run typecheck",
+      "cwd": "extension",
+      "exit_code": 0,
+      "result": "TypeScript passed"
+    },
+    {
+      "command": "npm test",
+      "cwd": "extension",
+      "exit_code": 0,
+      "result": "12 test files; 166 tests passed"
+    },
+    {
+      "command": "npm run build",
+      "cwd": "extension",
+      "exit_code": 0,
+      "result": "18 modules transformed"
+    },
+    {
+      "command": "npm run test:e2e",
+      "cwd": "extension",
+      "exit_code": 0,
+      "result": "10 Playwright tests passed; dist whitelist passed"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m pytest",
+      "cwd": "backend",
+      "exit_code": 0,
+      "result": "594 tests passed; 1 third-party warning"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m ruff check src tests ../scripts",
+      "cwd": "backend",
+      "exit_code": 0,
+      "result": "All checks passed"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m ruff format --check src tests ../scripts",
+      "cwd": "backend",
+      "exit_code": 0,
+      "result": "71 files already formatted"
+    },
+    {
+      "command": "../.venv-smoke/bin/python -m mypy src/lvt",
+      "cwd": "backend",
+      "exit_code": 0,
+      "result": "Success: no issues found in 37 source files"
+    },
+    {
+      "command": "git diff --check",
+      "cwd": ".",
+      "exit_code": 0,
+      "result": "no output"
+    },
+    {
+      "command": "git diff --exit-code 36143e571349ffc2ca8c13a07fe0a33aec9658fb -- <frozen production paths>",
+      "cwd": ".",
+      "exit_code": 0,
+      "result": "backend, manifest, API, artifact, poller, storage, Checkpoint 4, and Checkpoint 5B diagnostics unchanged"
+    },
+    {
+      "command": "git diff --exit-code <phase baselines> -- <Phase 1 and Phase 2 frozen paths>",
+      "cwd": ".",
+      "exit_code": 0,
+      "result": "no output"
+    },
+    {
+      "command": "node scripts/verify-dist.mjs",
+      "cwd": "extension",
+      "exit_code": 0,
+      "result": "5 whitelisted files; no source maps, traces, test credentials, absolute paths, or traceback"
+    },
+    {
+      "command": "rg --files test-results | rg 'trace\\.zip$'",
+      "cwd": "extension",
+      "exit_code": 1,
+      "result": "no trace files found; exit 1 is the expected no-match result"
+    },
+    {
+      "command": "pgrep <acceptance process patterns>",
+      "cwd": ".",
+      "exit_code": 1,
+      "result": "no Playwright, Uvicorn, Chromium profile, yt-dlp, FFmpeg, or ffprobe process found; exit 1 is the expected no-match result"
+    }
+  ],
+  "diagnostic_runs": [
+    {
+      "command": "npm run test:e2e",
+      "exit_code": 1,
+      "result": "9 passed, 1 failed; global keyboard activation did not deterministically dispatch delete confirmation"
+    },
+    {
+      "command": "npx playwright test tests/e2e/extension-api.spec.ts --grep \"job controls\" --repeat-each=3",
+      "exit_code": 1,
+      "result": "2 passed, 1 failed; reproduced native dialog keyboard combination instability"
+    },
+    {
+      "command": "npx playwright test tests/e2e/extension-api.spec.ts --grep \"job controls\" --repeat-each=5",
+      "exit_code": 0,
+      "result": "5 passed after separating keyboard activation coverage from delete confirmation"
+    }
+  ],
+  "known_limitations": [
+    "Chrome exposes the native Side Panel as a CDP target but not as a Playwright context page.",
+    "Playwright traces are disabled to prevent runtime tokens from being persisted.",
+    "Phase 4 installation, ZIP packaging, signing, notarization, upgrades, auto-start, and store publication are not implemented."
+  ]
+}

@@ -9,6 +9,6 @@ export default defineConfig({
   outputDir: "./test-results",
   reporter: [["line"]],
   use: {
-    trace: "retain-on-failure",
+    trace: "off",
   },
 });

@@ -48,6 +48,7 @@ import {
 } from "./ui/diagnostics";
 
 document.documentElement.dataset.contractVersion = CONTRACT_VERSION;
+void chrome.runtime.sendMessage({ type: "lvt.lifecycle.ping" });
 
 const status = requireElement("#connection-status", HTMLParagraphElement);
 const detail = requireElement("#connection-detail", HTMLParagraphElement);

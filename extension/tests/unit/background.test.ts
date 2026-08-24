@@ -1,16 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Listener = () => void;
+type MessageListener = (
+  message: unknown,
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void,
+) => void;
 
 describe("MV3 service worker initialization", () => {
   const installedListeners: Listener[] = [];
   const startupListeners: Listener[] = [];
+  const messageListeners: MessageListener[] = [];
   const setAccessLevel = vi.fn(() => Promise.resolve());
   const setPanelBehavior = vi.fn(() => Promise.resolve());
 
   beforeEach(() => {
     installedListeners.length = 0;
     startupListeners.length = 0;
+    messageListeners.length = 0;
     setAccessLevel.mockClear();
     setPanelBehavior.mockClear();
     vi.resetModules();
@@ -21,6 +28,9 @@ describe("MV3 service worker initialization", () => {
         },
         onStartup: {
           addListener: (listener: Listener) => startupListeners.push(listener),
+        },
+        onMessage: {
+          addListener: (listener: MessageListener) => messageListeners.push(listener),
         },
       },
       storage: {
@@ -44,12 +54,24 @@ describe("MV3 service worker initialization", () => {
 
     expect(installedListeners).toHaveLength(1);
     expect(startupListeners).toHaveLength(1);
+    expect(messageListeners).toHaveLength(1);
     expect(setAccessLevel).toHaveBeenCalledExactlyOnceWith({
       accessLevel: "TRUSTED_CONTEXTS",
     });
     expect(setPanelBehavior).toHaveBeenCalledExactlyOnceWith({
       openPanelOnActionClick: true,
     });
+  });
+
+  it("registers one stateless lifecycle listener with a fixed response", async () => {
+    const { LIFECYCLE_PING, LIFECYCLE_READY } = await import("../../src/background");
+    const sendResponse = vi.fn();
+
+    messageListeners[0]?.({ type: LIFECYCLE_PING }, {}, sendResponse);
+    messageListeners[0]?.({ type: "unrelated" }, {}, sendResponse);
+
+    expect(messageListeners).toHaveLength(1);
+    expect(sendResponse).toHaveBeenCalledExactlyOnceWith({ type: LIFECYCLE_READY });
   });
 
   it("reapplies idempotent browser configuration on install and startup", async () => {

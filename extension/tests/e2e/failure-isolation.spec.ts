@@ -14,7 +14,7 @@ const CONTROLLED_OUTPUT = resolve(EXTENSION_ROOT, "test-results/controlled-token
 const CONTROLLED_CONFIG = resolve(EXTENSION_ROOT, "tests/fixtures/playwright-token.config.ts");
 const PLAYWRIGHT_CLI = resolve(EXTENSION_ROOT, "node_modules/@playwright/test/cli.js");
 
-test("a failing trace containing a token remains outside dist", async () => {
+test("a failing browser test does not persist its token in diagnostics or dist", async () => {
   await rm(CONTROLLED_OUTPUT, { force: true, recursive: true });
   try {
     let exitCode: number | undefined;
@@ -34,20 +34,17 @@ test("a failing trace containing a token remains outside dist", async () => {
     const outputFiles = await listFiles(CONTROLLED_OUTPUT);
     const trace = outputFiles.find((file) => file.endsWith("trace.zip"));
     const errorContext = outputFiles.find((file) => file.endsWith("error-context.md"));
-    expect(trace).toBeDefined();
+    expect(trace).toBeUndefined();
     expect(errorContext).toBeDefined();
-    if (trace === undefined || errorContext === undefined) {
-      throw new Error("Controlled Playwright failure did not retain diagnostics");
+    if (errorContext === undefined) {
+      throw new Error("Controlled Playwright failure did not retain its safe error context");
     }
-    expect(isInside(DIST, trace)).toBe(false);
     expect(isInside(DIST, errorContext)).toBe(false);
 
-    const context = await readFile(errorContext, "utf8");
-    const extractedTrace = await execFileAsync("unzip", ["-p", trace]);
-    expect(context).toContain(CONTROLLED_TRACE_TOKEN);
-    expect(extractedTrace.stdout).toContain(CONTROLLED_TRACE_TOKEN);
-
     const tokenBytes = Buffer.from(CONTROLLED_TRACE_TOKEN);
+    for (const file of outputFiles) {
+      expect((await readFile(file)).includes(tokenBytes), file).toBe(false);
+    }
     for (const file of await listFiles(DIST)) {
       expect((await readFile(file)).includes(tokenBytes), file).toBe(false);
     }

@@ -305,6 +305,29 @@
     敏感文件检查通过，无 Uvicorn、worker、yt-dlp、FFmpeg 或 ffprobe 遗留。
   - ✅ Phase 2 八个 Checkpoint 的实现与最终验收完成；等待独立最终审查。
 
+## Phase 3：Chrome Side Panel
+
+- ✅ Checkpoint 1–5B 已分别实现并独立审查，冻结基线为
+  `36143e571349ffc2ca8c13a07fe0a33aec9658fb`。
+- ✅ Checkpoint 7 使用真实 unpacked MV3 extension 与真实 Phase 2 Uvicorn API 完成
+  Chrome 最终集成验收；批量提交、轮询、筛选、详情、控制动作、事件、8 artifact、
+  双语预览/下载、concurrency、动态 capabilities 和 Token 生命周期全部通过。
+- ✅ 新增真实后端离线启动、请求处理中断、同端口恢复和 Side Panel 关闭/重开验收；
+  断线期间保留最后 Job 快照，恢复后从 API 收敛。
+- ✅ 使用 CDP `ServiceWorker.stopWorker` 按 version ID 停止 worker，并通过
+  `Extensions.triggerAction` 和 `runtime.sendMessage` 分别验证复活；action 连续触发
+  仍只有一个 Side Panel target，端口和 Token 从 trusted storage 重建。
+- ✅ 修复最终验收发现的生命周期阻塞：Side Panel 启动发送无状态 ping，service worker
+  顶层 listener 返回固定握手；消息不包含 Token、端口或业务状态。
+- ✅ Playwright 全局关闭 trace，受控失败测试证明浏览器 localStorage 中的合成 Token
+  不进入 error context、trace 或 dist。
+- ✅ 320/400/420/600 px 响应式快照通过；Enter、Space、Tab、Shift+Tab、Escape、
+  modal focus trap 和返回焦点通过。
+- ✅ 最终质量门：扩展 166 tests、Chrome E2E 10 tests、后端 594 tests 全部通过；
+  ESLint、Prettier、TypeScript、Ruff、mypy、dist 白名单和冻结检查通过。
+- ✅ 机器报告：`docs/PHASE-3-CHECKPOINT-7-ACCEPTANCE.json`。
+- ⏸️ Phase 4 安装、ZIP、签名、公证和商店发布尚未开始。
+
 ## 已知阻塞
 
 - **无硬阻塞**。原潜在阻塞（pyannote 需 HF token）已通过 sherpa-onnx 免 token 方案消除；pyannote 降为可选后端。

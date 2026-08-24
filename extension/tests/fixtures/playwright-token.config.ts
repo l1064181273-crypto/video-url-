@@ -8,7 +8,7 @@ export default defineConfig({
   reporter: [["line"]],
   retries: 0,
   use: {
-    trace: "retain-on-failure",
+    trace: "off",
   },
   workers: 1,
 });
