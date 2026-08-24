@@ -498,6 +498,35 @@ decision 和 substate，不保存 Token、环境变量或原始异常。使用�
 5. 打开 journal directory 并 `fsync` directory FD；至此新 generation 才生效。
 6. 不删除仍是上一有效 generation 的另一 slot；下次更新才轮换。
 
+普通 progress/substate 使用上述交替更新；`MIGRATION_INTENT` 和 `COMMITTED` 是关键
+决策，必须使用双副本 barrier：
+
+1. 以同一个 transaction ID 和 decision ID 构造 canonical decision；两个副本的
+   schema、operation、transaction、decision、payload、identity/checksum references
+   和 substate 必须逐字段相同，仅 envelope `generation` 分别为连续的 `g`、`g+1`。
+   每个 slot 的 envelope checksum 独立覆盖自身 generation 和 canonical decision，
+   因此 checksum 是校验元数据，不属于允许变化的 decision 字段。
+2. 先将 generation `g` 按 temp write → file fsync → slot rename → directory fsync
+   完整写入一个 slot，再把完全相同的 decision 以 generation `g+1` 完整写入另一个
+   slot；两次写入之间禁止插入其他 journal state。
+3. 写完后关闭并重新打开两个 slot，分别校验 checksum/schema，再验证 transaction ID、
+   decision ID 和 canonical decision 完全一致且 generation 恰好连续。
+4. 只有双副本验证通过，`MIGRATION_INTENT` 才能打开 migration invocation gate，
+   `COMMITTED` 才能打开 ACTIVATE gate。只有一个副本、generation 不连续、decision
+   不一致或任一副本未完成 directory fsync 时，对应 gate 调用次数必须为零。
+5. 恢复时一个有效关键决策副本足以保持该决策语义，但不足以执行受保护动作：
+   - 单个 MIGRATION_INTENT 副本仍触发 pre-COMMITTED backup rollback，绝不继续
+     migration；
+   - 单个 COMMITTED 副本仍选择 committed/new 收敛方向，但必须先从有效副本重建另一
+     个连续 generation 的相同 COMMITTED 副本并完成双副本重读验证，之后才允许
+     ACTIVATE。
+6. 两个有效副本若 transaction/decision/payload 冲突则 fail closed；不得用 generation
+   较高者静默覆盖另一关键决策。
+
+下文对关键决策使用“durable MIGRATION_INTENT”或“durable COMMITTED”时，均专指两个
+slot 已按上述协议独立持久化并重读验证通过。单个有效副本可决定 rollback/converge
+方向，但不满足 migration/ACTIVATE gate。
+
 任何会改变 filesystem identity 的操作均使用相同协议：
 
 1. 先 durable 写 intent，包含 source、destination、old/new identity 和预期 checksum。
@@ -565,8 +594,10 @@ live/next/previous 同时存在等额外组合先按预期 identity 分类为 ol
 2. staging/core 和 dependencies 通过后写 `PREPARED`。
 3. 按 substate 协议切换 current，再切换 stable extension。
 4. 启动 candidate precommit service；worker 在 claim 前 barrier 阻塞。
-5. runtime-full 通过后 durable 写 `COMMITTED`。
-6. 发送 ACTIVATE，确认 normal health，写 `ACTIVATED`。
+5. runtime-full 通过后按关键决策双副本 barrier 连续写入并重读验证两个
+   `COMMITTED` slot。
+6. 仅在两个 COMMITTED 副本都证明同一 decision 后发送 ACTIVATE；任一副本缺失期间
+   ACTIVATE 调用次数必须为零。确认 normal health 后写 `ACTIVATED`。
 7. 清理 previous/candidate；清理动作本身也有 intent/substate。
 
 升级扩展状态（Checkpoint 8）：
@@ -599,20 +630,21 @@ DB_RESTORED
    - fsync backup file 和 backup directory；
    - 独立打开 backup，`quick_check=ok` 后关闭，写 `DB_BACKED_UP`；
    - 不把 live DB/WAL/SHM 当作三个普通文件复制。
-3. 调用 candidate migration 前，先把 `MIGRATION_INTENT` 作为新的 journal
-   generation durable 写入双槽。intent 必须绑定 transaction ID、candidate version、
+3. 调用 candidate migration 前，先把 `MIGRATION_INTENT` 按关键决策双副本 barrier
+   连续写入两个 slot。intent 必须绑定 transaction ID、candidate version、
    旧 schema version、预期新 schema version，以及已经 `quick_check=ok` 的
    pre-upgrade backup identity/checksum。
    - `migration_intent` 是单调且不可变的 journal 字段；从 MIGRATION_INTENT 到
      ACTIVATED 的每个后续 generation 都必须原样携带，transaction 清理完成前不得
      删除、重写 backup identity 或只用当前 state 替代该 intent；
-   - 只有 MIGRATION_INTENT slot 完成 temp write、file fsync、slot rename 和 journal
-     directory fsync，成为最高有效 generation 后，才允许调用 maintenance entrypoint；
-   - candidate entrypoint 启动时必须重新读取最高有效 generation，验证 transaction ID、
-     backup identity 和 `state=MIGRATION_INTENT` 匹配；任一不匹配都必须在打开 SQLite
-     write transaction 前退出；
-   - MIGRATION_INTENT 尚未 durable 时禁止启动 migration process、打开 migration
-     connection 或执行任何 DDL。
+   - 两个 intent 副本必须属于同一 transaction/decision，canonical fields 完全一致，
+     仅 generation 为连续的 `g`、`g+1`，且各自 checksum、file fsync、slot rename、
+     journal directory fsync 和重读验证全部通过；
+   - candidate entrypoint 启动时必须重新读取两个 intent slot，验证 transaction ID、
+     decision ID、backup identity、canonical payload 和连续 generation；任一副本
+     缺失/截断/不匹配都必须在打开 SQLite write transaction 前退出；
+   - 两个 MIGRATION_INTENT 副本尚未全部 durable 时禁止启动 migration process、
+     打开 migration connection 或执行任何 DDL。
 4. 使用 candidate 的 migration-only/maintenance entrypoint：
    - 获取同一个 DB instance lock；
    - 只执行 schema initialize/migration 和兼容性检查；
@@ -632,8 +664,8 @@ DB_RESTORED
 
 Migration 专项 SIGKILL failpoint 必须精确覆盖：
 
-1. MIGRATION_INTENT slot temp write、file fsync、slot rename、journal directory fsync
-   的前后。
+1. 第一个和第二个 MIGRATION_INTENT slot 各自的 temp write、file fsync、slot
+   rename、journal directory fsync 前后，以及两副本重读验证前后。
 2. 调用 candidate maintenance entrypoint 的紧前和紧后；紧前 failpoint 必须证明
    durable intent 已存在，intent 不存在时入口调用计数必须为零。
 3. maintenance 内 SQLite migration transaction `commit()` 的紧前和紧后。
@@ -683,17 +715,20 @@ WAL 和 SHM 各自按相同 substate 独立恢复；文件不存在是 journal �
 | upgrade，SQLite transaction 已 commit、maintenance 尚未返回 | 不信任 live DB；从 backup 恢复旧 schema | 自动回 old | restore + runtime-full 后启动旧 service |
 | upgrade，SQLite transaction 已 commit、maintenance 已返回、MIGRATED slot 尚未写或尚未完成 fsync/rename/dir-fsync | 不依据缺失/半写 MIGRATED 推断；从 backup 恢复旧 DB | 自动回 old | restore + runtime-full 后启动旧 service |
 | upgrade，MIGRATED 已 durable、全局 COMMITTED 未 durable | MIGRATED 仅表示 migration 完成，仍从 backup 恢复旧 DB | 自动回 old | restore + runtime-full 后启动旧 service |
-| 任一 operation，全局 COMMITTED 已 durable | 不恢复旧 schema | 自动收敛 committed new | 启动/激活新 service |
+| 任一 operation，两个 COMMITTED 副本已 durable 并验证 | 不恢复旧 schema | 自动收敛 committed new | 双副本仍完整或修复完成后启动/激活新 service |
 
-恢复器不需要也不得猜测 SQLite commit 是否发生。最高有效 generation 中只要存在该
-transaction 的 MIGRATION_INTENT，且全局 COMMITTED 不存在，就执行同一保守动作：
+恢复器不需要也不得猜测 SQLite commit 是否发生。扫描两个 slot 后，只要任一有效副本
+保留该 transaction 的 MIGRATION_INTENT，且不存在有效 COMMITTED 决策，就执行同一
+保守动作：
 停止 maintenance/candidate、关闭并确认所有 SQLite connections、按 DB restore 矩阵
 恢复 intent 固定的 pre-upgrade backup、恢复旧 current/extension，最后启动旧 service。
 即使 live DB 的 schema 看起来仍是旧版本，也必须完成 backup restore，不能把
 “MIGRATED slot 不存在”解释为“migration 没有修改数据库”。
 
-`COMMITTED` 后不得自动回滚旧 DB/schema，因为 ACTIVATE 后可能已经 claim。如果在
-`COMMITTED` 与 `ACTIVATED` 间崩溃，启动对账必须继续新 release 并完成 ACTIVATE。
+任一有效 COMMITTED 副本都保持 committed/new 恢复方向，不得因另一个 slot
+删除/截断而回滚旧 DB/schema；但另一个 COMMITTED 副本缺失期间 ACTIVATE 调用次数
+必须为零。恢复器先从有效副本重建连续 generation 的相同 COMMITTED decision，独立
+fsync 并重读验证两副本后，才能继续新 release 并执行 ACTIVATE。
 
 `start.command`、`install.command` 和 `uninstall.command` 取得 parent lifecycle lock
 后的第一动作都是读取 journal 并执行上述矩阵。所有合法部分完成组合必须自动 rollback
@@ -1014,8 +1049,15 @@ Phase 4: supervise owned media processes
 - current 或 stable extension 任一切换后 fail，恢复为旧值或首次安装的“不存在”。
 - current 和 extension 的每个 intent、journal slot write/file fsync/rename、
   target rename、parent fsync 前后 SIGKILL；重启按通用矩阵自动恢复。
-- 双槽 journal 单槽截断、checksum 错、generation 落后均选择另一有效 generation；
-  两槽均坏才 fail closed。
+- 普通 progress/substate 的单槽截断、checksum 错、generation 落后选择另一有效
+  generation；关键决策使用双副本规则，不得退化成普通“最高 generation 胜出”。
+- COMMITTED 分别只完成第一个和第二个副本各持久化步骤时注入 SIGKILL；双副本重读
+  验证前 `activate_call_count=0`。
+- 在完整写入两个相同 COMMITTED 副本后，分别删除 slot A、删除 slot B、截断 slot A、
+  截断 slot B：恢复方向始终为 committed/new，且缺失副本修复并再次双重验证前
+  `activate_call_count=0`。
+- 修复后的两个 COMMITTED 副本 transaction/decision/payload 完全一致，generation
+  连续；随后 ACTIVATE 恰好一次。两个有效副本冲突时 fail closed。
 - 首次安装所有 live/next/previous 合法部分组合都自动 rollback/converge，不能仅报告
   filesystem inconsistent。
 - precommit service 完成 repository/pipeline/thread 初始化但 activation 前
@@ -1034,6 +1076,8 @@ Phase 4: supervise owned media processes
 - 首次安装形成完整 current/stable extension/service 事务，无循环 doctor 依赖。
 - 通用 journal 和首次发布恢复在本 checkpoint 可独立运行，文件中没有 upgrade 模块
   import，Checkpoint 8 未实现时仍能通过全部首次安装 failpoint。
+- COMMITTED 必须存在两个独立 checksum/fsync/dir-fsync 验证通过的相同副本；
+  任意单槽损坏不会改变 committed/new 决策，冗余恢复前不会 ACTIVATE。
 - 双击 start 后 `/health` healthy；双击 stop 后项目进程归零。
 - durable commit 前没有任务处理；用户可完成 Chrome 加载和 Token 粘贴。
 
@@ -1075,8 +1119,16 @@ Phase 4: publish and manage local services
 
 - 0.1.0 → 测试版 0.1.1；默认拒绝降级。
 - migration-only 模式不构造 Pipeline/JobWorkerPool，不写 claimed event。
-- MIGRATION_INTENT 未完成 slot file fsync + rename + directory fsync 时，candidate
-  migration invocation count、SQLite write connection count 和 DDL count 均为零。
+- MIGRATION_INTENT 两个副本中任一个未完成 slot file fsync + rename + directory
+  fsync 或双副本重读验证时，candidate migration invocation count、SQLite write
+  connection count 和 DDL count 均为零。
+- 两个 intent 副本必须属于同 transaction/decision，canonical fields 完全一致且
+  generation 连续；独立 checksum 均覆盖各自 generation 和相同 canonical decision。
+- 完整写入两个 MIGRATION_INTENT 副本后，分别删除 slot A、删除 slot B、截断 slot A、
+  截断 slot B：恢复决策始终为 pre-COMMITTED backup rollback，旧 schema/current/
+  extension/service 结果完全相同。
+- 只完成第一个 intent 副本后在第二个副本各持久化边界 SIGKILL，migration invocation
+  count 必须为零；恢复不得继续 migration。
 - MIGRATION_INTENT durable 后，在 migration 调用前、SQLite transaction commit
   前后、maintenance 返回前后、MIGRATION_MAINTENANCE_RETURNED 和 MIGRATED 的每个
   slot write/file-fsync/rename/dir-fsync 前后注入 SIGKILL。
@@ -1122,6 +1174,10 @@ Phase 4: publish and manage local services
 - MIGRATION_INTENT 是 DB rollback 的保守边界：intent durable 且 COMMITTED 未
   durable 的所有 failpoint 均恢复旧 schema、旧 current、旧 extension 和旧 service。
 - 全局 COMMITTED durable 后不再恢复旧 DB，只向 candidate release 收敛。
+- MIGRATION_INTENT 和 COMMITTED 的双副本均满足“同 transaction、字段相同、仅
+  generation 递增”；删除或截断任一 slot 不改变既定恢复方向。
+- 任一 COMMITTED 副本缺失时 ACTIVATE 调用次数为零；从有效副本重建并验证双副本后
+  才允许继续，ACTIVATE 最多一次。
 - Checkpoint 7 的首次发布 transaction tests 无修改继续通过，证明不存在反向依赖。
 - purge 删除完数据后 parent-scoped lock inode 仍存在且后续 install/start 使用同一
   inode。
