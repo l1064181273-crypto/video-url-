@@ -26,7 +26,14 @@ COPY_PATHS = (
     "packaging/dependencies.json",
     "scripts",
 )
-PACKAGING_TOOLS = ("doctor.py", "install.py", "lifecycle_lock.py", "verify_install.py")
+PACKAGING_TOOLS = (
+    "doctor.py",
+    "install.py",
+    "lifecycle_lock.py",
+    "reconcile_processes.py",
+    "tool_supervisor.py",
+    "verify_install.py",
+)
 FAILURE_POINTS = {
     "before-uv",
     "after-uv",

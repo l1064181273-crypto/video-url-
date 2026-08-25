@@ -15,8 +15,10 @@ from lvt.core.errors import LVTError
 from lvt.core.processes import (
     CancellationToken,
     ProcessExecutionError,
+    ProcessOwnership,
     ProcessTimeoutError,
     SubprocessExecutor,
+    ToolSupervisorLauncher,
 )
 from lvt.engines.base import DownloadedMedia, MediaInfo
 from lvt.security.paths import ensure_within_root, safe_filename
@@ -149,6 +151,8 @@ class YtDlpFFmpegDownloader:
         ffmpeg_path: Path | None = None,
         ffprobe_path: Path | None = None,
         process_executor: SubprocessExecutor | None = None,
+        process_root: Path | None = None,
+        supervisor_path: Path | None = None,
     ) -> None:
         if ffmpeg_path is None or ffprobe_path is None:
             discovered_ffmpeg, discovered_ffprobe = discover_ffmpeg_binaries()
@@ -156,7 +160,18 @@ class YtDlpFFmpegDownloader:
             ffprobe_path = ffprobe_path or discovered_ffprobe
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
-        self.process_executor = process_executor or SubprocessExecutor()
+        if (process_root is None) != (supervisor_path is None):
+            raise ValueError("process_root and supervisor_path must be configured together")
+        supervisor = (
+            ToolSupervisorLauncher(
+                supervisor_path=supervisor_path,
+                process_root=process_root,
+            )
+            if process_root is not None and supervisor_path is not None
+            else None
+        )
+        self.process_executor = process_executor or SubprocessExecutor(supervisor=supervisor)
+        self.process_root = process_root
         self.downloader_version = f"yt-dlp:{yt_dlp.version.__version__}"
         self.normalizer_version = f"ffmpeg:{self._ffmpeg_version()}"
         self.version = f"{self.downloader_version};{self.normalizer_version}"
@@ -206,6 +221,7 @@ class YtDlpFFmpegDownloader:
                 command,
                 timeout=600,
                 cancellation=cancellation,
+                ownership=self._ownership(work_dir, "yt-dlp"),
             )
         except ProcessExecutionError as exc:
             message = exc.stderr or exc.stdout
@@ -267,6 +283,7 @@ class YtDlpFFmpegDownloader:
                 command,
                 timeout=300,
                 cancellation=cancellation,
+                ownership=self._ownership(work_dir, "ffmpeg"),
             )
         except ProcessExecutionError as exc:
             raise LVTError("MEDIA_INVALID", f"FFmpeg 音频规范化失败：{exc}") from exc
@@ -297,6 +314,7 @@ class YtDlpFFmpegDownloader:
                 command,
                 timeout=30,
                 cancellation=cancellation,
+                ownership=self._ownership(path.parent, "ffprobe"),
             )
             duration = float(json.loads(completed.stdout)["format"]["duration"])
         except (
@@ -319,3 +337,16 @@ class YtDlpFFmpegDownloader:
         except (ProcessExecutionError, ProcessTimeoutError) as exc:
             raise LVTError("FFMPEG_NOT_FOUND", "FFmpeg 无法执行") from exc
         return completed.stdout.splitlines()[0].split()[2]
+
+    def _ownership(self, work_dir: Path, kind: str) -> ProcessOwnership | None:
+        if self.process_root is None:
+            return None
+        resolved = work_dir.resolve(strict=True)
+        run_root = resolved.parent
+        if run_root.parent.name != "runs":
+            raise LVTError("PROCESS_OWNERSHIP_INVALID", "外部工具运行目录无效")
+        return ProcessOwnership(
+            job_id=run_root.parent.parent.name,
+            run_id=run_root.name,
+            kind=kind,
+        )

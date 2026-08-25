@@ -27,6 +27,8 @@ INSTALL = ROOT / "packaging/tools/install.py"
 VERIFY = ROOT / "packaging/tools/verify_install.py"
 LOCK = ROOT / "packaging/tools/lifecycle_lock.py"
 DOCTOR = ROOT / "packaging/tools/doctor.py"
+RECONCILE = ROOT / "packaging/tools/reconcile_processes.py"
+SUPERVISOR = ROOT / "packaging/tools/tool_supervisor.py"
 INSTALL_COMMAND = ROOT / "scripts/install.command"
 COMMON = ROOT / "scripts/lib/common.zsh"
 DOWNLOAD = ROOT / "scripts/lib/download.zsh"
@@ -999,6 +1001,8 @@ def _build_install_source(
     _copy(VERIFY, release / "packaging/tools/verify_install.py", executable=True)
     _copy(LOCK, release / "packaging/tools/lifecycle_lock.py", executable=True)
     _copy(DOCTOR, release / "packaging/tools/doctor.py", executable=True)
+    _copy(RECONCILE, release / "packaging/tools/reconcile_processes.py", executable=True)
+    _copy(SUPERVISOR, release / "packaging/tools/tool_supervisor.py", executable=True)
     _copy(MODELFILE, release / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km")
     (release / "scripts/doctor.command").chmod(0o755)
     (release / "test-tools/uv").chmod(0o755)

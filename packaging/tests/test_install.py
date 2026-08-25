@@ -17,6 +17,8 @@ INSTALL_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "install.py"
 VERIFY_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "verify_install.py"
 LOCK_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "lifecycle_lock.py"
 DOCTOR_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "doctor.py"
+RECONCILE_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "reconcile_processes.py"
+SUPERVISOR_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "tool_supervisor.py"
 COMMON_LIBRARY = REPOSITORY_ROOT / "scripts" / "lib" / "common.zsh"
 DATA_DIRECTORIES = ("config", "db", "runtime", "work", "exports", "logs", "models")
 FAILURE_POINTS = (
@@ -56,6 +58,8 @@ def _build_release(tmp_path: Path, name: str = "Release 源 naïve") -> Path:
     _copy_file(VERIFY_TOOL, release / "packaging/tools/verify_install.py", executable=True)
     _copy_file(LOCK_TOOL, release / "packaging/tools/lifecycle_lock.py", executable=True)
     _copy_file(DOCTOR_TOOL, release / "packaging/tools/doctor.py", executable=True)
+    _copy_file(RECONCILE_TOOL, release / "packaging/tools/reconcile_processes.py", executable=True)
+    _copy_file(SUPERVISOR_TOOL, release / "packaging/tools/tool_supervisor.py", executable=True)
     (release / "scripts/doctor.command").chmod(0o755)
     (release / "test-tools/uv").chmod(0o755)
     (release / "test-tools/python/bin/python3").chmod(0o755)

@@ -48,6 +48,16 @@ def create_real_pipeline(
         downloader=YtDlpFFmpegDownloader(
             ffmpeg_path=ffmpeg,
             ffprobe_path=ffprobe,
+            process_root=(
+                config.app_root.parent / "runtime/processes"
+                if config.installed_mode and config.app_root is not None
+                else None
+            ),
+            supervisor_path=(
+                Path(__file__).resolve().parents[4] / "packaging/tools/tool_supervisor.py"
+                if config.installed_mode
+                else None
+            ),
         ),
         asr=MLXWhisperASREngine(
             model=config.asr_model,

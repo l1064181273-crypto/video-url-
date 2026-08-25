@@ -152,6 +152,49 @@ def test_downloader_routes_ytdlp_ffmpeg_and_ffprobe_through_one_executor(
     assert any(command[0] == "/tools/ffprobe" for command in commands)
 
 
+def test_installed_media_attaches_job_run_and_kind_ownership(tmp_path: Path) -> None:
+    ownership: list[Any] = []
+    job_id = "22222222-2222-4222-8222-222222222222"
+    run_id = "11111111-1111-4111-8111-111111111111"
+    run_root = tmp_path / "work" / job_id / "runs" / run_id
+    downloaded_dir = run_root / "downloaded_media"
+    normalized_dir = run_root / ".normalized_audio.tmp"
+    downloaded_dir.mkdir(parents=True)
+    normalized_dir.mkdir()
+    downloaded = downloaded_dir / "download.bin"
+    downloaded.write_bytes(b"media")
+    supervisor = tmp_path / "tool_supervisor.py"
+    supervisor.write_text("# fixture\n", encoding="utf-8")
+
+    class Executor:
+        def run(self, command: list[str], **kwargs: Any) -> ProcessResult:
+            ownership.append(kwargs.get("ownership"))
+            if "-version" in command:
+                stdout = "ffmpeg version 7.0\n"
+            elif "-show_entries" in command:
+                stdout = '{"format": {"duration": "1.0"}}'
+            else:
+                write_wav(Path(command[-1]), [0] * 16_000)
+                stdout = ""
+            return ProcessResult(tuple(command), 1, 0, stdout, "")
+
+    engine = YtDlpFFmpegDownloader(
+        ffmpeg_path=Path("/tools/ffmpeg"),
+        ffprobe_path=Path("/tools/ffprobe"),
+        process_executor=Executor(),  # type: ignore[arg-type]
+        process_root=tmp_path / "runtime/processes",
+        supervisor_path=supervisor,
+    )
+
+    engine.normalize_audio(DownloadedMedia(downloaded, "Owned input"), normalized_dir)
+
+    assert ownership[0] is None
+    assert [(item.job_id, item.run_id, item.kind) for item in ownership[1:]] == [
+        (job_id, run_id, "ffmpeg"),
+        (job_id, run_id, "ffprobe"),
+    ]
+
+
 def test_sherpa_diarization_returns_empty_for_silence_without_loading_models(
     tmp_path: Path,
 ) -> None:

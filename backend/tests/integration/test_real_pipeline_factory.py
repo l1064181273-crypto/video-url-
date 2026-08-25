@@ -11,6 +11,8 @@ from lvt.core.capabilities import (
 from lvt.pipeline import factory
 from lvt.pipeline.factory import RealPipelineConfig, create_real_pipeline
 
+ROOT = Path(__file__).resolve().parents[3]
+
 
 class _Engine:
     version = "test-engine"
@@ -73,6 +75,8 @@ def test_installed_pipeline_uses_configured_models_ffmpeg_and_ollama(
     assert pipeline.downloader.kwargs == {
         "ffmpeg_path": ffmpeg_dir / "ffmpeg",
         "ffprobe_path": ffmpeg_dir / "ffprobe",
+        "process_root": tmp_path / "runtime/processes",
+        "supervisor_path": ROOT / "packaging/tools/tool_supervisor.py",
     }
     assert pipeline.asr.kwargs["ffmpeg_path"] == ffmpeg_dir / "ffmpeg"
     assert pipeline.diarizer.kwargs["segmentation_model"] == config.segmentation_model
