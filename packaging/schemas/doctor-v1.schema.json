@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-video-transcriber.invalid/schemas/doctor-v1.schema.json",
+  "title": "Local Video Transcriber Doctor Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "phase",
+    "status",
+    "exit_code",
+    "checks"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "staging-core",
+        "dependencies",
+        "installed-prerequisites",
+        "runtime-full"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "healthy",
+        "warning",
+        "failed"
+      ]
+    },
+    "exit_code": {
+      "type": "integer",
+      "enum": [
+        0,
+        1,
+        2
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "code",
+          "message",
+          "suggestion"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warning",
+              "missing",
+              "unsafe"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "suggestion": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
