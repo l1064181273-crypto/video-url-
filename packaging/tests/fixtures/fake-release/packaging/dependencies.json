@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "target": "macos-arm64",
+  "artifacts": [
+    {
+      "id": "uv",
+      "kind": "tool",
+      "version": "test",
+      "architecture": "arm64",
+      "url": "https://example.invalid/uv.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 1,
+      "expected_files": ["uv-test/uv"]
+    },
+    {
+      "id": "python",
+      "kind": "runtime",
+      "version": "test",
+      "architecture": "arm64",
+      "url": "https://example.invalid/python.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 1,
+      "expected_files": ["python/bin/python3"]
+    }
+  ],
+  "ollama_models": [],
+  "trust_policy": {
+    "allow_runtime_digest_rewrite": false,
+    "allow_floating_tags": false,
+    "allowed_schemes": ["https"],
+    "allowed_architectures": ["arm64"]
+  }
+}

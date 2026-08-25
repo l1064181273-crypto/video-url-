@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+audit_path = os.environ.get("LVT_TEST_PROCESS_AUDIT")
+if audit_path:
+    Path(audit_path).write_text(json.dumps(sys.argv), encoding="utf-8")
+
+environment = Path(os.environ["UV_PROJECT_ENVIRONMENT"])
+python_source = Path(os.environ["LVT_INSTALL_PYTHON"])
+python_target = environment / "bin" / "python"
+python_target.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy2(python_source, python_target)
+python_target.chmod(0o755)
+(environment / "pyvenv.cfg").write_text("fixture = true\n", encoding="utf-8")

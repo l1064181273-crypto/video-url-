@@ -1,0 +1,6 @@
+#!/bin/zsh
+
+if [[ -n "${LVT_TEST_ENV_AUDIT-}" ]]; then
+  /usr/bin/env > "${LVT_TEST_ENV_AUDIT}"
+fi
+exec "${LVT_TEST_RUNTIME_PYTHON}" "$@"
