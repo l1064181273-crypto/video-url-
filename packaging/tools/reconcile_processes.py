@@ -34,6 +34,7 @@ class ProcessSnapshot:
     inode: int | None = None
     sha256: str | None = None
     ownership_nonce: str | None = None
+    signal_token: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -49,11 +50,22 @@ class ProcessInspector(Protocol):
 
     def group_exists(self, pgid: int) -> bool: ...
 
+    def group_snapshots(self, pgid: int) -> tuple[ProcessSnapshot, ...] | None: ...
+
 
 class ProcessSignaller(Protocol):
-    def signal_process(self, pid: int, requested: signal.Signals) -> None: ...
+    def signal_process(
+        self,
+        target: ProcessSnapshot,
+        requested: signal.Signals,
+    ) -> bool: ...
 
-    def signal_group(self, pgid: int, requested: signal.Signals) -> None: ...
+    def signal_owned(
+        self,
+        supervisor: ProcessSnapshot,
+        group: tuple[ProcessSnapshot, ...],
+        requested: signal.Signals,
+    ) -> bool: ...
 
 
 def _sha256(path: Path) -> str:
@@ -87,9 +99,36 @@ def _executable_path(pid: int) -> Path | None:
         return None
 
 
+def _darwin_audit_token(pid: int) -> tuple[int, ...] | None:
+    if sys.platform != "darwin":
+        return None
+    token = (ctypes.c_uint * 8)()
+    count = ctypes.c_uint(len(token))
+    task = ctypes.c_uint()
+    try:
+        system = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        self_task = system.mach_task_self()
+        if system.task_name_for_pid(self_task, pid, ctypes.byref(task)) != 0:
+            return None
+        if system.task_info(task.value, 15, token, ctypes.byref(count)) != 0:
+            return None
+        if count.value != len(token):
+            return None
+        return tuple(token)
+    except (AttributeError, OSError):
+        return None
+    finally:
+        if task.value:
+            with suppress(AttributeError, OSError):
+                system.mach_port_deallocate(self_task, task.value)
+
+
 class SystemProcessInspector:
     def snapshot(self, pid: int) -> ProcessSnapshot | None:
         if type(pid) is not int or pid <= 0:
+            return None
+        signal_token_before = _darwin_audit_token(pid)
+        if signal_token_before is None:
             return None
         try:
             os.kill(pid, 0)
@@ -132,6 +171,9 @@ class SystemProcessInspector:
             digest = _sha256(executable)
         except OSError:
             return None
+        signal_token_after = _darwin_audit_token(pid)
+        if signal_token_after != signal_token_before:
+            return None
         return ProcessSnapshot(
             pid=pid,
             pgid=pgid,
@@ -141,6 +183,7 @@ class SystemProcessInspector:
             inode=metadata.st_ino,
             sha256=digest,
             ownership_nonce=nonce,
+            signal_token=signal_token_after,
         )
 
     def group_exists(self, pgid: int) -> bool:
@@ -152,15 +195,94 @@ class SystemProcessInspector:
             return True
         return True
 
+    def group_snapshots(self, pgid: int) -> tuple[ProcessSnapshot, ...] | None:
+        completed = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,pgid=,state="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None
+        snapshots: list[ProcessSnapshot] = []
+        for line in completed.stdout.splitlines():
+            fields = line.split()
+            if len(fields) != 3 or fields[2].startswith("Z"):
+                continue
+            try:
+                pid, candidate_pgid = (int(field) for field in fields[:2])
+            except ValueError:
+                continue
+            if candidate_pgid != pgid:
+                continue
+            snapshot = self.snapshot(pid)
+            if snapshot is None or snapshot.pgid != pgid:
+                return None
+            snapshots.append(snapshot)
+        return tuple(snapshots)
+
 
 class SystemProcessSignaller:
-    def signal_process(self, pid: int, requested: signal.Signals) -> None:
-        with suppress(ProcessLookupError):
-            os.kill(pid, requested)
+    def __init__(self) -> None:
+        self._system = (
+            ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            if sys.platform == "darwin"
+            else None
+        )
 
-    def signal_group(self, pgid: int, requested: signal.Signals) -> None:
-        with suppress(ProcessLookupError):
-            os.killpg(pgid, requested)
+    def _token_is_live(self, token: tuple[int, ...] | None) -> bool:
+        if self._system is None or token is None or len(token) != 8:
+            return False
+        encoded = (ctypes.c_uint * 8)(*token)
+        buffer = ctypes.create_string_buffer(4096)
+        return (
+            self._system.proc_pidpath_audittoken(
+                ctypes.byref(encoded),
+                buffer,
+                len(buffer),
+            )
+            > 0
+        )
+
+    def _signal_token(
+        self,
+        token: tuple[int, ...] | None,
+        requested: signal.Signals,
+    ) -> bool:
+        if self._system is None or token is None or len(token) != 8:
+            return False
+        encoded = (ctypes.c_uint * 8)(*token)
+        return (
+            self._system.proc_signal_with_audittoken(
+                ctypes.byref(encoded),
+                int(requested),
+            )
+            == 0
+        )
+
+    def signal_process(
+        self,
+        target: ProcessSnapshot,
+        requested: signal.Signals,
+    ) -> bool:
+        if not self._token_is_live(target.signal_token):
+            return False
+        return self._signal_token(target.signal_token, requested)
+
+    def signal_owned(
+        self,
+        supervisor: ProcessSnapshot,
+        group: tuple[ProcessSnapshot, ...],
+        requested: signal.Signals,
+    ) -> bool:
+        targets = (supervisor, *group)
+        if not targets or any(not self._token_is_live(item.signal_token) for item in targets):
+            return False
+        if not self._signal_token(supervisor.signal_token, requested):
+            return False
+        for target in group:
+            self._signal_token(target.signal_token, requested)
+        return True
 
 
 def _fsync_directory(path: Path) -> None:
@@ -269,14 +391,14 @@ def _identity_matches(expected: dict[str, Any], actual: ProcessSnapshot | None) 
     )
 
 
-def _ownership_matches(
+def _ownership_snapshots(
     record: dict[str, Any],
     inspector: ProcessInspector,
-) -> bool:
+) -> tuple[ProcessSnapshot, ProcessSnapshot] | None:
     supervisor = inspector.snapshot(record["supervisor"]["pid"])
     tool = inspector.snapshot(record["tool"]["pid"])
     ownership_nonce = record.get("ownership_nonce")
-    return (
+    if (
         isinstance(ownership_nonce, str)
         and _identity_matches(
             record["supervisor"],
@@ -288,7 +410,12 @@ def _ownership_matches(
             record["tool"],
             tool,
         )
-    )
+        and supervisor.signal_token is not None
+        and tool is not None
+        and tool.signal_token is not None
+    ):
+        return supervisor, tool
+    return None
 
 
 def _wait_for_exit(
@@ -363,20 +490,37 @@ def _reconcile_record(
     if record["lifecycle_state"] == "completed":
         _remove_record(path, process_root)
         return True
-    if not _ownership_matches(record, inspector):
+    ownership = _ownership_snapshots(record, inspector)
+    if ownership is None:
         _quarantine_record(path, process_root)
         return False
 
-    signaller.signal_process(record["supervisor"]["pid"], signal.SIGTERM)
+    if not signaller.signal_process(ownership[0], signal.SIGTERM):
+        _quarantine_record(path, process_root)
+        return False
     if _wait_for_exit(record, inspector, terminate_grace, poll_interval):
         _remove_record(path, process_root)
         return True
 
-    if not _ownership_matches(record, inspector):
+    ownership = _ownership_snapshots(record, inspector)
+    if ownership is None:
         _quarantine_record(path, process_root)
         return False
-    signaller.signal_group(record["tool"]["pgid"], signal.SIGKILL)
-    signaller.signal_process(record["supervisor"]["pid"], signal.SIGKILL)
+    group = inspector.group_snapshots(record["tool"]["pgid"])
+    final_ownership = _ownership_snapshots(record, inspector)
+    if (
+        group is None
+        or not group
+        or final_ownership is None
+        or not any(
+            snapshot.signal_token == final_ownership[1].signal_token
+            and _identity_matches(record["tool"], snapshot)
+            for snapshot in group
+        )
+        or not signaller.signal_owned(final_ownership[0], group, signal.SIGKILL)
+    ):
+        _quarantine_record(path, process_root)
+        return False
     if not _wait_for_exit(record, inspector, kill_wait, poll_interval):
         _quarantine_record(path, process_root)
         return False

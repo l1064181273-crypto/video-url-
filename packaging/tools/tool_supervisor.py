@@ -201,15 +201,9 @@ def _group_exists(pgid: int) -> bool:
     return True
 
 
-def _wait_group(pgid: int, timeout: float) -> None:
-    deadline = time.monotonic() + timeout
-    while _group_exists(pgid) and time.monotonic() < deadline:
-        time.sleep(0.01)
-
-
 def _group_members(pgid: int) -> set[int] | None:
     completed = subprocess.run(
-        ["/bin/ps", "-axo", "pid=,pgid="],
+        ["/bin/ps", "-axo", "pid=,pgid=,state="],
         capture_output=True,
         text=True,
         check=False,
@@ -219,15 +213,20 @@ def _group_members(pgid: int) -> set[int] | None:
     members: set[int] = set()
     for line in completed.stdout.splitlines():
         fields = line.split()
-        if len(fields) != 2:
+        if len(fields) != 3:
             continue
         try:
-            pid_value, pgid_value = (int(field) for field in fields)
+            pid_value, pgid_value = (int(field) for field in fields[:2])
         except ValueError:
             continue
-        if pgid_value == pgid:
+        if pgid_value == pgid and not fields[2].startswith("Z"):
             members.add(pid_value)
     return members
+
+
+def _live_group_exists(pgid: int) -> bool:
+    members = _group_members(pgid)
+    return _group_exists(pgid) if members is None else bool(members)
 
 
 def _signal_group(pgid: int, requested: signal.Signals) -> None:
@@ -262,34 +261,68 @@ def _cleanup_tool_group(
     guard_write: int,
     status: int | None,
     *,
+    control_fd: int,
+    ready_fd: int,
+    gate_write: int,
     terminate_grace: float,
     kill_wait: float,
 ) -> tuple[int, str]:
-    if guard_pid <= 0 or guard_write < 0:
-        if status is None:
-            status = _wait_child(pid, terminate_grace)
-        if status is None:
-            with suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
-            status = _wait_child(pid, kill_wait)
-        return (status, "completed") if status is not None else (70, "cleanup_failed")
-    if _group_exists(pgid):
+    guard_pid, guard_write = _replace_dead_guard(
+        pgid,
+        guard_pid,
+        guard_write,
+        control_fd=control_fd,
+        ready_fd=ready_fd,
+        gate_write=gate_write,
+    )
+    while status is not None and guard_pid <= 0 and _live_group_exists(pgid):
+        guard_pid, guard_write = _replace_guard(
+            pgid,
+            control_fd=control_fd,
+            ready_fd=ready_fd,
+            gate_write=gate_write,
+        )
+        if guard_pid <= 0:
+            time.sleep(0.01)
+    if _live_group_exists(pgid):
         _signal_group(pgid, signal.SIGTERM)
         deadline = time.monotonic() + terminate_grace
         while time.monotonic() < deadline:
-            if status is None:
-                status = _poll_child(pid)
             members = _group_members(pgid)
             if members is not None and not members.difference({guard_pid}):
                 break
             time.sleep(0.01)
-    with suppress(OSError):
-        os.close(guard_write)
+    while _live_group_exists(pgid):
+        guard_pid, guard_write = _replace_dead_guard(
+            pgid,
+            guard_pid,
+            guard_write,
+            control_fd=control_fd,
+            ready_fd=ready_fd,
+            gate_write=gate_write,
+        )
+        while status is not None and guard_pid <= 0 and _live_group_exists(pgid):
+            guard_pid, guard_write = _replace_guard(
+                pgid,
+                control_fd=control_fd,
+                ready_fd=ready_fd,
+                gate_write=gate_write,
+            )
+            if guard_pid <= 0:
+                time.sleep(0.01)
+        if (status is None or guard_pid > 0) and _live_group_exists(pgid):
+            _signal_group(pgid, signal.SIGKILL)
+            deadline = time.monotonic() + kill_wait
+            while _live_group_exists(pgid) and time.monotonic() < deadline:
+                time.sleep(0.01)
+    if guard_write >= 0:
+        with suppress(OSError):
+            os.close(guard_write)
+    if guard_pid > 0:
+        _wait_child(guard_pid, kill_wait)
     if status is None:
         status = _wait_child(pid, kill_wait)
-    _wait_child(guard_pid, kill_wait)
-    _wait_group(pgid, kill_wait)
-    if status is None or _group_exists(pgid):
+    if status is None:
         return 70, "cleanup_failed"
     return status, "completed"
 
@@ -328,17 +361,30 @@ def _fork_group_guard(
     ready_fd: int,
     gate_write: int,
 ) -> tuple[int, int]:
+    close_fds: list[int] = []
+    for descriptor in (control_fd, ready_fd, gate_write):
+        if descriptor < 0:
+            continue
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            continue
+        close_fds.append(descriptor)
     guard_read, guard_write = os.pipe()
+    ready_read, ready_write = os.pipe()
     pid = os.fork()
     if pid == 0:
         try:
             os.close(guard_write)
-            os.close(control_fd)
-            os.close(ready_fd)
-            os.close(gate_write)
+            os.close(ready_read)
+            for descriptor in close_fds:
+                with suppress(OSError):
+                    os.close(descriptor)
             os.setpgid(0, pgid)
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
+            os.write(ready_write, b"R")
+            os.close(ready_write)
             while os.read(guard_read, 1):
                 pass
             os.close(guard_read)
@@ -347,15 +393,62 @@ def _fork_group_guard(
             pass
         os._exit(0)
     os.close(guard_read)
+    os.close(ready_write)
     try:
         os.setpgid(pid, pgid)
-    except OSError:
+        if os.read(ready_read, 1) != b"R":
+            raise SupervisorError("process group guard failed to initialize")
+    except (OSError, SupervisorError):
         with suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
         os.close(guard_write)
         _wait_child(pid, 1)
         raise
+    finally:
+        os.close(ready_read)
     return pid, guard_write
+
+
+def _replace_guard(
+    pgid: int,
+    *,
+    control_fd: int,
+    ready_fd: int,
+    gate_write: int,
+) -> tuple[int, int]:
+    if not _group_exists(pgid):
+        return -1, -1
+    try:
+        return _fork_group_guard(
+            pgid,
+            control_fd=control_fd,
+            ready_fd=ready_fd,
+            gate_write=gate_write,
+        )
+    except OSError:
+        return -1, -1
+
+
+def _replace_dead_guard(
+    pgid: int,
+    guard_pid: int,
+    guard_write: int,
+    *,
+    control_fd: int,
+    ready_fd: int,
+    gate_write: int,
+) -> tuple[int, int]:
+    if guard_pid > 0 and _poll_child(guard_pid) is None:
+        return guard_pid, guard_write
+    if guard_write >= 0:
+        with suppress(OSError):
+            os.close(guard_write)
+    return _replace_guard(
+        pgid,
+        control_fd=control_fd,
+        ready_fd=ready_fd,
+        gate_write=gate_write,
+    )
 
 
 def supervise(arguments: argparse.Namespace) -> int:
@@ -428,6 +521,11 @@ def supervise(arguments: argparse.Namespace) -> int:
         child_status: int | None = None
         backend_gone = False
         while child_status is None and not shutdown_requested and not backend_gone:
+            if _poll_child(guard_pid) is not None:
+                with suppress(OSError):
+                    os.close(guard_write)
+                guard_pid = guard_write = -1
+                break
             child_status = _poll_child(child_pid)
             if child_status is not None:
                 break
@@ -441,6 +539,9 @@ def supervise(arguments: argparse.Namespace) -> int:
             guard_pid,
             guard_write,
             child_status,
+            control_fd=arguments.control_fd,
+            ready_fd=arguments.ready_fd,
+            gate_write=gate_write,
             terminate_grace=arguments.terminate_grace,
             kill_wait=arguments.kill_wait,
         )
@@ -464,6 +565,9 @@ def supervise(arguments: argparse.Namespace) -> int:
                 guard_pid,
                 guard_write,
                 _poll_child(child_pid),
+                control_fd=arguments.control_fd,
+                ready_fd=arguments.ready_fd,
+                gate_write=gate_write,
                 terminate_grace=arguments.terminate_grace,
                 kill_wait=arguments.kill_wait,
             )

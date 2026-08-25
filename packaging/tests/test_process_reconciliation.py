@@ -90,12 +90,14 @@ class _Inspector:
                 start_time="supervisor-start",
                 executable=supervisor.resolve(),
                 ownership_nonce="a" * 32,
+                signal_token=(41001, 1),
             ),
             41002: module.ProcessSnapshot(
                 pid=41002,
                 pgid=41002,
                 start_time="tool-start",
                 executable=tool.resolve(),
+                signal_token=(41002, 1),
             ),
         }
         self.groups = {41002}
@@ -107,6 +109,9 @@ class _Inspector:
     def group_exists(self, pgid: int) -> bool:
         return pgid in self.groups
 
+    def group_snapshots(self, pgid: int) -> tuple[Any, ...]:
+        return tuple(snapshot for snapshot in self.snapshots.values() if snapshot.pgid == pgid)
+
 
 class _Signaller:
     def __init__(self, inspector: _Inspector, *, stop_on_term: bool = True) -> None:
@@ -114,19 +119,34 @@ class _Signaller:
         self.stop_on_term = stop_on_term
         self.calls: list[tuple[str, int, signal.Signals]] = []
 
-    def signal_process(self, pid: int, requested: signal.Signals) -> None:
-        self.calls.append(("pid", pid, requested))
+    def _live(self, target: Any) -> bool:
+        current = self.inspector.snapshots.get(target.pid)
+        return current is not None and current.signal_token == target.signal_token
+
+    def signal_process(self, target: Any, requested: signal.Signals) -> bool:
+        if not self._live(target):
+            return False
+        self.calls.append(("pid", target.pid, requested))
         if requested is signal.SIGTERM and self.stop_on_term:
             self.inspector.snapshots.clear()
             self.inspector.groups.clear()
         elif requested is signal.SIGKILL:
-            self.inspector.snapshots.pop(pid, None)
+            self.inspector.snapshots.pop(target.pid, None)
+        return True
 
-    def signal_group(self, pgid: int, requested: signal.Signals) -> None:
-        self.calls.append(("pgid", pgid, requested))
+    def signal_owned(
+        self,
+        supervisor: Any,
+        group: tuple[Any, ...],
+        requested: signal.Signals,
+    ) -> bool:
+        if not self._live(supervisor) or any(not self._live(target) for target in group):
+            return False
+        self.calls.append(("owned", supervisor.pid, requested))
         if requested is signal.SIGKILL:
-            self.inspector.groups.discard(pgid)
-            self.inspector.snapshots.pop(41002, None)
+            self.inspector.groups.clear()
+            self.inspector.snapshots.clear()
+        return True
 
 
 def test_complete_ownership_is_stopped_and_record_removed(tmp_path: Path) -> None:
@@ -217,13 +237,14 @@ def test_pid_reuse_after_term_prevents_killpg(tmp_path: Path) -> None:
     inspector = _Inspector(module, record, supervisor, tool)
 
     class ReusingSignaller(_Signaller):
-        def signal_process(self, pid: int, requested: signal.Signals) -> None:
-            super().signal_process(pid, requested)
+        def signal_process(self, target: Any, requested: signal.Signals) -> bool:
+            delivered = super().signal_process(target, requested)
             if requested is signal.SIGTERM:
                 self.inspector.snapshots[41001] = replace(
                     self.inspector.snapshots[41001],
                     start_time="reused-after-term",
                 )
+            return delivered
 
     signaller = ReusingSignaller(inspector, stop_on_term=False)
 
@@ -238,7 +259,7 @@ def test_pid_reuse_after_term_prevents_killpg(tmp_path: Path) -> None:
 
     assert report.status == "unsafe"
     assert signaller.calls == [("pid", 41001, signal.SIGTERM)]
-    assert all(call[0] != "pgid" for call in signaller.calls)
+    assert all(call[0] != "owned" for call in signaller.calls)
 
 
 def test_tool_group_kill_occurs_only_after_second_full_verification(tmp_path: Path) -> None:
@@ -259,9 +280,108 @@ def test_tool_group_kill_occurs_only_after_second_full_verification(tmp_path: Pa
     assert report.status == "healthy"
     assert signaller.calls == [
         ("pid", 41001, signal.SIGTERM),
-        ("pgid", 41002, signal.SIGKILL),
-        ("pid", 41001, signal.SIGKILL),
+        ("owned", 41001, signal.SIGKILL),
     ]
+
+
+def test_supervisor_reuse_after_initial_verification_delivers_zero_signal(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    record_path, record, supervisor, tool = _record(tmp_path)
+    inspector = _Inspector(module, record, supervisor, tool)
+
+    class InitialBarrierSignaller(_Signaller):
+        def signal_process(self, target: Any, requested: signal.Signals) -> bool:
+            self.inspector.snapshots[target.pid] = replace(
+                self.inspector.snapshots[target.pid],
+                signal_token=(target.pid, 2),
+                start_time="reused-before-term",
+            )
+            return super().signal_process(target, requested)
+
+    signaller = InitialBarrierSignaller(inspector)
+    report = module.reconcile_process_records(
+        record_path.parents[1],
+        inspector=inspector,
+        signaller=signaller,
+        terminate_grace=0.001,
+        kill_wait=0.001,
+        poll_interval=0.001,
+    )
+
+    assert report.status == "unsafe"
+    assert signaller.calls == []
+
+
+def test_supervisor_reuse_after_second_verification_delivers_no_kill(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    record_path, record, supervisor, tool = _record(tmp_path)
+    inspector = _Inspector(module, record, supervisor, tool)
+
+    class KillBarrierSignaller(_Signaller):
+        def signal_owned(
+            self,
+            supervisor: Any,
+            group: tuple[Any, ...],
+            requested: signal.Signals,
+        ) -> bool:
+            self.inspector.snapshots[supervisor.pid] = replace(
+                self.inspector.snapshots[supervisor.pid],
+                signal_token=(supervisor.pid, 2),
+                start_time="reused-before-kill",
+            )
+            return super().signal_owned(supervisor, group, requested)
+
+    signaller = KillBarrierSignaller(inspector, stop_on_term=False)
+    report = module.reconcile_process_records(
+        record_path.parents[1],
+        inspector=inspector,
+        signaller=signaller,
+        terminate_grace=0.001,
+        kill_wait=0.001,
+        poll_interval=0.001,
+    )
+
+    assert report.status == "unsafe"
+    assert signaller.calls == [("pid", 41001, signal.SIGTERM)]
+
+
+def test_group_reuse_after_second_verification_delivers_no_kill(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    record_path, record, supervisor, tool = _record(tmp_path)
+    inspector = _Inspector(module, record, supervisor, tool)
+
+    class GroupBarrierSignaller(_Signaller):
+        def signal_owned(
+            self,
+            supervisor: Any,
+            group: tuple[Any, ...],
+            requested: signal.Signals,
+        ) -> bool:
+            self.inspector.snapshots[41002] = replace(
+                self.inspector.snapshots[41002],
+                signal_token=(41002, 2),
+                start_time="reused-group-before-kill",
+            )
+            return super().signal_owned(supervisor, group, requested)
+
+    signaller = GroupBarrierSignaller(inspector, stop_on_term=False)
+    report = module.reconcile_process_records(
+        record_path.parents[1],
+        inspector=inspector,
+        signaller=signaller,
+        terminate_grace=0.001,
+        kill_wait=0.001,
+        poll_interval=0.001,
+    )
+
+    assert report.status == "unsafe"
+    assert signaller.calls == [("pid", 41001, signal.SIGTERM)]
 
 
 def test_completed_record_is_removed_without_signal(tmp_path: Path) -> None:
@@ -354,11 +474,19 @@ def test_symlinked_run_record_is_unsafe_with_zero_signal(tmp_path: Path) -> None
         def group_exists(self, _pgid: int) -> bool:
             return False
 
+        def group_snapshots(self, _pgid: int) -> tuple[Any, ...]:
+            return ()
+
     class NoSignal:
-        def signal_process(self, _pid: int, _requested: signal.Signals) -> None:
+        def signal_process(self, _target: Any, _requested: signal.Signals) -> bool:
             raise AssertionError("unverified record sent a process signal")
 
-        def signal_group(self, _pgid: int, _requested: signal.Signals) -> None:
+        def signal_owned(
+            self,
+            _supervisor: Any,
+            _group: tuple[Any, ...],
+            _requested: signal.Signals,
+        ) -> bool:
             raise AssertionError("unverified record sent a group signal")
 
     report = module.reconcile_process_records(

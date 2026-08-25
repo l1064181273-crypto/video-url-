@@ -45,12 +45,218 @@ def _process_exists(pid: int) -> bool:
     return True
 
 
+def _process_state(pid: int) -> str | None:
+    completed = subprocess.run(
+        ["/bin/ps", "-o", "state=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    state = completed.stdout.strip()
+    return state[:1] if completed.returncode == 0 and state else None
+
+
+def _guard_pid(supervisor_pid: int, tool_pid: int, pgid: int) -> int | None:
+    completed = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,ppid=,pgid="],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 3:
+            continue
+        pid, ppid, candidate_pgid = (int(field) for field in fields)
+        if ppid == supervisor_pid and candidate_pgid == pgid and pid != tool_pid:
+            return pid
+    return None
+
+
 def _launcher(process_root: Path) -> ToolSupervisorLauncher:
     process_root.parent.mkdir(parents=True, exist_ok=True)
     return ToolSupervisorLauncher(
         supervisor_path=TOOL_SUPERVISOR,
         process_root=process_root,
     )
+
+
+@pytest.mark.parametrize("guard_death_phase", ["running", "cleanup-start", "term-grace"])
+def test_guard_death_still_reaps_ignoring_tool_tree(
+    tmp_path: Path,
+    guard_death_phase: str,
+) -> None:
+    process_root = tmp_path / "runtime/processes"
+    process_root.parent.mkdir(parents=True)
+    tool_pids = tmp_path / "tool-pids.json"
+    grandchild_pid = tmp_path / "grandchild.pid"
+    term_marker = tmp_path / "term-observed"
+    backend_state = tmp_path / "backend-state.json"
+    tool = tmp_path / "ignoring-tool.py"
+    tool.write_text(
+        """
+import json, os, signal, subprocess, sys, time
+marker = sys.argv[3]
+def ignore_term(_signum, _frame):
+    open(marker, "w").write("term")
+signal.signal(signal.SIGTERM, ignore_term)
+child = subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        "import signal,subprocess,sys,time;"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+        "g=subprocess.Popen([sys.executable,'-c','import signal,time;"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)']);"
+        "open(sys.argv[1],'w').write(str(g.pid));time.sleep(60)",
+        sys.argv[2],
+    ]
+)
+open(sys.argv[1], "w").write(json.dumps({"tool": os.getpid(), "child": child.pid}))
+while True:
+    time.sleep(0.05)
+""",
+        encoding="utf-8",
+    )
+    backend = tmp_path / "backend.py"
+    backend.write_text(
+        """
+import json, os, subprocess, sys, time
+from pathlib import Path
+from lvt.core.processes import ProcessOwnership, ToolSupervisorLauncher
+root, supervisor_path, tool, pids, grandchild, term_marker, state = map(
+    Path, sys.argv[1:]
+)
+control_read, control_write = os.pipe()
+ready_read, ready_write = os.pipe()
+launcher = ToolSupervisorLauncher(
+    supervisor_path=supervisor_path,
+    process_root=root,
+)
+command = launcher.wrap(
+    (sys.executable, str(tool), str(pids), str(grandchild), str(term_marker)),
+    ProcessOwnership(
+        job_id="22222222-2222-4222-8222-222222222222",
+        run_id="11111111-1111-4111-8111-111111111111",
+        kind="yt-dlp",
+    ),
+    control_fd=control_read,
+    ready_fd=ready_write,
+    terminate_grace=1.0,
+    kill_wait=1.0,
+)
+supervisor = subprocess.Popen(
+    command,
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+    pass_fds=(control_read, ready_write),
+)
+os.close(control_read)
+os.close(ready_write)
+payload = bytearray()
+while b"\\n" not in payload:
+    chunk = os.read(ready_read, 4096)
+    if not chunk:
+        raise RuntimeError("supervisor closed ready pipe")
+    payload.extend(chunk)
+ready = json.loads(payload)
+state.write_text(json.dumps({"supervisor": supervisor.pid, **ready}))
+supervisor.wait()
+time.sleep(60)
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(ROOT / "backend/src")
+    backend_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(backend),
+            str(process_root),
+            str(TOOL_SUPERVISOR),
+            str(tool),
+            str(tool_pids),
+            str(grandchild_pid),
+            str(term_marker),
+            str(backend_state),
+        ],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    record_path = process_root / RUN_ID / "yt-dlp.json"
+    saved_pgid = -1
+    tracked: list[int] = []
+    supervisor_pid = -1
+    try:
+        _wait_until(record_path.exists)
+        _wait_until(backend_state.exists)
+        _wait_until(tool_pids.exists)
+        _wait_until(grandchild_pid.exists)
+        state = json.loads(backend_state.read_text(encoding="utf-8"))
+        pids = json.loads(tool_pids.read_text(encoding="utf-8"))
+        supervisor_pid = state["supervisor"]
+        saved_pgid = state["pgid"]
+        tracked = [
+            pids["tool"],
+            pids["child"],
+            int(grandchild_pid.read_text(encoding="utf-8")),
+        ]
+        guard = _guard_pid(supervisor_pid, state["pid"], saved_pgid)
+        assert guard is not None
+
+        if guard_death_phase == "cleanup-start":
+            os.kill(supervisor_pid, signal.SIGSTOP)
+            os.kill(backend_process.pid, signal.SIGKILL)
+            backend_process.wait(timeout=2)
+            os.kill(guard, signal.SIGKILL)
+            os.kill(supervisor_pid, signal.SIGCONT)
+        elif guard_death_phase == "term-grace":
+            os.kill(backend_process.pid, signal.SIGKILL)
+            backend_process.wait(timeout=2)
+            _wait_until(term_marker.exists)
+            os.kill(guard, signal.SIGKILL)
+        else:
+            os.kill(guard, signal.SIGKILL)
+            _wait_until(lambda: _process_state(guard) in {None, "Z"})
+            os.kill(backend_process.pid, signal.SIGKILL)
+            backend_process.wait(timeout=2)
+
+        try:
+            _wait_until(lambda: _process_state(supervisor_pid) in {None, "Z"})
+        except AssertionError:
+            processes = subprocess.run(
+                ["/bin/ps", "-axo", "pid=,ppid=,pgid=,state=,command="],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            relevant = [
+                line
+                for line in processes.stdout.splitlines()
+                if len(line.split(maxsplit=4)) == 5
+                and (
+                    int(line.split(maxsplit=4)[0]) == supervisor_pid
+                    or int(line.split(maxsplit=4)[2]) == saved_pgid
+                )
+            ]
+            pytest.fail("\n".join(relevant))
+        for pid in tracked:
+            _wait_until(lambda pid=pid: _process_state(pid) in {None, "Z"})
+        assert not record_path.exists()
+    finally:
+        with suppress(ProcessLookupError):
+            os.kill(backend_process.pid, signal.SIGKILL)
+        if supervisor_pid > 0:
+            with suppress(ProcessLookupError):
+                os.kill(supervisor_pid, signal.SIGCONT)
+            with suppress(ProcessLookupError):
+                os.kill(supervisor_pid, signal.SIGKILL)
+        if saved_pgid > 0:
+            with suppress(ProcessLookupError):
+                os.killpg(saved_pgid, signal.SIGKILL)
 
 
 def test_record_is_durable_before_tool_exec_and_contains_no_command_data(tmp_path: Path) -> None:
