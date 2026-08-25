@@ -38,6 +38,18 @@ def _copy_file(source: Path, destination: Path, *, executable: bool = False) -> 
 def _build_release(tmp_path: Path, name: str = "Release 源 naïve") -> Path:
     release = tmp_path / name
     shutil.copytree(FIXTURE_ROOT, release)
+    extension_manifest = release / "extension/dist/manifest.json"
+    extension_manifest.parent.mkdir(parents=True, exist_ok=True)
+    extension_manifest.write_text(
+        json.dumps(
+            {
+                "manifest_version": 3,
+                "name": "Local Video Transcriber Fixture",
+                "version": "0.1.0",
+            }
+        ),
+        encoding="utf-8",
+    )
     _copy_file(INSTALL_COMMAND, release / "scripts/install.command", executable=True)
     _copy_file(COMMON_LIBRARY, release / "scripts/lib/common.zsh", executable=True)
     _copy_file(INSTALL_TOOL, release / "packaging/tools/install.py", executable=True)
