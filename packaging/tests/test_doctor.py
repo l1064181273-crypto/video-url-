@@ -75,14 +75,28 @@ def _release_tree(root: Path) -> Path:
 
 def _dependency_tree(test_root: Path, release: Path) -> Path:
     data_root = test_root / "用户 数据" / "LocalVideoTranscriber"
-    dependencies = json.loads((release / "packaging" / "dependencies.json").read_text())
+    dependencies_path = release / "packaging" / "dependencies.json"
+    dependencies = json.loads(dependencies_path.read_text())
     for item in [*dependencies["artifacts"], *dependencies["ollama_models"]]:
         for relative in item["expected_files"]:
             if relative.startswith("models/"):
                 path = data_root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.touch()
-                os.truncate(path, item.get("manifest_size", item.get("size", 1)))
+                if "expected_file_sha256" in item:
+                    content = f"verified extracted fixture:{item['id']}".encode()
+                    path.write_bytes(content)
+                    item["expected_file_size"] = len(content)
+                    item["expected_file_sha256"] = hashlib.sha256(content).hexdigest()
+                else:
+                    path.touch()
+                    os.truncate(
+                        path,
+                        item.get(
+                            "expected_file_size",
+                            item.get("manifest_size", item.get("size", 1)),
+                        ),
+                    )
+    dependencies_path.write_text(json.dumps(dependencies), encoding="utf-8")
 
     qwen = next(item for item in dependencies["ollama_models"] if item["id"] == "qwen2.5-1.5b")
     for blob in qwen["blobs"]:
@@ -478,6 +492,108 @@ def test_dependencies_reject_missing_qwen_blob_and_drifted_state(tmp_path: Path)
     assert "QWEN_INTEGRITY_FAILED" in {
         check["code"] for check in json.loads(drifted_state.stdout)["checks"]
     }
+
+
+def test_segmentation_manifest_separates_archive_and_extracted_file_contract() -> None:
+    dependencies = json.loads(
+        (ROOT / "packaging" / "dependencies.json").read_text(encoding="utf-8")
+    )
+    segmentation = next(
+        item for item in dependencies["artifacts"] if item["id"] == "diarization-segmentation"
+    )
+
+    assert segmentation["size"] == 6_958_444
+    assert (
+        segmentation["sha256"] == "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488"
+    )
+    assert segmentation["expected_file_size"] == 5_992_913
+    assert (
+        segmentation["expected_file_sha256"]
+        == "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"
+    )
+    assert segmentation["expected_files"] == ["models/diarization/segmentation/model.onnx"]
+
+
+def test_dependencies_reject_segmentation_archive_size_as_extracted_size(
+    tmp_path: Path,
+) -> None:
+    release = _release_tree(tmp_path)
+    data_root = _dependency_tree(tmp_path, release)
+    segmentation = data_root / "models/diarization/segmentation/model.onnx"
+    os.truncate(segmentation, 6_958_444)
+
+    completed = _run(
+        VERIFY_INSTALL,
+        "--json",
+        "--phase",
+        "dependencies",
+        "--data-root",
+        str(data_root),
+        "--release-root",
+        str(release),
+        environment=_base_environment(tmp_path, _fake_path(tmp_path)),
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 2
+    assert any(
+        check["id"] == "model_diarization-segmentation" and check["code"] == "MODEL_SIZE_INVALID"
+        for check in payload["checks"]
+    )
+
+
+def test_dependencies_reject_segmentation_digest_drift(tmp_path: Path) -> None:
+    release = _release_tree(tmp_path)
+    data_root = _dependency_tree(tmp_path, release)
+    segmentation = data_root / "models/diarization/segmentation/model.onnx"
+    content = bytearray(segmentation.read_bytes())
+    content[0] ^= 1
+    segmentation.write_bytes(content)
+
+    completed = _run(
+        VERIFY_INSTALL,
+        "--json",
+        "--phase",
+        "dependencies",
+        "--data-root",
+        str(data_root),
+        "--release-root",
+        str(release),
+        environment=_base_environment(tmp_path, _fake_path(tmp_path)),
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 2
+    assert any(
+        check["id"] == "model_diarization-segmentation" and check["code"] == "MODEL_DIGEST_INVALID"
+        for check in payload["checks"]
+    )
+
+
+def test_dependencies_keep_direct_file_size_fallback(tmp_path: Path) -> None:
+    release = _release_tree(tmp_path)
+    data_root = _dependency_tree(tmp_path, release)
+    embedding = data_root / "models/diarization/embedding/nemo_en_titanet_small.onnx"
+    os.truncate(embedding, embedding.stat().st_size - 1)
+
+    completed = _run(
+        VERIFY_INSTALL,
+        "--json",
+        "--phase",
+        "dependencies",
+        "--data-root",
+        str(data_root),
+        "--release-root",
+        str(release),
+        environment=_base_environment(tmp_path, _fake_path(tmp_path)),
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 2
+    assert any(
+        check["id"] == "model_diarization-embedding" and check["code"] == "MODEL_SIZE_INVALID"
+        for check in payload["checks"]
+    )
 
 
 def test_doctor_is_read_only_for_token_database_and_models(tmp_path: Path) -> None:

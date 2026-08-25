@@ -196,11 +196,12 @@ def _validate_dependencies(data_root: Path, release_root: Path | None) -> list[C
             continue
         for relative in item.get("expected_files", []):
             checks.append(
-                _required_sized_path(
+                _required_model_path(
                     data_root,
                     relative,
                     f"model_{item['id']}",
-                    item.get("size"),
+                    item.get("expected_file_size", item.get("size")),
+                    item.get("expected_file_sha256"),
                 )
             )
     for model in dependencies.get("ollama_models", []):
@@ -372,6 +373,34 @@ def _required_sized_path(
             "隔离文件并重新运行依赖安装",
         )
     return ok(identifier, "MODEL_FILE_READY", "模型文件存在且大小匹配")
+
+
+def _required_model_path(
+    root: Path,
+    relative: str,
+    identifier: str,
+    expected_size: Any,
+    expected_sha256: Any,
+) -> Check:
+    check = _required_sized_path(root, relative, identifier, expected_size)
+    if check.status is not CheckStatus.OK or expected_sha256 is None:
+        return check
+    try:
+        if (
+            not isinstance(expected_sha256, str)
+            or len(expected_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_sha256)
+            or _sha256(_safe_join(root, relative)) != expected_sha256
+        ):
+            raise ValueError
+    except (OSError, ValueError):
+        return unsafe(
+            identifier,
+            "MODEL_DIGEST_INVALID",
+            "模型文件摘要与依赖合同不一致",
+            "隔离文件并重新运行依赖安装",
+        )
+    return ok(identifier, "MODEL_FILE_READY", "模型文件大小和摘要匹配")
 
 
 def _validate_qwen_blobs(data_root: Path, model: dict[str, Any]) -> list[Check]:
