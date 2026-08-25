@@ -96,15 +96,16 @@ def _dependency_tree(test_root: Path, release: Path) -> Path:
                             item.get("manifest_size", item.get("size", 1)),
                         ),
                     )
-    dependencies_path.write_text(json.dumps(dependencies), encoding="utf-8")
-
     qwen = next(item for item in dependencies["ollama_models"] if item["id"] == "qwen2.5-1.5b")
-    for blob in qwen["blobs"]:
-        digest = blob["digest"].removeprefix("sha256:")
+    for index, blob in enumerate(qwen["blobs"]):
+        content = f"verified qwen fixture blob:{index}".encode()
+        digest = hashlib.sha256(content).hexdigest()
+        blob["digest"] = f"sha256:{digest}"
+        blob["size"] = len(content)
         path = data_root / "models" / "ollama" / "blobs" / f"sha256-{digest}"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch()
-        os.truncate(path, blob["size"])
+        path.write_bytes(content)
+    dependencies_path.write_text(json.dumps(dependencies), encoding="utf-8")
 
     ffmpeg_dir = data_root / "app" / "tools" / "ffmpeg" / "8.0" / "bin"
     ffmpeg_sha = _write_binary(ffmpeg_dir / "ffmpeg", b"verified ffmpeg")

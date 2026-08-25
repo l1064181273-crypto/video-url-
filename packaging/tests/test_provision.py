@@ -316,6 +316,11 @@ def _candidate_tree(
     doctor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     doctor.chmod(0o755)
     _copy(VERIFY, release / "packaging/tools/verify_install.py", executable=True)
+    _copy(PROVISION, release / "packaging/tools/provision.py", executable=True)
+    _copy(LOCK, release / "packaging/tools/lifecycle_lock.py", executable=True)
+    _copy(COMMON, release / "scripts/lib/common.zsh", executable=True)
+    _copy(PROCESS, release / "scripts/lib/process.zsh", executable=True)
+    _copy(MODELFILE, release / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km")
     manifest = release / "packaging/dependencies.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps(dependencies), encoding="utf-8")
@@ -346,15 +351,25 @@ def _environment(
     behavior: dict[str, str] | None = None,
     create_fail: bool = False,
 ) -> dict[str, str]:
-    fake_ollama = tmp_path / "fake-ollama"
+    (tmp_path / ".lvt-provision-test-root").write_text(
+        "lvt-provision-test-root-v1\n",
+        encoding="utf-8",
+    )
+    fixture_root = tmp_path / "provision-fixtures"
+    fake_ollama = fixture_root / "fake-ollama"
     _copy(DOWNLOAD_FIXTURE_ROOT / "fake_ollama.py", fake_ollama, executable=True)
+    download_library = fixture_root / "download.zsh"
+    _copy(DOWNLOAD_FIXTURE_ROOT / "download.zsh", download_library)
+    origin_marker = fixture_root / "download-origin.txt"
+    origin_marker.write_text(f"{fixture.origin}\n", encoding="utf-8")
     environment = os.environ.copy()
     environment.update(
         {
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "LVT_TEST_ROOT": str(tmp_path),
             "LVT_TEST_DOWNLOAD_ORIGIN": fixture.origin,
-            "LVT_TEST_DOWNLOAD_LIBRARY": str(DOWNLOAD_FIXTURE_ROOT / "download.zsh"),
+            "LVT_TEST_DOWNLOAD_ORIGIN_MARKER": str(origin_marker),
+            "LVT_TEST_DOWNLOAD_LIBRARY": str(download_library),
             "LVT_TEST_OLLAMA_EXECUTABLE": str(fake_ollama),
             "LVT_TEST_OLLAMA_STATE": str(tmp_path / "ollama-models.txt"),
             "LVT_TEST_DOWNLOAD_BEHAVIOR": json.dumps(behavior or {}),
@@ -374,7 +389,7 @@ def _run_provision(
     return subprocess.run(
         [
             sys.executable,
-            str(PROVISION),
+            str(release / "packaging/tools/provision.py"),
             "--phase",
             "dependencies",
             "--data-root",
@@ -388,6 +403,28 @@ def _run_provision(
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
+    )
+
+
+def _run_dependencies_verify(
+    data_root: Path,
+    release: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(VERIFY),
+            "--json",
+            "--phase",
+            "dependencies",
+            "--data-root",
+            str(data_root),
+            "--release-root",
+            str(release),
+        ],
+        capture_output=True,
+        text=True,
         check=False,
     )
 
@@ -502,28 +539,40 @@ def test_provision_builds_healthy_dependencies_candidate(tmp_path: Path) -> None
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "INSTALL_DEPENDENCIES_READY" in completed.stdout
-    verified = subprocess.run(
-        [
-            sys.executable,
-            str(VERIFY),
-            "--json",
-            "--phase",
-            "dependencies",
-            "--data-root",
-            str(data_root),
-            "--release-root",
-            str(release),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    verified = _run_dependencies_verify(data_root, release)
     assert verified.returncode == 0, verified.stdout + verified.stderr
     assert json.loads(verified.stdout)["status"] == "healthy"
     state = json.loads((data_root / "runtime/install-state.json").read_text())
     assert set(state) == {"schema_version", "core", "ffmpeg", "ollama_models"}
     assert not (data_root / "app/current").exists()
     assert not (data_root / "extension/manifest.json").exists()
+
+
+def test_dependencies_verify_rejects_same_size_qwen_blob_corruption(
+    tmp_path: Path,
+) -> None:
+    dependencies, files = _fixture_contract()
+    data_root, release = _candidate_tree(tmp_path, dependencies)
+    with DownloadFixture(files) as fixture:
+        completed = _run_provision(
+            data_root,
+            release,
+            _environment(tmp_path, fixture),
+        )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+    digest = dependencies["ollama_models"][0]["blobs"][0]["digest"][7:]
+    blob = data_root / "models/ollama/blobs" / f"sha256-{digest}"
+    content = bytearray(blob.read_bytes())
+    content[0] ^= 0x01
+    blob.write_bytes(content)
+
+    verified = _run_dependencies_verify(data_root, release)
+    report = json.loads(verified.stdout)
+    qwen_check = next(check for check in report["checks"] if check["id"] == "qwen_blob_0")
+    assert verified.returncode != 0
+    assert qwen_check["code"] == "MODEL_DIGEST_INVALID"
+    assert "摘要" in qwen_check["message"]
 
 
 @pytest.mark.parametrize("unsafe", ["traversal", "symlink"])
@@ -618,6 +667,12 @@ def test_qwen_integrity_failures_are_quarantined(
     qwen_manifest = data_root / "models/ollama/manifests/registry.ollama.ai/library/qwen2.5/1.5b"
     assert not qwen_manifest.exists()
     assert any((data_root / "models/quarantine").iterdir())
+    state = json.loads((data_root / "runtime/install-state.json").read_text())
+    assert set(state) == {"schema_version", "core"}
+    assert all(
+        path.is_relative_to(data_root / "models/quarantine")
+        for path in data_root.rglob("*.partial*")
+    )
 
 
 def test_qwen_incorrect_pinned_manifest_digest_is_quarantined(tmp_path: Path) -> None:
@@ -679,7 +734,9 @@ def test_user_ollama_on_11434_does_not_affect_provision(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_existing_project_ollama_on_11435_is_reused(tmp_path: Path) -> None:
+def test_external_ollama_compatible_daemon_on_11435_fails_untouched(
+    tmp_path: Path,
+) -> None:
     dependencies, files = _fixture_contract()
     data_root, release = _candidate_tree(tmp_path, dependencies)
     with DownloadFixture(files) as fixture:
@@ -692,6 +749,8 @@ def test_existing_project_ollama_on_11435_is_reused(tmp_path: Path) -> None:
             "LVT_TEST_ROOT": environment["LVT_TEST_ROOT"],
             "LVT_TEST_OLLAMA_STATE": environment["LVT_TEST_OLLAMA_STATE"],
         }
+        state_path = Path(environment["LVT_TEST_OLLAMA_STATE"])
+        state_path.write_text("external-sentinel\n", encoding="utf-8")
         daemon = subprocess.Popen(
             [environment["LVT_TEST_OLLAMA_EXECUTABLE"], "serve"],
             env=daemon_environment,
@@ -702,11 +761,14 @@ def test_existing_project_ollama_on_11435_is_reused(tmp_path: Path) -> None:
             _wait_for_port(11435, in_use=True)
             completed = _run_provision(data_root, release, environment)
             assert daemon.poll() is None
+            assert state_path.read_text(encoding="utf-8") == "external-sentinel\n"
         finally:
             daemon.terminate()
             daemon.wait(timeout=5)
 
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.returncode == 2
+    state = json.loads((data_root / "runtime/install-state.json").read_text())
+    assert set(state) == {"schema_version", "core"}
 
 
 def test_missing_asr_runtime_package_fails_closed(tmp_path: Path) -> None:
@@ -761,6 +823,7 @@ def test_logs_argv_and_audit_do_not_expose_secrets(tmp_path: Path) -> None:
         environment.update(
             {
                 "LVT_TOKEN": secret,
+                "OPENAI_API_KEY": "openai-" + secret,
                 "LVT_TEST_PROTECTED_URL": f"https://example.invalid/file?token={secret}",
                 "LVT_TEST_OLLAMA_AUDIT": str(audit),
             }
@@ -768,9 +831,85 @@ def test_logs_argv_and_audit_do_not_expose_secrets(tmp_path: Path) -> None:
         completed = _run_provision(data_root, release, environment)
 
     transcript = completed.stdout + completed.stderr + audit.read_text(encoding="utf-8")
+    child_environments = list(data_root.rglob("download-child-environment.txt"))
     assert completed.returncode == 0
+    assert child_environments
+    for child_environment in child_environments:
+        assert child_environment.read_text(encoding="utf-8") == (
+            "LVT_TOKEN=<unset>\nOPENAI_API_KEY=<unset>\n"
+        )
     assert secret not in transcript
     assert "?token=" not in transcript
+
+
+def test_unrelated_test_root_rejects_all_injections(tmp_path: Path) -> None:
+    dependencies, files = _fixture_contract()
+    data_root, release = _candidate_tree(tmp_path, dependencies)
+    unrelated = tmp_path / "unrelated-test-root"
+    unrelated.mkdir()
+    (unrelated / ".lvt-provision-test-root").write_text(
+        "lvt-provision-test-root-v1\n",
+        encoding="utf-8",
+    )
+    with DownloadFixture(files) as fixture:
+        environment = _environment(tmp_path, fixture)
+        environment["LVT_TEST_ROOT"] = str(unrelated)
+        completed = _run_provision(data_root, release, environment)
+
+    assert completed.returncode == 2
+    state = json.loads((data_root / "runtime/install-state.json").read_text())
+    assert set(state) == {"schema_version", "core"}
+    assert not list(data_root.rglob("*.partial*"))
+    assert not list(data_root.rglob(".verified"))
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "LVT_TEST_DOWNLOAD_LIBRARY",
+        "LVT_TEST_DOWNLOAD_ORIGIN_MARKER",
+        "LVT_TEST_OLLAMA_EXECUTABLE",
+        "LVT_TEST_OLLAMA_STATE",
+        "LVT_TEST_OLLAMA_AUDIT",
+    ],
+)
+def test_path_injection_outside_test_root_is_rejected(
+    tmp_path: Path,
+    setting: str,
+) -> None:
+    dependencies, files = _fixture_contract()
+    data_root, release = _candidate_tree(tmp_path, dependencies)
+    outside_root = tmp_path.with_name(f"{tmp_path.name}-outside")
+    outside_root.mkdir()
+    with DownloadFixture(files) as fixture:
+        environment = _environment(tmp_path, fixture)
+        paths = {
+            "LVT_TEST_DOWNLOAD_LIBRARY": outside_root / "download.zsh",
+            "LVT_TEST_DOWNLOAD_ORIGIN_MARKER": outside_root / "download-origin.txt",
+            "LVT_TEST_OLLAMA_EXECUTABLE": outside_root / "fake-ollama",
+            "LVT_TEST_OLLAMA_STATE": outside_root / "ollama-models.txt",
+            "LVT_TEST_OLLAMA_AUDIT": outside_root / "ollama-audit.json",
+        }
+        _copy(DOWNLOAD_FIXTURE_ROOT / "download.zsh", paths["LVT_TEST_DOWNLOAD_LIBRARY"])
+        _copy(
+            DOWNLOAD_FIXTURE_ROOT / "fake_ollama.py",
+            paths["LVT_TEST_OLLAMA_EXECUTABLE"],
+            executable=True,
+        )
+        paths["LVT_TEST_DOWNLOAD_ORIGIN_MARKER"].write_text(
+            f"{fixture.origin}\n",
+            encoding="utf-8",
+        )
+        environment[setting] = str(paths[setting])
+        try:
+            completed = _run_provision(data_root, release, environment)
+        finally:
+            shutil.rmtree(outside_root)
+
+    assert completed.returncode == 2
+    state = json.loads((data_root / "runtime/install-state.json").read_text())
+    assert set(state) == {"schema_version", "core"}
+    assert not list(data_root.rglob("*.partial*"))
 
 
 def test_dependency_url_query_is_rejected_without_disclosure(tmp_path: Path) -> None:
@@ -871,12 +1010,13 @@ def test_default_install_runs_staging_then_dependencies_without_publish(
     tmp_path: Path,
 ) -> None:
     dependencies, files = _fixture_contract()
-    release = _build_install_source(tmp_path, dependencies)
     test_root = tmp_path / "安装 根"
+    test_root.mkdir()
+    release = _build_install_source(test_root, dependencies)
     home = tmp_path / "empty-home"
     home.mkdir()
     with DownloadFixture(files) as fixture:
-        environment = _environment(tmp_path, fixture)
+        environment = _environment(test_root, fixture)
         environment.update(
             {
                 "HOME": str(home),
@@ -926,12 +1066,13 @@ def test_default_install_runs_staging_then_dependencies_without_publish(
 
 def test_default_install_skip_models_reports_incomplete(tmp_path: Path) -> None:
     dependencies, files = _fixture_contract()
-    release = _build_install_source(tmp_path, dependencies)
     test_root = tmp_path / "skip 根"
+    test_root.mkdir()
+    release = _build_install_source(test_root, dependencies)
     home = tmp_path / "empty-home"
     home.mkdir()
     with DownloadFixture(files) as fixture:
-        environment = _environment(tmp_path, fixture)
+        environment = _environment(test_root, fixture)
         environment.update(
             {
                 "HOME": str(home),

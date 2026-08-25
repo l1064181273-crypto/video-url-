@@ -22,6 +22,10 @@ function lvt_download_verified() {
   fi
   local destination="${controlled_root}/${relative_destination}"
   local partial="${destination}.partial"
+  {
+    print -r -- "LVT_TOKEN=${LVT_TOKEN-<unset>}"
+    print -r -- "OPENAI_API_KEY=${OPENAI_API_KEY-<unset>}"
+  } > "${controlled_root}/download-child-environment.txt"
   /bin/mkdir -p "${destination:h}"
   if ! /usr/bin/curl \
     --proto '=http,https' \

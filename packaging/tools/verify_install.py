@@ -422,11 +422,12 @@ def _validate_qwen_blobs(data_root: Path, model: dict[str, Any]) -> list[Check]:
                 raise ValueError
             relative = f"models/ollama/blobs/sha256-{digest[7:]}"
             checks.append(
-                _required_sized_path(
+                _required_model_path(
                     data_root,
                     relative,
                     f"qwen_blob_{index}",
                     blob.get("size"),
+                    digest[7:],
                 )
             )
         install_state = json.loads(

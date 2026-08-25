@@ -34,6 +34,9 @@ QWEN_ID = "qwen2.5-1.5b"
 HY_MODEL = "hy-mt2:1.8b-q4km-fixed"
 OLLAMA_ORIGIN = "http://127.0.0.1:11435"
 ARM64_CPU_TYPE = 0x0100000C
+TEST_ROOT_MARKER = ".lvt-provision-test-root"
+TEST_ROOT_MARKER_CONTENT = "lvt-provision-test-root-v1\n"
+_TEST_ROOT: Path | None = None
 
 
 class ProvisionError(RuntimeError):
@@ -229,15 +232,68 @@ def _is_arm64_macho(path: Path) -> bool:
     return False
 
 
+def _configure_test_context(
+    source_root: Path,
+    data_root: Path,
+    release_root: Path,
+) -> None:
+    global _TEST_ROOT
+    _TEST_ROOT = None
+    raw = os.environ.get("LVT_TEST_ROOT")
+    if raw is None:
+        return
+    candidate = Path(raw)
+    if (
+        not candidate.is_absolute()
+        or _has_symlink_component(candidate)
+        or candidate.is_symlink()
+        or not candidate.is_dir()
+    ):
+        raise ProvisionError("test root is unsafe")
+    try:
+        test_root = candidate.resolve(strict=True)
+        marker = test_root / TEST_ROOT_MARKER
+        if (
+            marker.is_symlink()
+            or not marker.is_file()
+            or marker.read_text(encoding="utf-8") != TEST_ROOT_MARKER_CONTENT
+        ):
+            raise ProvisionError("test root marker is invalid")
+        for controlled in (source_root, data_root, release_root):
+            controlled.resolve(strict=True).relative_to(test_root)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ProvisionError("test root does not contain provision paths") from exc
+    _TEST_ROOT = test_root
+
+
 def _test_setting(name: str) -> str | None:
-    if not os.environ.get("LVT_TEST_ROOT"):
+    if _TEST_ROOT is None:
         return None
     return os.environ.get(name)
 
 
+def _test_path_setting(name: str, *, must_exist: bool) -> Path | None:
+    value = _test_setting(name)
+    if value is None:
+        return None
+    assert _TEST_ROOT is not None
+    candidate = Path(value)
+    if not candidate.is_absolute() or _has_symlink_component(candidate) or candidate.is_symlink():
+        raise ProvisionError("test injection path is unsafe")
+    try:
+        if must_exist:
+            resolved = candidate.resolve(strict=True)
+        else:
+            resolved = candidate.parent.resolve(strict=True) / candidate.name
+        resolved.relative_to(_TEST_ROOT)
+    except (OSError, ValueError) as exc:
+        raise ProvisionError("test injection path is outside test root") from exc
+    return resolved
+
+
 def _download_library(source_root: Path) -> Path:
-    injected = _test_setting("LVT_TEST_DOWNLOAD_LIBRARY")
-    library = Path(injected) if injected else source_root / "scripts/lib/download.zsh"
+    injected = _test_path_setting("LVT_TEST_DOWNLOAD_LIBRARY", must_exist=True)
+    library = injected if injected else source_root / "scripts/lib/download.zsh"
     if library.is_symlink() or not library.is_file():
         raise ProvisionError("download helper is unavailable")
     return library
@@ -259,6 +315,12 @@ def _effective_url(url: Any, identifier: str) -> str:
     origin = _test_setting("LVT_TEST_DOWNLOAD_ORIGIN")
     if origin is None:
         return url
+    marker = _test_path_setting("LVT_TEST_DOWNLOAD_ORIGIN_MARKER", must_exist=True)
+    try:
+        if marker is None or marker.read_text(encoding="utf-8") != f"{origin}\n":
+            raise ProvisionError("test download origin marker is invalid")
+    except (OSError, UnicodeError) as exc:
+        raise ProvisionError("test download origin marker is invalid") from exc
     test_origin = urlsplit(origin)
     if (
         test_origin.scheme != "http"
@@ -308,6 +370,12 @@ def _download_verified(
             str(expected_size),
         ],
         close_fds=True,
+        env={
+            "HOME": "/var/empty",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "ZDOTDIR": "/var/empty",
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -855,13 +923,11 @@ def _ollama_environment(data_root: Path) -> dict[str, str]:
     }
     if tmpdir := os.environ.get("TMPDIR"):
         environment["TMPDIR"] = tmpdir
-    for name in (
-        "LVT_TEST_OLLAMA_STATE",
-        "LVT_TEST_OLLAMA_AUDIT",
-        "LVT_TEST_OLLAMA_CREATE_FAIL",
-    ):
-        if value := _test_setting(name):
-            environment[name] = value
+    for name in ("LVT_TEST_OLLAMA_STATE", "LVT_TEST_OLLAMA_AUDIT"):
+        if path_value := _test_path_setting(name, must_exist=False):
+            environment[name] = str(path_value)
+    if flag_value := _test_setting("LVT_TEST_OLLAMA_CREATE_FAIL"):
+        environment["LVT_TEST_OLLAMA_CREATE_FAIL"] = flag_value
     return environment
 
 
@@ -875,10 +941,7 @@ class _OllamaSession:
 
     def __enter__(self) -> _OllamaSession:
         if _project_port_in_use(self.source_root):
-            payload = _ollama_json("/api/version")
-            if not isinstance(payload.get("version"), str):
-                raise ProvisionError("port 11435 is occupied by another process")
-            return self
+            raise ProvisionError("port 11435 is occupied by another process")
         self.process = subprocess.Popen(
             [str(self.executable), "serve"],
             close_fds=True,
@@ -897,9 +960,13 @@ class _OllamaSession:
                 time.sleep(0.05)
             else:
                 return self
+        self._stop()
         raise ProvisionError("project Ollama failed to start")
 
     def __exit__(self, *_args: object) -> None:
+        self._stop()
+
+    def _stop(self) -> None:
         if self.process is None:
             return
         self.process.terminate()
@@ -908,6 +975,8 @@ class _OllamaSession:
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait(timeout=5)
+        finally:
+            self.process = None
 
     def has_model(self, name: str) -> bool:
         payload = _ollama_json("/api/tags")
@@ -933,8 +1002,8 @@ class _OllamaSession:
 
 
 def _ollama_executable(installed: Path) -> Path:
-    injected = _test_setting("LVT_TEST_OLLAMA_EXECUTABLE")
-    executable = Path(injected) if injected else installed
+    injected = _test_path_setting("LVT_TEST_OLLAMA_EXECUTABLE", must_exist=True)
+    executable = injected if injected else installed
     if executable.is_symlink() or not executable.is_file():
         raise ProvisionError("Ollama executable is unavailable")
     if executable.stat().st_mode & 0o111 == 0:
@@ -1066,6 +1135,7 @@ def provision_dependencies(
     skip_models: bool = False,
 ) -> bool:
     source_root = source_root.resolve(strict=True)
+    _configure_test_context(source_root, data_root, release_root)
     _prepare_roots(data_root, release_root)
     data_root = data_root.resolve(strict=True)
     release_root = release_root.resolve(strict=True)
