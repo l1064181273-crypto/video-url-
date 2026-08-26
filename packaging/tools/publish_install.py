@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -42,8 +44,10 @@ class PublicationServices(Protocol):
 @dataclass
 class ActivationHandle:
     write_fd: int
-    created_ollama: bool
+    backend_identity: object | None = None
+    ollama_identity: object | None = None
     activated: bool = False
+    closed: bool = False
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -80,6 +84,36 @@ def _fsync_tree(root: Path) -> None:
                 raise PublishError("extension candidate contains an unsafe directory")
             _fsync_directory(path)
         _fsync_directory(current_path)
+
+
+def _rename_directory_exclusive(source: Path, destination: Path) -> None:
+    try:
+        system = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        renameatx_np = system.renameatx_np
+    except (AttributeError, OSError) as exc:
+        raise PublishError("exclusive directory rename is unavailable") from exc
+    renameatx_np.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameatx_np.restype = ctypes.c_int
+    if (
+        renameatx_np(
+            -2,
+            os.fsencode(source),
+            -2,
+            os.fsencode(destination),
+            0x00000004,
+        )
+        != 0
+    ):
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise PublishError("extension next path became occupied")
+        raise OSError(error, os.strerror(error), destination)
 
 
 def tree_identity(path: Path) -> dict[str, str]:
@@ -380,6 +414,7 @@ class FirstInstallPublisher:
         committed: bool,
     ) -> dict[str, Any]:
         payload = self._resume_recovery(payload)
+        payload = self._reconcile_extension_candidate(payload)
         payload = self._converge_component("current", payload, committed)
         return self._converge_component("extension", payload, committed)
 
@@ -419,14 +454,13 @@ class FirstInstallPublisher:
         if component == "current":
             next_path.symlink_to(payload["identities"]["current"]["new"]["target"])
         else:
-            self.copy_tree(self.release_root / "extension", next_path, sync=False)
-            self._point(component, "before_next_file_fsync")
-            _fsync_tree(next_path)
-            self._point(component, "after_next_file_fsync")
+            self._stage_extension_next(payload)
         payload = self._progress(payload, component=component, substate="next_prepared")
         self._point(component, "after_next_prepare")
         self._point(component, "before_next_parent_fsync")
         _fsync_directory(next_path.parent)
+        if component == "extension":
+            self._remove_extension_candidate_owner(payload)
         payload = self._progress(payload, component=component, substate="next_parent_synced")
         self._point(component, "after_next_parent_fsync")
 
@@ -529,6 +563,280 @@ class FirstInstallPublisher:
             raise PublishError("publication convergence failed")
         return payload
 
+    def _stage_extension_next(self, payload: dict[str, Any]) -> None:
+        candidate, _owner = self._extension_candidate_paths(payload)
+        self._validate_extension_candidate_namespace(payload)
+        if self.extension_next.exists() or self.extension_next.is_symlink():
+            raise PublishError("extension next path is already occupied")
+        bootstrap = self._extension_bootstrap_path(payload)
+        try:
+            bootstrap.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            raise PublishError("extension staging bootstrap became occupied") from exc
+        self._write_extension_candidate_owner(bootstrap, payload)
+        _fsync_directory(bootstrap.parent)
+        self._point("extension-candidate", "before_create")
+        try:
+            _rename_directory_exclusive(bootstrap, candidate)
+        except Exception:
+            self._remove_owned_extension_candidate_at(bootstrap, payload)
+            raise
+        _fsync_directory(candidate.parent)
+        observed = set(self.data_root.glob("extension.next.candidate-*"))
+        if observed != {candidate}:
+            raise PublishError("extension staging namespace changed during claim")
+        source = self.release_root / "extension"
+        if tree_identity(source) != payload["identities"]["extension"]["new"]:
+            raise PublishError("extension source identity changed before staging")
+        staged_payload = candidate / "payload"
+        files = [
+            path
+            for path in sorted(
+                source.rglob("*"),
+                key=lambda path: path.relative_to(source).as_posix(),
+            )
+            if path.is_file()
+        ]
+        copied = 0
+        middle = max(1, (len(files) + 1) // 2)
+
+        def copy_file(source_file: str, destination_file: str) -> str:
+            nonlocal copied
+            result = shutil.copy2(source_file, destination_file)
+            copied += 1
+            if copied == 1:
+                self._point("extension-copy", "after_first_file")
+            if copied == middle:
+                self._point("extension-copy", "after_middle_file")
+            return result
+
+        shutil.copytree(source, staged_payload, symlinks=False, copy_function=copy_file)
+        self._point("extension-copy", "before_complete")
+        self._point("extension", "before_next_file_fsync")
+        _fsync_tree(staged_payload)
+        self._point("extension", "after_next_file_fsync")
+        if tree_identity(staged_payload) != payload["identities"]["extension"]["new"]:
+            raise PublishError("extension staging identity did not verify")
+        _fsync_directory(candidate)
+        if not self._extension_candidate_is_owned(payload):
+            raise PublishError("extension staging candidate ownership changed")
+        _rename_directory_exclusive(staged_payload, self.extension_next)
+
+    def _write_extension_candidate_owner(
+        self,
+        candidate: Path,
+        payload: dict[str, Any],
+    ) -> None:
+        candidate_descriptor = os.open(
+            candidate,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            candidate_metadata = os.fstat(candidate_descriptor)
+            marker = {
+                "schema_version": 1,
+                "transaction_nonce": str(payload["transaction_id"]),
+                "device": candidate_metadata.st_dev,
+                "inode": candidate_metadata.st_ino,
+            }
+            encoded = (
+                json.dumps(marker, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii")
+            owner_descriptor = os.open(
+                ".owner.json",
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=candidate_descriptor,
+            )
+            try:
+                view = memoryview(encoded)
+                while view:
+                    written = os.write(owner_descriptor, view)
+                    view = view[written:]
+                os.fsync(owner_descriptor)
+            finally:
+                os.close(owner_descriptor)
+            os.fsync(candidate_descriptor)
+        finally:
+            os.close(candidate_descriptor)
+
+    def _reconcile_extension_candidate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        candidate, _owner = self._extension_candidate_paths(payload)
+        bootstrap = self._extension_bootstrap_path(payload)
+        expected = {candidate}
+        observed = set(self.data_root.glob("extension.next.candidate-*"))
+        observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
+        if observed - expected or observed_bootstraps - {bootstrap}:
+            raise PublishError("unknown extension staging candidate exists")
+        owned_paths = [
+            path for path in (candidate, bootstrap) if path.exists() or path.is_symlink()
+        ]
+        if owned_paths:
+            if len(owned_paths) != 1 or not self._extension_candidate_is_owned(
+                payload,
+                candidate=owned_paths[0],
+            ):
+                raise PublishError("extension staging candidate ownership is unverified")
+            return self._durable_recovery_action(
+                payload,
+                "extension",
+                "remove_candidate",
+            )
+        return payload
+
+    def _extension_candidate_paths(self, payload: dict[str, Any]) -> tuple[Path, Path]:
+        transaction_id = str(payload["transaction_id"])
+        candidate = self.data_root / f"extension.next.candidate-{transaction_id}"
+        return candidate, candidate / ".owner.json"
+
+    def _extension_bootstrap_path(self, payload: dict[str, Any]) -> Path:
+        return self.data_root / f".extension.next.bootstrap-{payload['transaction_id']}"
+
+    def _validate_extension_candidate_namespace(self, payload: dict[str, Any]) -> None:
+        candidate, _owner = self._extension_candidate_paths(payload)
+        observed = set(self.data_root.glob("extension.next.candidate-*"))
+        observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
+        if observed or observed_bootstraps or candidate.exists() or candidate.is_symlink():
+            raise PublishError("extension staging namespace is occupied")
+
+    def _extension_candidate_is_owned(
+        self,
+        payload: dict[str, Any],
+        *,
+        candidate: Path | None = None,
+    ) -> bool:
+        try:
+            descriptor = self._open_owned_extension_candidate_at(
+                candidate or self._extension_candidate_paths(payload)[0],
+                ".owner.json",
+                payload,
+            )
+        except (OSError, PublishError):
+            return False
+        os.close(descriptor)
+        return True
+
+    def _open_owned_extension_candidate(self, payload: dict[str, Any]) -> int:
+        candidate, owner = self._extension_candidate_paths(payload)
+        return self._open_owned_extension_candidate_at(candidate, owner.name, payload)
+
+    def _open_owned_extension_candidate_at(
+        self,
+        candidate: Path,
+        owner_name: str,
+        payload: dict[str, Any],
+    ) -> int:
+        descriptor = os.open(
+            candidate,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            candidate_metadata = os.fstat(descriptor)
+            path_metadata = os.stat(candidate, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(candidate_metadata.st_mode)
+                or candidate_metadata.st_uid != os.geteuid()
+                or candidate_metadata.st_mode & 0o077
+                or candidate_metadata.st_dev != path_metadata.st_dev
+                or candidate_metadata.st_ino != path_metadata.st_ino
+            ):
+                raise PublishError("extension staging directory identity changed")
+            owner_descriptor = os.open(
+                owner_name,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            try:
+                owner_metadata = os.fstat(owner_descriptor)
+                if (
+                    not stat.S_ISREG(owner_metadata.st_mode)
+                    or owner_metadata.st_uid != os.geteuid()
+                    or owner_metadata.st_nlink != 1
+                    or owner_metadata.st_mode & 0o777 != 0o600
+                    or owner_metadata.st_size > 1024
+                ):
+                    raise PublishError("extension staging owner marker is unsafe")
+                encoded = os.read(owner_descriptor, 1025)
+            finally:
+                os.close(owner_descriptor)
+            marker = json.loads(encoded)
+            if (
+                not isinstance(marker, dict)
+                or set(marker) != {"schema_version", "transaction_nonce", "device", "inode"}
+                or marker.get("schema_version") != 1
+                or marker.get("transaction_nonce") != payload["transaction_id"]
+                or type(marker.get("device")) is not int
+                or type(marker.get("inode")) is not int
+                or marker.get("device") != candidate_metadata.st_dev
+                or marker.get("inode") != candidate_metadata.st_ino
+            ):
+                raise PublishError("extension staging owner marker does not match")
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def _remove_extension_candidate_owner(self, payload: dict[str, Any]) -> None:
+        candidate, _owner = self._extension_candidate_paths(payload)
+        observed = set(self.data_root.glob("extension.next.candidate-*"))
+        if observed - {candidate}:
+            raise PublishError("unknown extension staging candidate exists")
+        self._remove_owned_extension_candidate(payload)
+
+    def _remove_owned_extension_candidate(self, payload: dict[str, Any]) -> None:
+        candidate, _owner = self._extension_candidate_paths(payload)
+        bootstrap = self._extension_bootstrap_path(payload)
+        existing = [path for path in (candidate, bootstrap) if path.exists() or path.is_symlink()]
+        if not existing:
+            return
+        if len(existing) != 1:
+            raise PublishError("extension staging candidate ownership is ambiguous")
+        self._remove_owned_extension_candidate_at(existing[0], payload)
+
+    def _remove_owned_extension_candidate_at(
+        self,
+        candidate: Path,
+        payload: dict[str, Any],
+    ) -> None:
+        descriptor = self._open_owned_extension_candidate_at(
+            candidate,
+            ".owner.json",
+            payload,
+        )
+        try:
+            self._remove_directory_contents(descriptor)
+            path_metadata = os.stat(candidate, follow_symlinks=False)
+            held_metadata = os.fstat(descriptor)
+            if (
+                path_metadata.st_dev != held_metadata.st_dev
+                or path_metadata.st_ino != held_metadata.st_ino
+            ):
+                raise PublishError("extension staging directory changed before removal")
+            candidate.rmdir()
+            _fsync_directory(candidate.parent)
+        finally:
+            os.close(descriptor)
+
+    def _remove_directory_contents(self, descriptor: int) -> None:
+        for entry in os.scandir(descriptor):
+            if entry.is_dir(follow_symlinks=False):
+                child = os.open(
+                    entry.name,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptor,
+                )
+                try:
+                    self._remove_directory_contents(child)
+                finally:
+                    os.close(child)
+                os.rmdir(entry.name, dir_fd=descriptor)
+            else:
+                os.unlink(entry.name, dir_fd=descriptor)
+
     def _observed_component(self, component: str) -> dict[Path, dict[str, str]]:
         live, next_path, previous = self._paths(component)
         return {
@@ -592,6 +900,9 @@ class FirstInstallPublisher:
         by_label = {"live": live, "next": next_path, "previous": previous}
         identities = payload["identities"][component]
         known = (identities["old"], identities["new"], {"kind": "absent"})
+        if action == "remove_candidate" and component == "extension":
+            self._remove_owned_extension_candidate(payload)
+            return
         if action.startswith("remove_"):
             self._remove_known(by_label[action.removeprefix("remove_")], component, known)
             return
@@ -801,6 +1112,8 @@ class SystemPublicationServices:
     def start_precommit(self) -> object:
         from process_state import ServiceError, SystemServiceOperations
 
+        if self._active_handle is not None and not self._active_handle.closed:
+            raise PublishError("candidate services are already active")
         operations = SystemServiceOperations(self.data_root, self.release_root)
         backend_state = operations.state("backend")
         if backend_state == "unsafe":
@@ -810,30 +1123,27 @@ class SystemPublicationServices:
         ollama_state = operations.state("ollama")
         if ollama_state == "unsafe":
             raise PublishError("project Ollama ownership is unsafe")
-        created_ollama = False
+        ollama_identity: object | None = None
+        backend_identity: object | None = None
         activation_read, activation_write = os.pipe()
         try:
             if ollama_state == "absent":
-                operations.launch("ollama")
-                created_ollama = True
-            operations.launch("backend", activation_read)
+                ollama_identity = operations.launch("ollama")
+            backend_identity = operations.launch("backend", activation_read)
             if not operations.backend_healthy():
                 raise PublishError("precommit backend health failed")
         except (OSError, ServiceError, PublishError) as start_error:
             with suppress(OSError):
                 os.close(activation_write)
             cleanup_errors: list[Exception] = []
-            for kind, should_stop in (
-                ("backend", operations.state("backend") == "owned"),
-                (
-                    "ollama",
-                    created_ollama and operations.state("ollama") == "owned",
-                ),
+            for kind, identity in (
+                ("backend", backend_identity),
+                ("ollama", ollama_identity),
             ):
-                if not should_stop:
+                if identity is None:
                     continue
                 try:
-                    operations.stop(kind)
+                    operations.stop_matching(kind, identity)
                 except Exception as cleanup_error:
                     cleanup_errors.append(cleanup_error)
             if cleanup_errors:
@@ -844,7 +1154,11 @@ class SystemPublicationServices:
             raise
         finally:
             os.close(activation_read)
-        handle = ActivationHandle(activation_write, created_ollama)
+        handle = ActivationHandle(
+            activation_write,
+            backend_identity=backend_identity,
+            ollama_identity=ollama_identity,
+        )
         self._active_handle = handle
         return handle
 
@@ -854,6 +1168,8 @@ class SystemPublicationServices:
     def activate(self, handle: object) -> None:
         if not isinstance(handle, ActivationHandle) or handle is not self._active_handle:
             raise PublishError("activation handle is invalid")
+        if handle.closed:
+            raise PublishError("activation handle is closed")
         if handle.activated:
             return
         os.write(handle.write_fd, b"A")
@@ -869,29 +1185,29 @@ class SystemPublicationServices:
     def stop_candidate(self) -> None:
         from process_state import SystemServiceOperations
 
+        handle = self._active_handle
+        if handle is None or handle.closed:
+            return
         operations = SystemServiceOperations(self.data_root, self.release_root)
-        if self._active_handle is not None and self._active_handle.write_fd >= 0:
+        if handle.write_fd >= 0:
             with suppress(OSError):
-                os.close(self._active_handle.write_fd)
-            self._active_handle.write_fd = -1
+                os.close(handle.write_fd)
+            handle.write_fd = -1
         cleanup_errors: list[Exception] = []
-        for kind, should_stop in (
-            ("backend", operations.state("backend") == "owned"),
-            (
-                "ollama",
-                self._active_handle is not None
-                and self._active_handle.created_ollama
-                and operations.state("ollama") == "owned",
-            ),
+        for kind, identity in (
+            ("backend", handle.backend_identity),
+            ("ollama", handle.ollama_identity),
         ):
-            if not should_stop:
+            if identity is None:
                 continue
             try:
-                operations.stop(kind)
+                operations.stop_matching(kind, identity)
             except Exception as cleanup_error:
                 cleanup_errors.append(cleanup_error)
         if cleanup_errors:
             raise ExceptionGroup("candidate cleanup failed", cleanup_errors)
+        handle.closed = True
+        self._active_handle = None
 
     def copy_token(self, token_path: Path) -> None:
         completed = subprocess_run_pbcopy(token_path)

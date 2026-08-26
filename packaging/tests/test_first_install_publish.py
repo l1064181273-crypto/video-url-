@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import select
 import signal
 import sys
+import threading
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -17,6 +19,7 @@ sys.path.insert(0, str(ROOT / "packaging" / "tools"))
 sys.path.insert(0, str(ROOT / "backend" / "src"))
 
 import process_state  # noqa: E402
+import publish_install  # noqa: E402
 from lvt.api.app import create_app  # noqa: E402
 from lvt.core.jobs import JobStatus  # noqa: E402
 from lvt.core.processes import CancellationToken  # noqa: E402
@@ -195,7 +198,7 @@ class ForkedPrecommitServices(FakeServices):
         self.backend_pid_path.write_text(str(pid), encoding="ascii")
         assert os.read(ready_read, 1) == b"R"
         os.close(ready_read)
-        return ActivationHandle(activation_write, False)
+        return ActivationHandle(activation_write)
 
     def runtime_full(self) -> bool:
         self.runtime_checked = True
@@ -894,3 +897,225 @@ def test_real_publisher_sigkill_before_commit_never_releases_worker_barrier(
             backend_snapshot = process_state._snapshot(backend_pid)
             if backend_snapshot is not None and process_state._token_is_live(backend_snapshot):
                 process_state._signal_snapshot(backend_snapshot, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+@pytest.mark.parametrize(
+    "copy_boundary",
+    [
+        "extension-candidate:before_create",
+        "extension-copy:after_first_file",
+        "extension-copy:after_middle_file",
+        "extension-copy:before_complete",
+    ],
+)
+def test_extension_staging_sigkill_never_leaves_partial_next(
+    tmp_path: Path,
+    copy_boundary: str,
+) -> None:
+    data_root, release = _layout(tmp_path)
+    for index in range(6):
+        (release / "extension" / f"asset-{index}.js").write_text(
+            f"export const value = {index};\n",
+            encoding="utf-8",
+        )
+    marker_read, marker_write = os.pipe()
+    gate_read, gate_write = os.pipe()
+    publisher_pid = os.fork()
+    if publisher_pid == 0:
+        try:
+            os.close(marker_read)
+            os.close(gate_write)
+
+            def failpoint(name: str) -> None:
+                if name == copy_boundary:
+                    os.write(marker_write, b"B")
+                    os.read(gate_read, 1)
+
+            FirstInstallPublisher(
+                data_root,
+                release,
+                services=FakeServices(),
+                failpoint=failpoint,
+            ).publish(lock_held=True)
+        finally:
+            os._exit(0)
+
+    os.close(marker_write)
+    os.close(gate_read)
+    publisher_snapshot = process_state._snapshot(publisher_pid)
+    try:
+        assert publisher_snapshot is not None
+        readable, _, _ = select.select([marker_read], [], [], 10)
+        assert readable and os.read(marker_read, 1) == b"B"
+        assert process_state._signal_snapshot(publisher_snapshot, signal.SIGKILL)
+        found, status = os.waitpid(publisher_pid, 0)
+        assert found == publisher_pid
+        assert os.waitstatus_to_exitcode(status) == -signal.SIGKILL
+
+        recovered = FirstInstallPublisher(
+            data_root,
+            release,
+            services=FakeServices(),
+        )
+        recovered.reconcile(lock_held=True)
+        recovered.reconcile(lock_held=True)
+
+        assert not recovered.current.exists() and not recovered.current.is_symlink()
+        assert not recovered.extension.exists()
+        assert not recovered.extension_next.exists()
+        assert not list(data_root.glob("extension.next.candidate-*"))
+        assert not list(data_root.glob("extension.next.candidate-*.owner"))
+        assert not list(data_root.glob(".extension.next.bootstrap-*"))
+    finally:
+        os.close(marker_read)
+        os.close(gate_write)
+        if publisher_snapshot is not None and process_state._token_is_live(publisher_snapshot):
+            assert process_state._signal_snapshot(publisher_snapshot, signal.SIGKILL)
+            with suppress(ChildProcessError):
+                os.waitpid(publisher_pid, 0)
+
+
+@pytest.mark.parametrize("candidate_kind", ["foreign_name", "missing_owner"])
+def test_unknown_extension_staging_candidate_fails_closed(
+    tmp_path: Path,
+    candidate_kind: str,
+) -> None:
+    publisher = _publisher(tmp_path, FakeServices())
+    payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
+    foreign = (
+        publisher.data_root / "extension.next.candidate-foreign"
+        if candidate_kind == "foreign_name"
+        else publisher._extension_candidate_paths(payload)[0]
+    )
+    foreign.mkdir()
+    (foreign / "untrusted").write_text("external\n", encoding="utf-8")
+
+    with pytest.raises(PublishError, match="extension staging candidate"):
+        publisher.reconcile(lock_held=True)
+
+    assert foreign.is_dir()
+    assert (foreign / "untrusted").read_text(encoding="utf-8") == "external\n"
+
+
+def test_extension_candidate_claim_race_preserves_foreign_directory(
+    tmp_path: Path,
+) -> None:
+    namespace_checked = threading.Barrier(2)
+    release_claim = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def failpoint(name: str) -> None:
+        if name == "extension-candidate:before_create":
+            namespace_checked.wait(timeout=5)
+            release_claim.wait(timeout=5)
+
+    publisher = _publisher(tmp_path, FakeServices(), failpoint=failpoint)
+    payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
+    candidate = publisher._extension_candidate_paths(payload)[0]
+
+    def stage() -> None:
+        try:
+            publisher._stage_extension_next(payload)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=stage)
+    worker.start()
+    namespace_checked.wait(timeout=5)
+    candidate.mkdir()
+    foreign = candidate / "untrusted"
+    foreign.write_text("external\n", encoding="utf-8")
+    release_claim.wait(timeout=5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], PublishError)
+    assert foreign.read_text(encoding="utf-8") == "external\n"
+    assert not (candidate / ".owner.json").exists()
+
+
+@pytest.mark.parametrize("field", ["transaction_nonce", "device", "inode"])
+def test_extension_candidate_recovery_rejects_mismatched_owner_identity(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    publisher = _publisher(tmp_path, FakeServices())
+    payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
+    candidate = publisher._extension_candidate_paths(payload)[0]
+    candidate.mkdir(mode=0o700)
+    publisher._write_extension_candidate_owner(candidate, payload)
+    foreign = candidate / "untrusted"
+    foreign.write_text("external\n", encoding="utf-8")
+    owner = candidate / ".owner.json"
+    marker = json.loads(owner.read_text(encoding="ascii"))
+    marker[field] = "wrong" if field == "transaction_nonce" else marker[field] + 1
+    owner.write_text(json.dumps(marker), encoding="ascii")
+    owner.chmod(0o600)
+
+    with pytest.raises(PublishError, match="ownership is unverified"):
+        publisher.reconcile(lock_held=True)
+
+    assert foreign.read_text(encoding="utf-8") == "external\n"
+
+
+def test_stale_activation_handle_cannot_stop_second_service_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class GenerationOperations:
+        current: dict[str, str] = {}
+        generation = 0
+        signals: list[str] = []
+
+        def __init__(self, _data_root: Path, _release_root: Path) -> None:
+            pass
+
+        def state(self, kind: str) -> str:
+            return "owned" if kind in self.current else "absent"
+
+        def launch(self, kind: str, _activation_fd: int | None = None) -> str:
+            self.__class__.generation += 1
+            identity = f"{kind}-{self.generation}"
+            self.current[kind] = identity
+            return identity
+
+        def backend_healthy(self) -> bool:
+            return True
+
+        def stop(self, kind: str) -> None:
+            self.signals.append(self.current.pop(kind))
+
+        def stop_matching(self, kind: str, identity: object) -> None:
+            if self.current.get(kind) != identity:
+                raise process_state.ServiceError(f"{kind} generation changed")
+            self.signals.append(self.current.pop(kind))
+
+    monkeypatch.setattr(
+        process_state,
+        "SystemServiceOperations",
+        GenerationOperations,
+    )
+    data_root, release = _layout(tmp_path)
+    first = publish_install.SystemPublicationServices(data_root, release)
+    first.start_precommit()
+    GenerationOperations.current.clear()
+
+    second = publish_install.SystemPublicationServices(data_root, release)
+    second.start_precommit()
+    second_generation = dict(GenerationOperations.current)
+
+    with pytest.raises(ExceptionGroup, match="candidate cleanup failed"):
+        first.stop_candidate()
+
+    assert GenerationOperations.current == second_generation
+    assert GenerationOperations.signals == []
+
+    second.stop_candidate()
+    signals_after_cleanup = list(GenerationOperations.signals)
+    second.stop_candidate()
+    assert GenerationOperations.signals == signals_after_cleanup

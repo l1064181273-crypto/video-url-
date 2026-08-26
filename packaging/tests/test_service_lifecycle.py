@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import signal
@@ -588,6 +589,60 @@ def test_stop_child_kills_remaining_descendant_after_leader_exits_on_term(
     assert (502, signal.SIGKILL) in signals
 
 
+def test_reused_session_leader_pid_rejects_untracked_descendant_without_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "service"
+    executable.write_bytes(b"service")
+    old_leader = ProcessSnapshot(601, 601, "old", executable, 1, 2, "a" * 64, (1,) * 8)
+    reused_descendant = ProcessSnapshot(
+        602,
+        601,
+        "new",
+        executable,
+        1,
+        2,
+        "a" * 64,
+        (2,) * 8,
+    )
+    signals: list[tuple[int, signal.Signals]] = []
+
+    class ExitedLeader:
+        pid = 601
+
+        @staticmethod
+        def poll() -> int | None:
+            return 0
+
+    monkeypatch.setattr(
+        process_state,
+        "_group_snapshots",
+        lambda _pgid: (reused_descendant,),
+    )
+    monkeypatch.setattr(
+        process_state,
+        "_token_is_live",
+        lambda snapshot: snapshot.signal_token == reused_descendant.signal_token,
+    )
+    monkeypatch.setattr(process_state.os, "getsid", lambda _pid: old_leader.pid)
+    monkeypatch.setattr(
+        process_state,
+        "_signal_snapshot",
+        lambda snapshot, requested: signals.append((snapshot.pid, requested)) or True,
+    )
+
+    with pytest.raises(ServiceError, match="ownership changed before TERM"):
+        process_state._stop_child(  # type: ignore[arg-type]
+            ExitedLeader(),
+            terminate_grace=0.01,
+            kill_wait=0.1,
+            anchor=old_leader,
+        )
+
+    assert signals == []
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
 def test_lifecycle_start_record_is_accepted_by_runtime_full_ownership_validation(
     tmp_path: Path,
@@ -755,3 +810,97 @@ def test_real_stop_kills_child_and_grandchild_after_leader_exits_on_term(
         for snapshot in snapshots:
             if process_state._token_is_live(snapshot):
                 process_state._signal_snapshot(snapshot, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+def test_supervisor_adopts_descendants_when_leader_exits_before_first_group_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = tmp_path / "runtime/backend.pid"
+    record.parent.mkdir(parents=True)
+    descendants_path = tmp_path / "descendants.json"
+    ready_read, ready_write = os.pipe()
+    activation_read, activation_write = os.pipe()
+    released = False
+    original_extend = process_state._extend_tracked_group
+    script = (
+        "import json,os,signal,sys;"
+        "control=int(os.environ['LVT_PRECOMMIT_ACTIVATION_FD']);"
+        "ready_r,ready_w=os.pipe();child=os.fork();"
+        "\nif child==0:"
+        "\n os.close(ready_r);signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+        "grand=os.fork();"
+        "\n if grand==0:"
+        "\n  signal.signal(signal.SIGTERM,signal.SIG_IGN);signal.pause()"
+        "\n else:"
+        "\n  open(sys.argv[1],'w').write(json.dumps("
+        "{'child':os.getpid(),'grandchild':grand}));"
+        "os.write(ready_w,b'R');os.close(ready_w);signal.pause()"
+        "\nelse:"
+        "\n os.close(ready_w);os.read(ready_r,1);os.close(ready_r);"
+        "os.read(control,1);os.close(control)"
+    )
+
+    def release_before_first_scan(
+        anchor: ProcessSnapshot,
+        tracked: dict[int, ProcessSnapshot],
+    ) -> tuple[ProcessSnapshot, ...] | None:
+        nonlocal released
+        if not released:
+            released = True
+            service = next(snapshot for pid, snapshot in tracked.items() if pid != anchor.pid)
+            os.write(activation_write, b"X")
+            found, status = os.waitpid(service.pid, 0)
+            assert found == service.pid
+            assert os.waitstatus_to_exitcode(status) == 0
+        return original_extend(anchor, tracked)
+
+    monkeypatch.setattr(process_state, "_extend_tracked_group", release_before_first_scan)
+    arguments = argparse.Namespace(
+        record=record,
+        kind="backend",
+        nonce="a" * 32,
+        port=8765,
+        ready_fd=ready_write,
+        activation_fd=activation_read,
+        terminate_grace=0.01,
+        kill_wait=1.0,
+        command=[sys.executable, "-c", script, str(descendants_path)],
+    )
+    supervisor_pid = os.fork()
+    if supervisor_pid == 0:
+        os.close(ready_read)
+        try:
+            os.setsid()
+            result = process_state._supervise(arguments)
+        except BaseException:
+            result = 70
+        finally:
+            os._exit(result)
+
+    os.close(ready_write)
+    os.close(activation_read)
+    os.close(activation_write)
+    supervisor_snapshot = process_state._snapshot(supervisor_pid)
+    descendants: dict[str, int] = {}
+    try:
+        assert supervisor_snapshot is not None
+        assert os.read(ready_read, 1) == b"R"
+        descendants = json.loads(descendants_path.read_text(encoding="utf-8"))
+        found, status = os.waitpid(supervisor_pid, 0)
+        assert found == supervisor_pid
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert all(process_state._snapshot(pid) is None for pid in descendants.values())
+        assert not record.exists()
+    finally:
+        with suppress(OSError):
+            os.close(ready_read)
+        if supervisor_snapshot is not None and process_state._token_is_live(supervisor_snapshot):
+            process_state._signal_snapshot(supervisor_snapshot, signal.SIGKILL)
+            with suppress(ChildProcessError):
+                os.waitpid(supervisor_pid, 0)
+        for pid in descendants.values():
+            snapshot = process_state._snapshot(pid)
+            if snapshot is not None and process_state._token_is_live(snapshot):
+                assert process_state._signal_snapshot(snapshot, signal.SIGKILL)

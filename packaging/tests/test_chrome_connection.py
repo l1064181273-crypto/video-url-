@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import http.client
 import json
 import os
 import shutil
@@ -11,16 +13,16 @@ import textwrap
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
-import uvicorn
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "packaging" / "tools"))
 sys.path.insert(0, str(ROOT / "backend" / "src"))
 
-from lvt.api.app import create_app  # noqa: E402
 from process_state import (  # noqa: E402
+    SystemServiceOperations,
     _group_snapshots,
     _signal_group_members,
     _signal_snapshot,
@@ -29,11 +31,12 @@ from process_state import (  # noqa: E402
 )
 from publish_install import (  # noqa: E402
     FirstInstallPublisher,
+    SystemPublicationServices,
     chrome_connection_instructions,
 )
 
 
-class AcceptanceServices:
+class ExtensionPublicationFixtureServices:
     def validate_candidate(self, phase: str) -> bool:
         return True
 
@@ -56,32 +59,6 @@ class AcceptanceServices:
         assert token_path.stat().st_mode & 0o777 == 0o600
 
 
-class AcceptanceCapabilities:
-    def get_capabilities(self) -> dict[str, object]:
-        checked_at = "2026-08-26T00:00:00+00:00"
-        values: dict[str, object] = {
-            "checked_at": checked_at,
-            "ttl_seconds": 5,
-        }
-        for name in (
-            "ffmpeg",
-            "ollama",
-            "asr_package",
-            "asr_model",
-            "diarization",
-            "translation_primary",
-            "translation_fallback",
-        ):
-            component: dict[str, object] = {
-                "status": "available",
-                "checked_at": checked_at,
-            }
-            if name in {"asr_model", "translation_primary", "translation_fallback"}:
-                component["model"] = f"fixture:{name}"
-            values[name] = component
-        return values
-
-
 def _cleanup_chrome_group(profile: Path) -> None:
     marker = profile / "browser-process.json"
     if not marker.is_file():
@@ -102,6 +79,185 @@ def _cleanup_chrome_group(profile: Path) -> None:
     while any(_token_is_live(member) for member in group):
         assert time.monotonic() < deadline
         completion.wait(0.02)
+
+
+def _prepare_production_backend_fixture(data_root: Path, release: Path) -> None:
+    (release / ".venv").symlink_to(ROOT / "backend/.venv", target_is_directory=True)
+    shutil.copytree(ROOT / "backend/src", release / "backend/src")
+    shutil.copytree(ROOT / "packaging/tools", release / "packaging/tools")
+    dependencies = {
+        "schema_version": 1,
+        "artifacts": [
+            {
+                "id": "ollama",
+                "version": "fixture",
+            }
+        ],
+        "ollama_models": [],
+    }
+    dependencies_path = release / "packaging/dependencies.json"
+    dependencies_path.write_text(json.dumps(dependencies), encoding="utf-8")
+
+    ollama = data_root / "app/tools/ollama/fixture/bin/ollama"
+    ollama.parent.mkdir(parents=True)
+    ollama.write_text(
+        f"""#!{ROOT / "backend/.venv/bin/python"}
+import http.server
+import json
+import os
+import pathlib
+import threading
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        payload = (
+            {{"version": "fixture"}}
+            if self.path == "/api/version"
+            else {{"models": [
+                {{"name": "hy-mt2:1.8b-q4km-fixed"}},
+                {{"name": "qwen2.5:1.5b"}},
+            ]}}
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode())
+
+    def log_message(self, *_args):
+        return
+
+
+record = pathlib.Path(os.environ["OLLAMA_MODELS"]).parents[1] / "runtime/ollama.pid"
+ready = threading.Event()
+while not record.is_file():
+    ready.wait(0.01)
+http.server.HTTPServer(("127.0.0.1", 11435), Handler).serve_forever()
+""",
+        encoding="utf-8",
+    )
+    ollama.chmod(0o700)
+
+    ffmpeg_dir = data_root / "app/tools/ffmpeg/fixture/bin"
+    ffmpeg_dir.mkdir(parents=True)
+    for name in ("ffmpeg", "ffprobe"):
+        executable = ffmpeg_dir / name
+        executable.write_text(
+            f"#!/bin/sh\nprintf '{name} version fixture\\n'\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o700)
+    digests = {
+        name: hashlib.sha256((ffmpeg_dir / name).read_bytes()).hexdigest()
+        for name in ("ffmpeg", "ffprobe")
+    }
+    install_state = data_root / "runtime/install-state.json"
+    install_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ffmpeg": {
+                    "version": "fixture",
+                    "directory": "tools/ffmpeg/fixture/bin",
+                    "sha256": digests,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _cleanup_production_services(
+    services: SystemPublicationServices,
+    data_root: Path,
+    release: Path,
+) -> None:
+    try:
+        services.stop_candidate()
+    except Exception:
+        operations = SystemServiceOperations(data_root, release)
+        operations.reconcile()
+        if any(operations.state(kind) != "absent" for kind in ("backend", "ollama")):
+            raise
+
+
+def _published_production_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, str, FirstInstallPublisher]:
+    data_root = tmp_path / "LocalVideoTranscriber"
+    release = data_root / "app/releases/0.1.0"
+    shutil.copytree(ROOT / "extension/dist", release / "extension")
+    (release / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    token_path = data_root / "config/api-token"
+    token_path.parent.mkdir(parents=True)
+    secret = "LVT_SENTINEL_" + "7" * 48
+    token_path.write_text(secret, encoding="ascii")
+    token_path.chmod(0o600)
+    (data_root / "runtime").mkdir()
+    _prepare_production_backend_fixture(data_root, release)
+    publisher = FirstInstallPublisher(
+        data_root,
+        release,
+        services=ExtensionPublicationFixtureServices(),
+    )
+    publisher.publish(lock_held=True)
+    return data_root, release, token_path, secret, publisher
+
+
+def _require_production_acceptance_ports() -> None:
+    for port in (8765, 11435):
+        with socket.socket() as probe:
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                pytest.skip(f"production acceptance port {port} is occupied")
+
+
+def _read_production_capabilities(secret: str) -> dict[str, Any]:
+    connection = http.client.HTTPConnection("127.0.0.1", 8765, timeout=5)
+    try:
+        connection.request(
+            "GET",
+            "/api/v1/capabilities",
+            headers={"X-LVT-Token": secret},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+    finally:
+        connection.close()
+    assert response.status == 200
+    assert isinstance(payload, dict)
+    return payload
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+def test_system_publication_services_starts_installed_lvt_main_with_real_probes(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    _require_production_acceptance_ports()
+    data_root, release, _token_path, secret, _publisher = _published_production_fixture(tmp_path)
+    services = SystemPublicationServices(data_root, release)
+    handle = services.start_precommit()
+    request.addfinalizer(lambda: _cleanup_production_services(services, data_root, release))
+    services.activate(handle)
+
+    backend_record = json.loads((data_root / "runtime/backend.pid").read_text(encoding="utf-8"))
+    backend_command = subprocess.run(
+        ["/bin/ps", "-o", "command=", "-p", str(backend_record["service"]["pid"])],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    capabilities = _read_production_capabilities(secret)
+
+    assert backend_command.returncode == 0
+    assert "-m lvt.main" in backend_command.stdout
+    assert capabilities["ffmpeg"].get("status") == "available"
+    assert capabilities["ollama"].get("status") == "available"
+    assert capabilities["checked_at"] != "2026-08-26T00:00:00+00:00"
+    _cleanup_production_services(services, data_root, release)
+    assert not (data_root / "runtime/backend.pid").exists()
+    assert not (data_root / "runtime/ollama.pid").exists()
 
 
 def test_chrome_instructions_use_stable_extension_path_without_token(
@@ -144,6 +300,7 @@ def test_stable_extension_contract_exposes_existing_seven_capabilities() -> None
 
 def test_real_chromium_loads_stable_extension_and_renders_seven_capabilities(
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
     playwright = ROOT / "extension/node_modules/@playwright/test"
     chrome = Path("/Applications/Google Chrome.app")
@@ -154,44 +311,31 @@ def test_real_chromium_loads_stable_extension_and_renders_seven_capabilities(
     if not playwright.is_dir() or not chrome.is_dir() or node is None:
         pytest.skip("Node, Playwright, or stable Google Chrome is not installed")
 
-    data_root = tmp_path / "LocalVideoTranscriber"
-    release = data_root / "app/releases/0.1.0"
-    shutil.copytree(ROOT / "extension/dist", release / "extension")
-    (release / "VERSION").write_text("0.1.0\n", encoding="utf-8")
-    token_path = data_root / "config/api-token"
-    token_path.parent.mkdir(parents=True)
-    secret = "LVT_SENTINEL_" + "7" * 48
-    token_path.write_text(secret, encoding="ascii")
-    token_path.chmod(0o600)
-    (data_root / "runtime").mkdir()
-    publisher = FirstInstallPublisher(
-        data_root,
-        release,
-        services=AcceptanceServices(),
-    )
-    publisher.publish(lock_held=True)
+    _require_production_acceptance_ports()
+    data_root, release, token_path, secret, publisher = _published_production_fixture(tmp_path)
     stable_extension = data_root / "extension"
 
-    listener = socket.socket()
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        listener.bind(("127.0.0.1", 8765))
-        listener.listen()
-    except OSError:
-        listener.close()
-        pytest.skip("backend test port is occupied")
-    app = create_app(
-        db_path=data_root / "db/lvt.sqlite3",
-        api_token=secret,
-        capabilities_provider=AcceptanceCapabilities(),
+    production_services = SystemPublicationServices(data_root, release)
+    activation_handle = production_services.start_precommit()
+    request.addfinalizer(
+        lambda: _cleanup_production_services(production_services, data_root, release)
     )
-    server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False))
-    server_thread = threading.Thread(
-        target=server.run,
-        kwargs={"sockets": [listener]},
-        daemon=False,
+    production_services.activate(activation_handle)
+    assert production_services.healthy()
+    backend_record = json.loads((data_root / "runtime/backend.pid").read_text(encoding="utf-8"))
+    backend_command = subprocess.run(
+        ["/bin/ps", "-o", "command=", "-p", str(backend_record["service"]["pid"])],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
     )
-    server_thread.start()
+    assert backend_command.returncode == 0
+    assert "-m lvt.main" in backend_command.stdout
+    production_capabilities = _read_production_capabilities(secret)
+    assert production_capabilities["ffmpeg"].get("status") == "available", production_capabilities
+    assert production_capabilities["ollama"].get("status") == "available", production_capabilities
+    assert production_capabilities["checked_at"] != "2026-08-26T00:00:00+00:00"
     profile = tmp_path / "chromium-profile"
     script = textwrap.dedent(
         """
@@ -549,24 +693,26 @@ def test_real_chromium_loads_stable_extension_and_renders_seven_capabilities(
             )
             process_transcript = process_audit.stdout + process_audit.stderr
             assert node_snapshot is not None
-            assert _signal_snapshot(node_snapshot, signal.SIGKILL)
-        stdout, stderr = browser_test.communicate(timeout=10)
+            if browser_test.poll() is None and not _signal_snapshot(
+                node_snapshot,
+                signal.SIGKILL,
+            ):
+                assert browser_test.poll() is not None
     finally:
         if browser_test.poll() is None:
             assert node_snapshot is not None
             assert _signal_snapshot(node_snapshot, signal.SIGKILL)
-            browser_test.communicate(timeout=10)
+        stdout, stderr = browser_test.communicate(timeout=10)
         _cleanup_chrome_group(profile)
-        server.should_exit = True
-        server_thread.join(timeout=10)
-        listener.close()
+        _cleanup_production_services(production_services, data_root, release)
 
     transcript = stdout + stderr
     assert result_marker.is_file(), transcript
     result = json.loads(result_marker.read_text(encoding="ascii"))
     assert result == {"ok": True}
     assert browser_test.returncode in {0, -signal.SIGKILL}, transcript
-    assert not server_thread.is_alive()
+    assert not (data_root / "runtime/backend.pid").exists()
+    assert not (data_root / "runtime/ollama.pid").exists()
     assert secret not in transcript
     assert secret not in process_transcript
     assert secret not in (profile / "chrome.log").read_text(encoding="utf-8", errors="replace")
