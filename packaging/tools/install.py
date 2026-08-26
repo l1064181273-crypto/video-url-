@@ -30,6 +30,7 @@ PACKAGING_TOOLS = (
     "doctor.py",
     "install.py",
     "lifecycle_lock.py",
+    "process_state.py",
     "reconcile_processes.py",
     "tool_supervisor.py",
     "verify_install.py",

@@ -19,6 +19,7 @@ LOCK_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "lifecycle_lock.py"
 DOCTOR_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "doctor.py"
 RECONCILE_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "reconcile_processes.py"
 SUPERVISOR_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "tool_supervisor.py"
+PROCESS_STATE_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "process_state.py"
 COMMON_LIBRARY = REPOSITORY_ROOT / "scripts" / "lib" / "common.zsh"
 DATA_DIRECTORIES = ("config", "db", "runtime", "work", "exports", "logs", "models")
 FAILURE_POINTS = (
@@ -60,6 +61,7 @@ def _build_release(tmp_path: Path, name: str = "Release 源 naïve") -> Path:
     _copy_file(DOCTOR_TOOL, release / "packaging/tools/doctor.py", executable=True)
     _copy_file(RECONCILE_TOOL, release / "packaging/tools/reconcile_processes.py", executable=True)
     _copy_file(SUPERVISOR_TOOL, release / "packaging/tools/tool_supervisor.py", executable=True)
+    _copy_file(PROCESS_STATE_TOOL, release / "packaging/tools/process_state.py", executable=True)
     (release / "scripts/doctor.command").chmod(0o755)
     (release / "test-tools/uv").chmod(0o755)
     (release / "test-tools/python/bin/python3").chmod(0o755)
@@ -382,3 +384,30 @@ def test_failure_after_each_mutation_boundary_is_also_non_publishing(
         assert completed.returncode != 0
         assert not _candidate(data_root).exists()
         _assert_no_cp4_publish(data_root)
+
+
+def test_default_install_fails_when_first_install_publisher_is_missing(
+    tmp_path: Path,
+) -> None:
+    release = _build_release(tmp_path)
+    provision = release / "packaging/tools/provision.py"
+    provision.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+    provision.chmod(0o755)
+    test_root = tmp_path / "test-root"
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = _environment(release, test_root, home=home)
+
+    completed = subprocess.run(
+        [str(release / "scripts/install.command"), "--skip-models"],
+        cwd="/",
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "INSTALL_MISSING" in completed.stdout + completed.stderr
+    _assert_no_cp4_publish(test_root / "LocalVideoTranscriber")

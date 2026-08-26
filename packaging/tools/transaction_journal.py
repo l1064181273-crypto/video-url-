@@ -13,6 +13,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 SLOTS = ("slot-a.json", "slot-b.json")
+JOURNAL_MARKER = "journal-v1"
 STATES = {
     "PREPARED",
     "CURRENT_SWITCHING",
@@ -22,8 +23,20 @@ STATES = {
     "SERVICE_PRECOMMIT_READY",
     "COMMITTED",
     "ACTIVATED",
+    "ROLLED_BACK",
 }
-CRITICAL_STATES = {"COMMITTED", "ACTIVATED"}
+CRITICAL_STATES = {"COMMITTED", "ACTIVATED", "ROLLED_BACK"}
+STATE_ORDER = {
+    "PREPARED": 0,
+    "CURRENT_SWITCHING": 1,
+    "CURRENT_SWITCHED": 2,
+    "EXTENSION_SWITCHING": 3,
+    "EXTENSION_SWITCHED": 4,
+    "SERVICE_PRECOMMIT_READY": 5,
+    "COMMITTED": 6,
+    "ACTIVATED": 7,
+    "ROLLED_BACK": 8,
+}
 SWITCH_SUBSTATES = {
     "pending",
     "intent_written",
@@ -34,6 +47,31 @@ SWITCH_SUBSTATES = {
     "next_to_live_renamed",
     "parent_synced_after_live",
     "identity_verified",
+}
+SWITCH_SUBSTATE_ORDER = {
+    name: index
+    for index, name in enumerate(
+        (
+            "pending",
+            "intent_written",
+            "next_prepared",
+            "next_parent_synced",
+            "old_to_previous_renamed",
+            "parent_synced_after_old",
+            "next_to_live_renamed",
+            "parent_synced_after_live",
+            "identity_verified",
+        )
+    )
+}
+CLEANUP_SUBSTATE_ORDER = {
+    "pending": 0,
+    "intent_written": 1,
+    "current_removed": 2,
+    "current_parent_synced": 3,
+    "extension_removed": 4,
+    "parent_synced": 5,
+    "complete": 6,
 }
 FORBIDDEN_KEYS = {
     "argv",
@@ -54,6 +92,7 @@ PAYLOAD_KEYS = {
     "paths",
     "identities",
     "substate",
+    "recovery",
 }
 
 
@@ -155,7 +194,7 @@ def validate_payload(payload: dict[str, Any]) -> None:
         or not isinstance(payload.get("version"), str)
         or not payload["version"]
         or payload.get("state") not in STATES
-        or payload.get("decision") not in {"pending", "committed", "activated"}
+        or payload.get("decision") not in {"pending", "committed", "activated", "rolled_back"}
     ):
         raise JournalError("journal transaction metadata is invalid")
     if _contains_forbidden(payload):
@@ -192,9 +231,55 @@ def validate_payload(payload: dict[str, Any]) -> None:
         or set(substate) != {"current", "extension", "cleanup"}
         or substate.get("current") not in SWITCH_SUBSTATES
         or substate.get("extension") not in SWITCH_SUBSTATES
-        or substate.get("cleanup") not in {"pending", "intent_written", "parent_synced", "complete"}
+        or substate.get("cleanup")
+        not in {
+            "pending",
+            "intent_written",
+            "current_removed",
+            "current_parent_synced",
+            "extension_removed",
+            "parent_synced",
+            "complete",
+        }
     ):
         raise JournalError("journal substate is invalid")
+    recovery = payload.get("recovery")
+    if (
+        not isinstance(recovery, dict)
+        or set(recovery) != {"component", "action", "phase"}
+        or recovery.get("component") not in {"none", "current", "extension"}
+        or not isinstance(recovery.get("action"), str)
+        or not recovery["action"]
+        or recovery.get("phase")
+        not in {"idle", "intent_written", "effect_observed", "file_synced", "parent_synced"}
+        or (recovery["component"] == "none") != (recovery["action"] == "none")
+        or (recovery["component"] == "none") != (recovery["phase"] == "idle")
+    ):
+        raise JournalError("journal recovery metadata is invalid")
+    state = str(payload["state"])
+    decision = str(payload["decision"])
+    cleanup = str(substate["cleanup"])
+    if (
+        (state in STATES - CRITICAL_STATES and decision != "pending")
+        or (state == "COMMITTED" and (decision != "committed" or cleanup != "pending"))
+        or (
+            state == "ACTIVATED"
+            and (
+                decision != "activated"
+                or cleanup
+                not in {
+                    "intent_written",
+                    "current_removed",
+                    "current_parent_synced",
+                    "extension_removed",
+                    "parent_synced",
+                    "complete",
+                }
+            )
+        )
+        or (state == "ROLLED_BACK" and (decision != "rolled_back" or cleanup != "complete"))
+    ):
+        raise JournalError("journal state combination is invalid")
 
 
 class TransactionJournal:
@@ -211,15 +296,17 @@ class TransactionJournal:
 
     def read_latest(self) -> JournalEntry | None:
         entries = self._valid_entries()
-        self._reject_critical_conflict(entries)
-        return max(entries, key=lambda item: item.generation, default=None)
+        active = self._active_entries(entries)
+        self._reject_critical_conflict(active)
+        return max(active, key=lambda item: item.generation, default=None)
 
     def committed_direction(self) -> str:
         entries = self._valid_entries()
+        entries = self._active_entries(entries)
         self._reject_critical_conflict(entries)
         return (
             "committed"
-            if any(item.payload["state"] in CRITICAL_STATES for item in entries)
+            if any(item.payload["state"] in {"COMMITTED", "ACTIVATED"} for item in entries)
             else "rollback"
         )
 
@@ -228,7 +315,9 @@ class TransactionJournal:
         if payload["state"] in CRITICAL_STATES:
             raise JournalError("critical state requires a double-copy barrier")
         entries = self._valid_entries()
-        self._reject_critical_conflict(entries)
+        active = self._active_entries(entries)
+        self._reject_critical_conflict(active)
+        self._validate_transition(active, payload)
         generation = max((item.generation for item in entries), default=0) + 1
         path = self._inactive_slot(entries)
         return self._write_slot(path, generation, payload)
@@ -241,7 +330,9 @@ class TransactionJournal:
         if payload["state"] not in CRITICAL_STATES:
             raise JournalError("journal state is not a critical decision")
         entries = self._valid_entries()
-        self._reject_critical_conflict(entries)
+        active = self._active_entries(entries)
+        self._reject_critical_conflict(active)
+        self._validate_transition(active, payload)
         generation = max((item.generation for item in entries), default=0) + 1
         first_path = self.root / SLOTS[0]
         second_path = self.root / SLOTS[1]
@@ -253,6 +344,7 @@ class TransactionJournal:
         if state not in CRITICAL_STATES:
             raise JournalError("unknown critical state")
         entries = self._valid_entries()
+        entries = self._active_entries(entries)
         self._reject_critical_conflict(entries)
         selected = sorted(
             (item for item in entries if item.payload["state"] == state),
@@ -268,6 +360,7 @@ class TransactionJournal:
 
     def repair_critical(self, state: str) -> tuple[JournalEntry, JournalEntry]:
         entries = self._valid_entries()
+        entries = self._active_entries(entries)
         self._reject_critical_conflict(entries)
         matching = [item for item in entries if item.payload["state"] == state]
         if not matching:
@@ -282,22 +375,49 @@ class TransactionJournal:
             if current.is_symlink():
                 raise JournalError("journal root contains a symlink")
             if not current.exists():
-                break
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                self._failpoint(f"root:before_mkdir:{current.name}")
+                current.mkdir(mode=0o700)
+                self._failpoint(f"root:after_mkdir:{current.name}")
+                self._failpoint(f"root:before_parent_fsync:{current.name}")
+                _fsync_directory(current.parent)
+                self._failpoint(f"root:after_parent_fsync:{current.name}")
         if self.root.is_symlink() or not self.root.is_dir():
             raise JournalError("journal root is unsafe")
         self.root.chmod(0o700)
+        marker = self.root / JOURNAL_MARKER
+        if not marker.exists():
+            self._failpoint("root:before_marker_write")
+            descriptor = os.open(
+                marker,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            try:
+                os.write(descriptor, b"1\n")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self._failpoint("root:after_marker_write")
+            _fsync_directory(self.root)
+        elif marker.is_symlink() or marker.read_bytes() != b"1\n":
+            raise JournalError("journal marker is corrupt")
 
     def _valid_entries(self) -> list[JournalEntry]:
         if not self.root.exists():
             return []
         if self.root.is_symlink() or not self.root.is_dir():
             raise JournalError("journal root is unsafe")
+        marker = self.root / JOURNAL_MARKER
+        if marker.is_symlink() or not marker.is_file() or marker.read_bytes() != b"1\n":
+            raise JournalError("journal marker is corrupt")
         entries: list[JournalEntry] = []
         for name in SLOTS:
-            entry = self._read_slot(self.root / name)
+            path = self.root / name
+            entry = self._read_slot(path)
             if entry is not None:
                 entries.append(entry)
+        if not entries:
+            raise JournalError("journal slots are corrupt")
         return entries
 
     def _read_slot(self, path: Path) -> JournalEntry | None:
@@ -394,18 +514,106 @@ class TransactionJournal:
         self._failpoint(f"{path.stem}:{boundary}")
 
     @staticmethod
-    def _reject_critical_conflict(entries: list[JournalEntry]) -> None:
+    def _active_entries(entries: list[JournalEntry]) -> list[JournalEntry]:
+        if not entries:
+            return []
+        latest = max(entries, key=lambda item: item.generation)
+        transaction_id = latest.payload["transaction_id"]
+        active = [item for item in entries if item.payload["transaction_id"] == transaction_id]
+        older = [item for item in entries if item.payload["transaction_id"] != transaction_id]
+        if older:
+            if latest.payload["state"] != "PREPARED" or latest.payload["decision"] != "pending":
+                raise JournalError("conflicting journal transaction boundary")
+            for item in older:
+                if not (
+                    item.payload["state"] in {"ACTIVATED", "ROLLED_BACK"}
+                    and item.payload["decision"] in {"activated", "rolled_back"}
+                    and item.payload["substate"]["cleanup"] == "complete"
+                ):
+                    raise JournalError("previous journal transaction is not finalized")
+        return active
+
+    @staticmethod
+    def _validate_transition(entries: list[JournalEntry], payload: dict[str, Any]) -> None:
+        if not entries:
+            if payload["state"] != "PREPARED" or payload["decision"] != "pending":
+                raise JournalError("journal transaction must start prepared")
+            return
+        latest = max(entries, key=lambda item: item.generation).payload
+        if latest["transaction_id"] != payload["transaction_id"]:
+            if not (
+                (
+                    (latest["state"] == "ACTIVATED" and latest["decision"] == "activated")
+                    or (latest["state"] == "ROLLED_BACK" and latest["decision"] == "rolled_back")
+                )
+                and latest["substate"]["cleanup"] == "complete"
+                and payload["state"] == "PREPARED"
+                and payload["decision"] == "pending"
+            ):
+                raise JournalError("journal transaction transition is invalid")
+            return
+        immutable = PAYLOAD_KEYS - {"state", "decision", "substate", "recovery"}
+        if any(latest[key] != payload[key] for key in immutable):
+            raise JournalError("journal decision identity changed")
+        if (
+            latest["decision"] in {"committed", "activated"}
+            and payload["decision"] == "rolled_back"
+        ):
+            raise JournalError("journal transition regressed")
+        if STATE_ORDER[payload["state"]] < STATE_ORDER[latest["state"]]:
+            raise JournalError("journal transition regressed")
+        decision_order = {"pending": 0, "committed": 1, "activated": 2, "rolled_back": 2}
+        if decision_order[payload["decision"]] < decision_order[latest["decision"]]:
+            raise JournalError("journal transition regressed")
+        for component in ("current", "extension"):
+            if (
+                SWITCH_SUBSTATE_ORDER[payload["substate"][component]]
+                < SWITCH_SUBSTATE_ORDER[latest["substate"][component]]
+            ):
+                raise JournalError("journal transition regressed")
+        if (
+            CLEANUP_SUBSTATE_ORDER[payload["substate"]["cleanup"]]
+            < CLEANUP_SUBSTATE_ORDER[latest["substate"]["cleanup"]]
+        ):
+            raise JournalError("journal transition regressed")
+        previous_recovery = latest["recovery"]
+        next_recovery = payload["recovery"]
+        recovery_order = {
+            "idle": 0,
+            "intent_written": 1,
+            "effect_observed": 2,
+            "file_synced": 3,
+            "parent_synced": 4,
+        }
+        if (
+            previous_recovery["component"],
+            previous_recovery["action"],
+        ) == (next_recovery["component"], next_recovery["action"]):
+            if recovery_order[next_recovery["phase"]] < recovery_order[
+                previous_recovery["phase"]
+            ] and not (
+                previous_recovery["phase"] == "parent_synced" and next_recovery["phase"] == "idle"
+            ):
+                raise JournalError("journal recovery transition regressed")
+        elif not (
+            previous_recovery["phase"] in {"idle", "parent_synced"}
+            and next_recovery["phase"] in {"idle", "intent_written"}
+        ):
+            raise JournalError("journal recovery transition is invalid")
+
+    @classmethod
+    def _reject_critical_conflict(cls, entries: list[JournalEntry]) -> None:
         critical = [item for item in entries if item.payload["state"] in CRITICAL_STATES]
         if len(critical) != 2:
             return
-        left, right = critical
-        if left.payload["state"] == right.payload["state"]:
-            compatible = left.payload == right.payload
-        else:
-            comparable_keys = PAYLOAD_KEYS - {"state", "decision", "substate"}
-            compatible = all(left.payload[key] == right.payload[key] for key in comparable_keys)
-        if not compatible:
+        left, right = sorted(critical, key=lambda item: item.generation)
+        comparable_keys = PAYLOAD_KEYS - {"state", "decision", "substate", "recovery"}
+        if any(left.payload[key] != right.payload[key] for key in comparable_keys):
             raise JournalError("conflicting critical decisions")
+        try:
+            cls._validate_transition([left], right.payload)
+        except JournalError as exc:
+            raise JournalError("conflicting critical decisions") from exc
 
 
 def _fsync_directory(path: Path) -> None:

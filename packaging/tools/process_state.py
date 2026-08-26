@@ -150,9 +150,18 @@ class LifecycleManager:
             if runtime != ValidationOutcome(0, "healthy"):
                 raise ServiceError("runtime validation failed")
             return LifecycleResult(0, "started")
-        except Exception:
+        except Exception as start_error:
+            cleanup_errors: list[Exception] = []
             for kind in reversed(created):
-                self.operations.stop(kind)
+                try:
+                    self.operations.stop(kind)
+                except Exception as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if cleanup_errors:
+                raise ExceptionGroup(
+                    "start and cleanup failed",
+                    [start_error, *cleanup_errors],
+                ) from start_error
             raise
 
     def stop(self, *, lock_held: bool = False) -> LifecycleResult:
@@ -283,6 +292,7 @@ def _snapshot_payload(snapshot: ProcessSnapshot) -> dict[str, Any]:
         "pid": snapshot.pid,
         "pgid": snapshot.pgid,
         "start_time": snapshot.start_time,
+        "audit_token": list(snapshot.signal_token),
         "executable": {
             "realpath": str(snapshot.executable),
             "device": snapshot.device,
@@ -295,15 +305,49 @@ def _snapshot_payload(snapshot: ProcessSnapshot) -> dict[str, Any]:
 def _snapshot_matches(snapshot: ProcessSnapshot, expected: Any) -> bool:
     return bool(
         isinstance(expected, dict)
-        and set(expected) == {"pid", "pgid", "start_time", "executable"}
+        and set(expected) == {"pid", "pgid", "start_time", "audit_token", "executable"}
         and snapshot.pid == expected.get("pid")
         and snapshot.pgid == expected.get("pgid")
         and snapshot.start_time == expected.get("start_time")
+        and expected.get("audit_token") == list(snapshot.signal_token)
         and isinstance(expected.get("executable"), dict)
         and str(snapshot.executable) == expected["executable"].get("realpath")
         and snapshot.device == expected["executable"].get("device")
         and snapshot.inode == expected["executable"].get("inode")
         and snapshot.sha256 == expected["executable"].get("sha256")
+    )
+
+
+def _snapshot_payload_is_valid(expected: Any) -> bool:
+    if (
+        not isinstance(expected, dict)
+        or set(expected) != {"pid", "pgid", "start_time", "audit_token", "executable"}
+        or type(expected.get("pid")) is not int
+        or expected["pid"] <= 0
+        or type(expected.get("pgid")) is not int
+        or expected["pgid"] <= 0
+        or not isinstance(expected.get("start_time"), str)
+        or not expected["start_time"]
+        or not isinstance(expected.get("audit_token"), list)
+        or len(expected["audit_token"]) != 8
+        or not all(
+            type(value) is int and 0 <= value <= 0xFFFFFFFF for value in expected["audit_token"]
+        )
+    ):
+        return False
+    executable = expected.get("executable")
+    return bool(
+        isinstance(executable, dict)
+        and set(executable) == {"realpath", "device", "inode", "sha256"}
+        and isinstance(executable.get("realpath"), str)
+        and Path(executable["realpath"]).is_absolute()
+        and type(executable.get("device")) is int
+        and executable["device"] >= 0
+        and type(executable.get("inode")) is int
+        and executable["inode"] > 0
+        and isinstance(executable.get("sha256"), str)
+        and len(executable["sha256"]) == 64
+        and all(character in "0123456789abcdef" for character in executable["sha256"])
     )
 
 
@@ -324,6 +368,29 @@ def _verified_record(
     kind: str,
     port: int,
 ) -> tuple[ProcessSnapshot, ProcessSnapshot] | None:
+    payload = _read_record_payload(path, kind, port)
+    if payload is None:
+        return None
+    try:
+        supervisor = _snapshot(payload["supervisor"]["pid"])
+        service = _snapshot(payload["service"]["pid"])
+        command = _process_command(payload["supervisor"]["pid"])
+        if (
+            supervisor is None
+            or service is None
+            or not _snapshot_matches(supervisor, payload["supervisor"])
+            or not _snapshot_matches(service, payload["service"])
+            or command is None
+            or f"--nonce {payload['nonce']}" not in command
+            or f"--kind {kind}" not in command
+        ):
+            return None
+        return supervisor, service
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _read_record_payload(path: Path, kind: str, port: int) -> dict[str, Any] | None:
     try:
         metadata = path.lstat()
         if (
@@ -351,24 +418,49 @@ def _verified_record(
             or payload.get("port") != port
             or not isinstance(payload.get("nonce"), str)
             or len(payload["nonce"]) != 32
+            or any(character not in "0123456789abcdef" for character in payload["nonce"])
         ):
             return None
-        supervisor = _snapshot(payload["supervisor"]["pid"])
-        service = _snapshot(payload["service"]["pid"])
-        command = _process_command(payload["supervisor"]["pid"])
-        if (
-            supervisor is None
-            or service is None
-            or not _snapshot_matches(supervisor, payload["supervisor"])
-            or not _snapshot_matches(service, payload["service"])
-            or command is None
-            or f"--nonce {payload['nonce']}" not in command
-            or f"--kind {kind}" not in command
-        ):
-            return None
-        return supervisor, service
+        for name in ("supervisor", "service"):
+            if not _snapshot_payload_is_valid(payload.get(name)):
+                return None
+        return payload
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def _verified_service_from_record(
+    path: Path,
+    kind: str,
+    port: int,
+) -> ProcessSnapshot | None:
+    payload = _read_record_payload(path, kind, port)
+    if payload is None:
+        return None
+    service = _snapshot(payload["service"]["pid"])
+    if service is None or not _snapshot_matches(service, payload["service"]):
+        return None
+    return service
+
+
+def _snapshot_matches_pid_payload(expected: Any) -> bool:
+    if not isinstance(expected, dict) or type(expected.get("pid")) is not int:
+        return False
+    snapshot = _snapshot(expected["pid"])
+    return snapshot is not None and _snapshot_matches(snapshot, expected)
+
+
+def verify_owned_service_record(
+    path: Path,
+    kind: str,
+    port: int,
+    *,
+    require_listener: bool = False,
+) -> bool:
+    verified = _verified_record(path, kind, port)
+    if verified is None:
+        return False
+    return not require_listener or _owned_group_listens(verified[1], port)
 
 
 def _signal_snapshot(snapshot: ProcessSnapshot, requested: signal.Signals) -> bool:
@@ -444,6 +536,109 @@ def _signal_owned_group(anchor: ProcessSnapshot, requested: signal.Signals) -> b
     return all(_signal_snapshot(snapshot, requested) for snapshot in ordered)
 
 
+def _extend_tracked_group(
+    anchor: ProcessSnapshot,
+    tracked: dict[int, ProcessSnapshot],
+) -> tuple[ProcessSnapshot, ...] | None:
+    group = _group_snapshots(anchor.pgid)
+    if group is None:
+        return None
+    live_anchor = next(
+        (
+            snapshot
+            for snapshot in group
+            if snapshot.pid == anchor.pid
+            and snapshot.signal_token == anchor.signal_token
+            and _snapshot_matches(snapshot, _snapshot_payload(anchor))
+        ),
+        None,
+    )
+    if live_anchor is not None:
+        for snapshot in group:
+            if not _token_is_live(snapshot):
+                return None
+            tracked[snapshot.pid] = snapshot
+        return group
+    for snapshot in group:
+        expected = tracked.get(snapshot.pid)
+        if (
+            expected is None
+            or expected.signal_token != snapshot.signal_token
+            or not _snapshot_matches(snapshot, _snapshot_payload(expected))
+            or not _token_is_live(snapshot)
+        ):
+            return None
+    return group
+
+
+def _signal_tracked_group(
+    anchor: ProcessSnapshot,
+    tracked: dict[int, ProcessSnapshot],
+    requested: signal.Signals,
+) -> bool:
+    group = _extend_tracked_group(anchor, tracked)
+    if group is None:
+        return False
+    if not group:
+        return True
+    ordered = [snapshot for snapshot in group if snapshot.pid != anchor.pid]
+    ordered.extend(snapshot for snapshot in group if snapshot.pid == anchor.pid)
+    return all(_signal_snapshot(snapshot, requested) for snapshot in ordered)
+
+
+def _signal_group_members(
+    group: tuple[ProcessSnapshot, ...],
+    anchor_pid: int,
+    requested: signal.Signals,
+) -> bool:
+    ordered = [snapshot for snapshot in group if snapshot.pid != anchor_pid]
+    ordered.extend(snapshot for snapshot in group if snapshot.pid == anchor_pid)
+    return all(_signal_snapshot(snapshot, requested) for snapshot in ordered)
+
+
+def _pid_listens_on_port(snapshot: ProcessSnapshot, port: int) -> bool:
+    if port not in {8765, 11435} or not _token_is_live(snapshot):
+        return False
+    completed = subprocess.run(
+        [
+            "/usr/sbin/lsof",
+            "-nP",
+            "-a",
+            "-p",
+            str(snapshot.pid),
+            f"-iTCP:{port}",
+            "-sTCP:LISTEN",
+            "-Fn",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    return (
+        completed.returncode == 0
+        and any(line == f"n127.0.0.1:{port}" for line in completed.stdout.splitlines())
+        and _token_is_live(snapshot)
+    )
+
+
+def _owned_group_listens(anchor: ProcessSnapshot, port: int) -> bool:
+    group = _group_snapshots(anchor.pgid)
+    if group is None:
+        return False
+    live_anchor = next(
+        (
+            snapshot
+            for snapshot in group
+            if snapshot.pid == anchor.pid and snapshot.signal_token == anchor.signal_token
+        ),
+        None,
+    )
+    return live_anchor is not None and any(
+        _pid_listens_on_port(snapshot, port) for snapshot in group
+    )
+
+
 def _port_open(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.2)
@@ -515,22 +710,47 @@ def _stop_child(
     terminate_grace: float,
     kill_wait: float,
     anchor: ProcessSnapshot | None = None,
+    tracked: dict[int, ProcessSnapshot] | None = None,
 ) -> None:
-    if process.poll() is not None:
-        return
     owned_anchor = anchor or _snapshot(process.pid)
-    if owned_anchor is None or not _signal_owned_group(owned_anchor, signal.SIGTERM):
+    if owned_anchor is None:
+        if process.poll() is not None:
+            return
         raise ServiceError("service process group ownership changed before TERM")
-    try:
-        process.wait(timeout=terminate_grace)
-    except subprocess.TimeoutExpired:
-        if not _signal_owned_group(owned_anchor, signal.SIGKILL):
-            raise ServiceError("service process group ownership changed before KILL") from None
-        process.wait(timeout=kill_wait)
-    deadline = time.monotonic() + kill_wait
-    while _group_exists(process.pid) and time.monotonic() < deadline:
+    owned = tracked if tracked is not None else {}
+    group = _extend_tracked_group(owned_anchor, owned)
+    if group is None:
+        raise ServiceError("service process group ownership changed before TERM")
+    if group and not _signal_group_members(group, owned_anchor.pid, signal.SIGTERM):
+        raise ServiceError("service process group ownership changed before TERM")
+    term_deadline = time.monotonic() + terminate_grace
+    while time.monotonic() < term_deadline:
+        if process.poll() is not None:
+            break
+        remaining = _extend_tracked_group(owned_anchor, owned)
+        if remaining is None:
+            raise ServiceError("service process group ownership changed after TERM")
+        if not remaining:
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=0)
+            return
         time.sleep(0.02)
-    if _group_exists(process.pid):
+    remaining = _extend_tracked_group(owned_anchor, owned)
+    if remaining is None:
+        raise ServiceError("service process group ownership changed before KILL")
+    if remaining and not _signal_group_members(remaining, owned_anchor.pid, signal.SIGKILL):
+        raise ServiceError("service process group ownership changed before KILL")
+    deadline = time.monotonic() + kill_wait
+    while time.monotonic() < deadline:
+        remaining = _extend_tracked_group(owned_anchor, owned)
+        if remaining is None:
+            raise ServiceError("service process group ownership changed after KILL")
+        if not remaining:
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=0)
+            return
+        time.sleep(0.02)
+    if _extend_tracked_group(owned_anchor, owned):
         raise ServiceError("service process group did not converge")
 
 
@@ -584,13 +804,16 @@ def _supervise(arguments: argparse.Namespace) -> int:
         )
         os.write(arguments.ready_fd, b"R")
         os.close(arguments.ready_fd)
+        tracked = {service.pid: service}
         while process.poll() is None and not shutdown.wait(0.05):
-            pass
+            if _extend_tracked_group(service, tracked) is None:
+                raise ServiceError("service process group ownership changed")
         _stop_child(
             process,
             terminate_grace=arguments.terminate_grace,
             kill_wait=arguments.kill_wait,
             anchor=service,
+            tracked=tracked,
         )
         record.unlink(missing_ok=True)
         _fsync_directory(record.parent)
@@ -626,6 +849,8 @@ class SystemServiceOperations:
         from publish_install import FirstInstallPublisher
 
         FirstInstallPublisher(self.data_root, self.release_root).reconcile(lock_held=True)
+        for kind in ("backend", "ollama"):
+            self._reconcile_orphan(kind)
 
     def validate(self, phase: str) -> ValidationOutcome:
         completed = subprocess.run(
@@ -660,7 +885,12 @@ class SystemServiceOperations:
         port = self._port(kind)
         if not record_path.exists():
             return "unsafe" if _port_open(port) else "absent"
-        return "owned" if _verified_record(record_path, kind, port) is not None else "unsafe"
+        verified = _verified_record(record_path, kind, port)
+        return (
+            "owned"
+            if verified is not None and _owned_group_listens(verified[1], port)
+            else "unsafe"
+        )
 
     def launch(self, kind: str, activation_fd: int | None = None) -> None:
         if self.state(kind) != "absent":
@@ -722,15 +952,22 @@ class SystemServiceOperations:
                 kill_wait=self.kill_wait,
             )
             raise ServiceError(f"{kind} service supervisor failed to start")
-        if kind == "ollama":
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and not _port_open(11435):
-                if process.poll() is not None:
-                    break
-                time.sleep(0.05)
-            if not _port_open(11435):
-                self.stop("ollama")
-                raise ServiceError("project Ollama failed to become ready")
+        deadline = time.monotonic() + 10
+        port = self._port(kind)
+        while time.monotonic() < deadline:
+            verified = _verified_record(record_path, kind, port)
+            if verified is not None and _owned_group_listens(verified[1], port):
+                return
+            if process.poll() is not None or _port_open(port):
+                break
+            time.sleep(0.05)
+        try:
+            self._stop_recorded_service(kind)
+        except ServiceError as cleanup_error:
+            raise ServiceError(
+                f"{kind} service failed owned-listener verification and cleanup"
+            ) from cleanup_error
+        raise ServiceError(f"{kind} service failed owned-listener verification")
 
     def backend_healthy(self) -> bool:
         deadline = time.monotonic() + 10
@@ -741,10 +978,20 @@ class SystemServiceOperations:
         return False
 
     def stop(self, kind: str) -> None:
+        self._stop_recorded_service(kind)
+        if kind == "backend":
+            self._reconcile_tools()
+
+    def _stop_recorded_service(self, kind: str) -> None:
         record_path = self._record_path(kind)
         verified = _verified_record(record_path, kind, self._port(kind))
         if verified is None:
             if not record_path.exists() and not _port_open(self._port(kind)):
+                return
+            orphan = _verified_service_from_record(record_path, kind, self._port(kind))
+            if orphan is not None:
+                self._stop_orphan_service(orphan)
+                self._remove_converged_record(record_path, kind, orphan.pgid)
                 return
             raise ServiceError(f"{kind} service ownership is unverified")
         supervisor, _service = verified
@@ -752,9 +999,9 @@ class SystemServiceOperations:
             raise ServiceError(f"{kind} supervisor signal was rejected")
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if not record_path.exists() and not _port_open(self._port(kind)):
-                if kind == "backend":
-                    self._reconcile_tools()
+            if not record_path.exists():
+                if _port_open(self._port(kind)):
+                    raise ServiceError(f"{kind} foreign listener remains after shutdown")
                 return
             time.sleep(0.05)
         verified = _verified_record(record_path, kind, self._port(kind))
@@ -768,11 +1015,62 @@ class SystemServiceOperations:
             if not _port_open(self._port(kind)):
                 record_path.unlink(missing_ok=True)
                 _fsync_directory(record_path.parent)
-                if kind == "backend":
-                    self._reconcile_tools()
                 return
             time.sleep(0.05)
         raise ServiceError(f"{kind} service did not stop")
+
+    def _reconcile_orphan(self, kind: str) -> None:
+        record_path = self._record_path(kind)
+        if not record_path.exists():
+            return
+        if _verified_record(record_path, kind, self._port(kind)) is not None:
+            return
+        orphan = _verified_service_from_record(record_path, kind, self._port(kind))
+        if orphan is not None:
+            self._stop_orphan_service(orphan)
+            self._remove_converged_record(record_path, kind, orphan.pgid)
+            return
+        payload = _read_record_payload(record_path, kind, self._port(kind))
+        if payload is not None and not _port_open(self._port(kind)):
+            supervisor_live = _snapshot_matches_pid_payload(payload["supervisor"])
+            service_live = _snapshot_matches_pid_payload(payload["service"])
+            if not supervisor_live and not service_live:
+                record_path.unlink()
+                _fsync_directory(record_path.parent)
+                return
+        raise ServiceError(f"{kind} orphan ownership is unverified")
+
+    def _stop_orphan_service(self, service: ProcessSnapshot) -> None:
+        class RecordedProcess:
+            pid = service.pid
+
+            @staticmethod
+            def poll() -> int | None:
+                return None if _token_is_live(service) else 0
+
+            @staticmethod
+            def wait(timeout: float) -> int:
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    if not _token_is_live(service):
+                        return 0
+                    time.sleep(0.02)
+                raise subprocess.TimeoutExpired(str(service.pid), timeout)
+
+        _stop_child(
+            RecordedProcess(),  # type: ignore[arg-type]
+            terminate_grace=self.terminate_grace,
+            kill_wait=self.kill_wait,
+            anchor=service,
+        )
+
+    def _remove_converged_record(self, record_path: Path, kind: str, pgid: int) -> None:
+        if _group_snapshots(pgid) not in {None, ()}:
+            raise ServiceError(f"{kind} process group did not converge")
+        if _port_open(self._port(kind)):
+            raise ServiceError(f"{kind} port remains occupied after cleanup")
+        record_path.unlink(missing_ok=True)
+        _fsync_directory(record_path.parent)
 
     def ownership_records_converged(self) -> bool:
         process_root = self.data_root / "runtime/processes"

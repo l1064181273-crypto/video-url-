@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 import os
+import select
+import signal
 import sys
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "packaging" / "tools"))
+sys.path.insert(0, str(ROOT / "backend" / "src"))
 
+import process_state  # noqa: E402
+from lvt.api.app import create_app  # noqa: E402
+from lvt.core.jobs import JobStatus  # noqa: E402
+from lvt.core.processes import CancellationToken  # noqa: E402
+from lvt.db.repository import JobRepository  # noqa: E402
 from publish_install import (  # noqa: E402
+    ActivationHandle,
     FirstInstallPublisher,
     PublishError,
     tree_identity,
@@ -126,6 +137,76 @@ def test_runtime_failure_before_commit_restores_first_install_absence(tmp_path: 
 
 class SimulatedCrash(BaseException):
     pass
+
+
+class NeverClaimPipeline:
+    def resolve_first_required_stage(self, job_id: str) -> JobStatus:
+        return JobStatus.DOWNLOADING
+
+    def run_claimed(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        cancellation: CancellationToken,
+        progress_callback: Any,
+    ) -> None:
+        raise AssertionError("precommit worker claimed before activation")
+
+
+class ForkedPrecommitServices(FakeServices):
+    def __init__(
+        self,
+        database: Path,
+        backend_pid_path: Path,
+        done_fd: int,
+    ) -> None:
+        super().__init__()
+        self.database = database
+        self.backend_pid_path = backend_pid_path
+        self.done_fd = done_fd
+        self.runtime_checked = False
+
+    def start_precommit(self) -> object:
+        activation_read, activation_write = os.pipe()
+        ready_read, ready_write = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(activation_write)
+                os.close(ready_read)
+                app = create_app(
+                    db_path=self.database,
+                    api_token="test-only-token",
+                    pipeline_builder=lambda _repository: NeverClaimPipeline(),
+                    worker_poll_interval=60,
+                    precommit_activation_fd=activation_read,
+                )
+                with TestClient(app):
+                    os.write(ready_write, b"R")
+                    os.close(ready_write)
+                    if not app.state.activation_barrier.wait_closed(timeout=20):
+                        os._exit(72)
+                os.write(self.done_fd, b"D")
+            finally:
+                os._exit(0)
+        os.close(activation_read)
+        os.close(ready_write)
+        self.backend_pid_path.write_text(str(pid), encoding="ascii")
+        assert os.read(ready_read, 1) == b"R"
+        os.close(ready_read)
+        return ActivationHandle(activation_write, False)
+
+    def runtime_full(self) -> bool:
+        self.runtime_checked = True
+        return True
+
+    def activate(self, handle: object) -> None:
+        assert isinstance(handle, ActivationHandle)
+        os.write(handle.write_fd, b"A")
+        os.close(handle.write_fd)
+        handle.write_fd = -1
+        handle.activated = True
 
 
 @pytest.mark.parametrize("component", ["current", "extension"])
@@ -283,6 +364,7 @@ def test_single_committed_copy_is_repaired_before_exactly_one_activate(
     services = FakeServices()
     publisher = _publisher(tmp_path, services)
     payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
     publisher.journal.write_critical({**payload, "state": "COMMITTED", "decision": "committed"})
     publisher.converge(committed=True)
     target = publisher.journal.root / damaged
@@ -303,6 +385,7 @@ def test_conflicting_committed_slots_fail_closed_without_activate(tmp_path: Path
     services = FakeServices()
     publisher = _publisher(tmp_path, services)
     payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
     publisher.journal.write_critical({**payload, "state": "COMMITTED", "decision": "committed"})
     conflict = {
         **payload,
@@ -409,3 +492,405 @@ def test_journal_and_output_never_contain_token(tmp_path: Path) -> None:
     )
     assert secret not in transcript
     assert "api-token" not in transcript
+
+
+def test_tree_identity_distinguishes_empty_file_from_empty_directory(
+    tmp_path: Path,
+) -> None:
+    file_tree = tmp_path / "file-tree"
+    directory_tree = tmp_path / "directory-tree"
+    file_tree.mkdir()
+    directory_tree.mkdir()
+    (file_tree / "entry").touch(mode=0o755)
+    (directory_tree / "entry").mkdir(mode=0o755)
+
+    assert tree_identity(file_tree) != tree_identity(directory_tree)
+
+
+def test_same_version_new_transaction_ignores_completed_previous_transaction(
+    tmp_path: Path,
+) -> None:
+    first = _publisher(tmp_path, FakeServices())
+    first.publish(lock_held=True)
+    first_transaction = first.journal.read_latest()
+    assert first_transaction is not None
+
+    second_services = FakeServices()
+    second = FirstInstallPublisher(
+        first.data_root,
+        first.release_root,
+        services=second_services,
+    )
+    second.publish(lock_held=True)
+
+    latest = second.journal.read_latest()
+    assert latest is not None
+    assert latest.payload["transaction_id"] != first_transaction.payload["transaction_id"]
+    assert latest.payload["state"] == "ACTIVATED"
+    assert latest.payload["substate"]["cleanup"] == "complete"
+    assert second.current.resolve(strict=True) == second.release_root
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "cleanup:before_intent",
+        "cleanup:after_intent",
+        "cleanup:current:before_remove",
+        "cleanup:current:after_remove",
+        "cleanup:current:before_parent_fsync",
+        "cleanup:current:after_parent_fsync",
+        "cleanup:extension:before_remove",
+        "cleanup:extension:after_remove",
+        "cleanup:extension:before_parent_fsync",
+        "cleanup:extension:after_parent_fsync",
+        "cleanup:before_complete",
+        "cleanup:after_complete",
+    ],
+)
+def test_cleanup_crash_boundaries_preserve_direction_and_recover(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    fired = False
+
+    def failpoint(name: str) -> None:
+        nonlocal fired
+        if not fired and name == boundary:
+            fired = True
+            raise SimulatedCrash
+
+    services = FakeServices()
+    publisher = _publisher(tmp_path, services, failpoint=failpoint)
+    with pytest.raises(SimulatedCrash):
+        publisher.publish(lock_held=True)
+
+    journal = TransactionJournal(publisher.journal.root)
+    assert journal.committed_direction() == "committed"
+    recovered = FirstInstallPublisher(
+        publisher.data_root,
+        publisher.release_root,
+        services=FakeServices(),
+    )
+    recovered.reconcile(lock_held=True)
+    recovered.reconcile(lock_held=True)
+
+    latest = recovered.journal.read_latest()
+    assert latest is not None
+    assert latest.payload["state"] == "ACTIVATED"
+    assert latest.payload["substate"]["cleanup"] == "complete"
+    assert not recovered.current_previous.exists()
+    assert not recovered.extension_previous.exists()
+
+
+@pytest.mark.parametrize(
+    ("component", "action"),
+    [
+        ("current", "remove_live"),
+        ("current", "remove_next"),
+        ("current", "remove_previous"),
+        ("current", "rename_next_to_live"),
+        ("current", "rename_previous_to_live"),
+        ("extension", "rebuild_live"),
+    ],
+)
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "before_intent",
+        "after_intent",
+        "before_effect",
+        "after_effect",
+        "before_file_fsync",
+        "after_file_fsync",
+        "before_parent_fsync",
+        "after_parent_fsync",
+    ],
+)
+def test_recovery_actions_are_durable_and_idempotent_at_every_boundary(
+    tmp_path: Path,
+    component: str,
+    action: str,
+    boundary: str,
+) -> None:
+    fired = False
+
+    def failpoint(name: str) -> None:
+        nonlocal fired
+        if not fired and name == f"recovery:{component}:{action}:{boundary}":
+            fired = True
+            raise SimulatedCrash
+
+    publisher = _publisher(tmp_path, FakeServices(), failpoint=failpoint)
+    old_release = publisher.data_root / "app/releases/old"
+    old_release.mkdir()
+    old_extension = tmp_path / "old-extension"
+    old_extension.mkdir()
+    (old_extension / "manifest.json").write_text('{"version":"old"}\n', encoding="utf-8")
+    payload = publisher.prepare_payload(
+        old_current_target="releases/old",
+        old_extension_identity=tree_identity(old_extension),
+    )
+    publisher.journal.write_progress(payload)
+    if component == "current":
+        selected = {
+            "remove_live": publisher.current,
+            "remove_next": publisher.current_next,
+            "remove_previous": publisher.current_previous,
+            "rename_next_to_live": publisher.current_next,
+            "rename_previous_to_live": publisher.current_previous,
+        }[action]
+        target = "releases/old" if "previous" in action else "releases/0.1.0"
+        selected.symlink_to(target)
+
+    with pytest.raises(SimulatedCrash):
+        publisher._durable_recovery_action(payload, component, action)
+
+    recovered = FirstInstallPublisher(
+        publisher.data_root,
+        publisher.release_root,
+        services=FakeServices(),
+    )
+    latest = recovered.journal.read_latest()
+    assert latest is not None
+    if latest.payload["recovery"]["phase"] == "idle":
+        recovered._durable_recovery_action(latest.payload, component, action)
+    else:
+        recovered._resume_recovery(latest.payload)
+
+    final = recovered.journal.read_latest()
+    assert final is not None
+    assert final.payload["recovery"] == {
+        "component": "none",
+        "action": "none",
+        "phase": "idle",
+    }
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+@pytest.mark.parametrize(
+    ("component", "action"),
+    [
+        ("current", "remove_live"),
+        ("current", "remove_next"),
+        ("current", "remove_previous"),
+        ("current", "rename_next_to_live"),
+        ("current", "rename_previous_to_live"),
+        ("extension", "rebuild_live"),
+    ],
+)
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "before_intent",
+        "after_intent",
+        "before_effect",
+        "after_effect",
+        "before_file_fsync",
+        "after_file_fsync",
+        "before_parent_fsync",
+        "after_parent_fsync",
+    ],
+)
+def test_critical_recovery_actions_survive_sigkill_at_every_boundary(
+    tmp_path: Path,
+    component: str,
+    action: str,
+    boundary: str,
+) -> None:
+    publisher = _publisher(tmp_path, FakeServices())
+    old_release = publisher.data_root / "app/releases/old"
+    old_release.mkdir()
+    old_extension = tmp_path / "old-extension"
+    old_extension.mkdir()
+    (old_extension / "manifest.json").write_text(
+        '{"version":"old"}\n',
+        encoding="utf-8",
+    )
+    prepared = publisher.prepare_payload(
+        old_current_target="releases/old",
+        old_extension_identity=tree_identity(old_extension),
+    )
+    publisher.journal.write_progress(prepared)
+    committed = {
+        **prepared,
+        "state": "COMMITTED",
+        "decision": "committed",
+    }
+    publisher.journal.write_critical(committed)
+    if component == "current":
+        selected = {
+            "remove_live": publisher.current,
+            "remove_next": publisher.current_next,
+            "remove_previous": publisher.current_previous,
+            "rename_next_to_live": publisher.current_next,
+            "rename_previous_to_live": publisher.current_previous,
+        }[action]
+        target = "releases/old" if "previous" in action else "releases/0.1.0"
+        selected.symlink_to(target)
+
+    marker_read, marker_write = os.pipe()
+    gate_read, gate_write = os.pipe()
+    child_pid = os.fork()
+    if child_pid == 0:
+        try:
+            os.close(marker_read)
+            os.close(gate_write)
+
+            def failpoint(name: str) -> None:
+                if name == f"recovery:{component}:{action}:{boundary}":
+                    os.write(marker_write, b"B")
+                    os.read(gate_read, 1)
+
+            child = FirstInstallPublisher(
+                publisher.data_root,
+                publisher.release_root,
+                services=FakeServices(),
+                failpoint=failpoint,
+            )
+            child._durable_recovery_action(committed, component, action)
+        finally:
+            os._exit(0)
+
+    os.close(marker_write)
+    os.close(gate_read)
+    child_snapshot = process_state._snapshot(child_pid)
+    try:
+        assert child_snapshot is not None
+        readable, _, _ = select.select([marker_read], [], [], 20)
+        assert readable and os.read(marker_read, 1) == b"B"
+        assert process_state._signal_snapshot(child_snapshot, signal.SIGKILL)
+        found, status = os.waitpid(child_pid, 0)
+        assert found == child_pid
+        assert os.waitstatus_to_exitcode(status) == -signal.SIGKILL
+
+        recovered = FirstInstallPublisher(
+            publisher.data_root,
+            publisher.release_root,
+            services=FakeServices(),
+        )
+        latest = recovered.journal.read_latest()
+        assert latest is not None
+        if latest.payload["recovery"]["phase"] == "idle":
+            recovered._durable_recovery_action(latest.payload, component, action)
+        else:
+            recovered._resume_recovery(latest.payload)
+        final = recovered.journal.read_latest()
+        assert final is not None
+        assert final.payload["recovery"] == {
+            "component": "none",
+            "action": "none",
+            "phase": "idle",
+        }
+        assert recovered.journal.verify_critical("COMMITTED")
+    finally:
+        os.close(marker_read)
+        os.close(gate_write)
+        if child_snapshot is not None and process_state._token_is_live(child_snapshot):
+            process_state._signal_snapshot(child_snapshot, signal.SIGKILL)
+            with suppress(ChildProcessError):
+                os.waitpid(child_pid, 0)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+@pytest.mark.parametrize(
+    "journal_boundary",
+    [
+        f"{slot}:{boundary}"
+        for slot in ("slot-a", "slot-b")
+        for boundary in (
+            "before_temp_write",
+            "after_temp_write",
+            "before_file_fsync",
+            "after_file_fsync",
+            "before_slot_rename",
+            "after_slot_rename",
+            "before_directory_fsync",
+            "after_directory_fsync",
+        )
+    ],
+)
+def test_real_publisher_sigkill_before_commit_never_releases_worker_barrier(
+    tmp_path: Path,
+    journal_boundary: str,
+) -> None:
+    data_root, release = _layout(tmp_path)
+    database = data_root / "db/lvt.sqlite3"
+    database.parent.mkdir()
+    repository = JobRepository(database)
+    repository.initialize()
+    job_id = str(repository.create("https://example.test/precommit-kill")["uuid"])
+    marker_read, marker_write = os.pipe()
+    gate_read, gate_write = os.pipe()
+    done_read, done_write = os.pipe()
+    backend_pid_path = tmp_path / "backend.pid"
+    publisher_pid = os.fork()
+    if publisher_pid == 0:
+        try:
+            os.close(marker_read)
+            os.close(gate_write)
+            os.close(done_read)
+            services = ForkedPrecommitServices(database, backend_pid_path, done_write)
+            fired = False
+
+            def failpoint(name: str) -> None:
+                nonlocal fired
+                if not fired and services.runtime_checked and name == journal_boundary:
+                    fired = True
+                    os.write(marker_write, b"B")
+                    os.read(gate_read, 1)
+
+            publisher = FirstInstallPublisher(
+                data_root,
+                release,
+                services=services,
+            )
+            publisher.journal = TransactionJournal(
+                publisher.journal.root,
+                failpoint=failpoint,
+            )
+            publisher.publish(lock_held=True)
+        finally:
+            os._exit(0)
+
+    os.close(marker_write)
+    os.close(gate_read)
+    os.close(done_write)
+    publisher_snapshot = process_state._snapshot(publisher_pid)
+    try:
+        assert publisher_snapshot is not None
+        assert os.read(marker_read, 1) == b"B"
+        assert process_state._signal_snapshot(publisher_snapshot, signal.SIGKILL)
+        found, status = os.waitpid(publisher_pid, 0)
+        assert found == publisher_pid
+        assert os.waitstatus_to_exitcode(status) == -signal.SIGKILL
+        readable, _, _ = select.select([done_read], [], [], 20)
+        assert readable and os.read(done_read, 1) == b"D"
+
+        job = JobRepository(database).get(job_id)
+        assert job is not None
+        assert job["execution_count_total"] == 0
+        assert all(
+            event["status"] == JobStatus.QUEUED.value
+            for event in JobRepository(database).list_events(job_id)
+        )
+
+        recovered_services = FakeServices()
+        recovered = FirstInstallPublisher(
+            data_root,
+            release,
+            services=recovered_services,
+        )
+        recovered.reconcile(lock_held=True)
+        assert recovered.journal.read_latest() is not None
+    finally:
+        os.close(marker_read)
+        os.close(gate_write)
+        os.close(done_read)
+        if publisher_snapshot is not None and process_state._token_is_live(publisher_snapshot):
+            process_state._signal_snapshot(publisher_snapshot, signal.SIGKILL)
+        if backend_pid_path.exists():
+            backend_pid = int(backend_pid_path.read_text(encoding="ascii"))
+            backend_snapshot = process_state._snapshot(backend_pid)
+            if backend_snapshot is not None and process_state._token_is_live(backend_snapshot):
+                process_state._signal_snapshot(backend_snapshot, signal.SIGKILL)

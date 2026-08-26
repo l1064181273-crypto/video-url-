@@ -134,10 +134,6 @@ if [[ "${phase}" == "dependencies" ]]; then
 fi
 
 typeset publish_tool="${release_root}/packaging/tools/publish_install.py"
-if [[ ! -e "${publish_tool}" ]]; then
-  # Older checkpoint fixtures intentionally stop after dependency verification.
-  exit 0
-fi
 lvt_assert_within_root "${release_root}" "${publish_tool}" || {
   lvt_log ERROR "INSTALL_PATH_UNSAFE：发布工具路径不安全"
   exit 2

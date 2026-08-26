@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PROVISION = ROOT / "packaging/tools/provision.py"
 INSTALL = ROOT / "packaging/tools/install.py"
 VERIFY = ROOT / "packaging/tools/verify_install.py"
+PROCESS_STATE_TOOL = ROOT / "packaging/tools/process_state.py"
 LOCK = ROOT / "packaging/tools/lifecycle_lock.py"
 DOCTOR = ROOT / "packaging/tools/doctor.py"
 RECONCILE = ROOT / "packaging/tools/reconcile_processes.py"
@@ -318,6 +319,7 @@ def _candidate_tree(
     doctor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     doctor.chmod(0o755)
     _copy(VERIFY, release / "packaging/tools/verify_install.py", executable=True)
+    _copy(PROCESS_STATE_TOOL, release / "packaging/tools/process_state.py", executable=True)
     _copy(PROVISION, release / "packaging/tools/provision.py", executable=True)
     _copy(LOCK, release / "packaging/tools/lifecycle_lock.py", executable=True)
     _copy(COMMON, release / "scripts/lib/common.zsh", executable=True)
@@ -999,6 +1001,7 @@ def _build_install_source(
     _copy(INSTALL, release / "packaging/tools/install.py", executable=True)
     _copy(PROVISION, release / "packaging/tools/provision.py", executable=True)
     _copy(VERIFY, release / "packaging/tools/verify_install.py", executable=True)
+    _copy(PROCESS_STATE_TOOL, release / "packaging/tools/process_state.py", executable=True)
     _copy(LOCK, release / "packaging/tools/lifecycle_lock.py", executable=True)
     _copy(DOCTOR, release / "packaging/tools/doctor.py", executable=True)
     _copy(RECONCILE, release / "packaging/tools/reconcile_processes.py", executable=True)
@@ -1010,7 +1013,7 @@ def _build_install_source(
     return release
 
 
-def test_default_install_runs_staging_then_dependencies_without_publish(
+def test_dependencies_phase_runs_staging_then_dependencies_without_publish(
     tmp_path: Path,
 ) -> None:
     dependencies, files = _fixture_contract()
@@ -1031,8 +1034,18 @@ def test_default_install_runs_staging_then_dependencies_without_publish(
                 "LVT_TEST_RUNTIME_PYTHON": sys.executable,
             }
         )
+        staging = subprocess.run(
+            [str(release / "scripts/install.command"), "--phase", "staging-core"],
+            cwd="/",
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert staging.returncode == 0, staging.stdout + staging.stderr
         completed = subprocess.run(
-            [str(release / "scripts/install.command")],
+            [str(release / "scripts/install.command"), "--phase", "dependencies"],
             cwd="/",
             env=environment,
             capture_output=True,

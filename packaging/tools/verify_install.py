@@ -6,16 +6,16 @@ import hashlib
 import http.client
 import json
 import os
-import shutil
 import socket
 import sqlite3
 import stat
-import subprocess
 import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+
+from process_state import verify_owned_service_record
 
 PHASES = (
     "staging-core",
@@ -760,42 +760,12 @@ def _database_quick_check(data_root: Path) -> Check:
 
 
 def _owned_ollama_metadata_valid(data_root: Path) -> bool:
-    metadata_path = data_root / "runtime" / "ollama.pid"
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-        valid = (
-            isinstance(payload, dict)
-            and payload.get("port") == 11435
-            and type(payload.get("pid")) is int
-            and isinstance(payload.get("start_time"), str)
-            and bool(payload["start_time"])
-            and isinstance(payload.get("nonce"), str)
-            and bool(payload["nonce"])
-            and isinstance(payload.get("executable"), str)
-            and bool(payload["executable"])
-        )
-        if not valid:
-            return False
-        completed = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(payload["pid"])],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        current_start = " ".join(completed.stdout.split())
-        executable = Path(payload["executable"])
-        expected_executable = shutil.which("ollama")
-        return (
-            completed.returncode == 0
-            and current_start == payload["start_time"]
-            and expected_executable is not None
-            and executable.is_absolute()
-            and executable.is_file()
-            and not executable.is_symlink()
-            and executable.resolve(strict=True) == Path(expected_executable).resolve(strict=True)
-        )
-    except (OSError, ValueError, json.JSONDecodeError):
-        return False
+    return verify_owned_service_record(
+        data_root / "runtime" / "ollama.pid",
+        "ollama",
+        11435,
+        require_listener=True,
+    )
 
 
 def _test_root_for(path: Path) -> Path | None:

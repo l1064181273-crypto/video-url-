@@ -19,14 +19,24 @@ from transaction_journal import (  # noqa: E402
 )
 
 
-def _payload(*, state: str = "PREPARED", decision_id: str | None = None) -> dict[str, Any]:
+def _payload(
+    *,
+    state: str = "PREPARED",
+    decision_id: str | None = None,
+    transaction_id: str | None = None,
+) -> dict[str, Any]:
+    decision = {
+        "COMMITTED": "committed",
+        "ACTIVATED": "activated",
+    }.get(state, "pending")
+    cleanup = "intent_written" if state == "ACTIVATED" else "pending"
     return {
         "operation": "first_install",
-        "transaction_id": str(uuid.uuid4()),
+        "transaction_id": transaction_id or str(uuid.uuid4()),
         "decision_id": decision_id or str(uuid.uuid4()),
         "version": "0.1.0",
         "state": state,
-        "decision": "committed" if state in {"COMMITTED", "ACTIVATED"} else "pending",
+        "decision": decision,
         "paths": {
             "current": {
                 "live": "app/current",
@@ -56,7 +66,12 @@ def _payload(*, state: str = "PREPARED", decision_id: str | None = None) -> dict
         "substate": {
             "current": "intent_written",
             "extension": "intent_written",
-            "cleanup": "pending",
+            "cleanup": cleanup,
+        },
+        "recovery": {
+            "component": "none",
+            "action": "none",
+            "phase": "idle",
         },
     }
 
@@ -123,6 +138,12 @@ def test_single_committed_copy_selects_new_direction_then_repairs_before_gate(
 ) -> None:
     journal = TransactionJournal(tmp_path / "journal")
     payload = _payload(state="COMMITTED")
+    journal.write_progress(
+        _payload(
+            transaction_id=payload["transaction_id"],
+            decision_id=payload["decision_id"],
+        )
+    )
     journal.write_critical(payload)
     path = journal.root / damaged_slot
     if damage == "delete":
@@ -142,6 +163,12 @@ def test_single_committed_copy_selects_new_direction_then_repairs_before_gate(
 def test_conflicting_valid_critical_copies_fail_closed(tmp_path: Path) -> None:
     journal = TransactionJournal(tmp_path / "journal")
     first = _payload(state="COMMITTED")
+    journal.write_progress(
+        _payload(
+            transaction_id=first["transaction_id"],
+            decision_id=first["decision_id"],
+        )
+    )
     journal.write_critical(first)
     conflicting = {
         **first,
@@ -212,3 +239,176 @@ def test_each_slot_persistence_boundary_is_failpointed(
         journal.write_progress(_payload())
 
     assert f"slot-a:{boundary}" in observed
+
+
+@pytest.mark.parametrize("damage", ["delete", "truncate", "checksum", "schema"])
+def test_existing_journal_with_zero_valid_slots_fails_closed(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    journal = TransactionJournal(tmp_path / "journal")
+    journal.write_progress(_payload())
+    for path in journal.root.glob("slot-*.json"):
+        if damage == "delete":
+            path.unlink()
+        elif damage == "truncate":
+            path.write_bytes(b"{")
+        else:
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            if damage == "checksum":
+                envelope["checksum"] = "0" * 64
+            else:
+                envelope["schema_version"] = 999
+            path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    with pytest.raises(JournalError, match="corrupt"):
+        journal.read_latest()
+    with pytest.raises(JournalError, match="corrupt"):
+        journal.committed_direction()
+
+
+def test_new_transaction_is_not_contaminated_by_previous_activation(tmp_path: Path) -> None:
+    journal = TransactionJournal(tmp_path / "journal")
+    old = _payload(state="ACTIVATED")
+    old["substate"]["cleanup"] = "complete"
+    journal.write_progress(
+        _payload(
+            transaction_id=old["transaction_id"],
+            decision_id=old["decision_id"],
+        )
+    )
+    journal.write_critical(
+        {
+            **old,
+            "state": "COMMITTED",
+            "decision": "committed",
+            "substate": {**old["substate"], "cleanup": "pending"},
+        }
+    )
+    journal.write_critical(old)
+    new = _payload(state="PREPARED")
+
+    journal.write_progress(new)
+
+    latest = journal.read_latest()
+    assert latest is not None
+    assert latest.payload["transaction_id"] == new["transaction_id"]
+    assert journal.committed_direction() == "rollback"
+
+
+def test_partial_activated_cleanup_copy_repairs_newest_adjacent_progress(
+    tmp_path: Path,
+) -> None:
+    journal = TransactionJournal(tmp_path / "journal")
+    activated = _payload(state="ACTIVATED")
+    journal.write_progress(
+        _payload(
+            transaction_id=activated["transaction_id"],
+            decision_id=activated["decision_id"],
+        )
+    )
+    journal.write_critical(
+        {
+            **activated,
+            "state": "COMMITTED",
+            "decision": "committed",
+            "substate": {**activated["substate"], "cleanup": "pending"},
+        }
+    )
+    first, second = journal.write_critical(activated)
+    progressed = {
+        **activated,
+        "substate": {**activated["substate"], "cleanup": "parent_synced"},
+    }
+    journal._write_slot(first.path, second.generation + 1, progressed)
+
+    assert journal.committed_direction() == "committed"
+    repaired = journal.repair_critical("ACTIVATED")
+    assert repaired[0].payload == repaired[1].payload == progressed
+
+
+def test_partial_critical_recovery_copy_repairs_newest_adjacent_progress(
+    tmp_path: Path,
+) -> None:
+    journal = TransactionJournal(tmp_path / "journal")
+    committed = _payload(state="COMMITTED")
+    journal.write_progress(
+        _payload(
+            transaction_id=committed["transaction_id"],
+            decision_id=committed["decision_id"],
+        )
+    )
+    first, second = journal.write_critical(committed)
+    recovering = {
+        **committed,
+        "recovery": {
+            "component": "current",
+            "action": "remove_previous",
+            "phase": "intent_written",
+        },
+    }
+    journal._write_slot(first.path, second.generation + 1, recovering)
+
+    assert journal.committed_direction() == "committed"
+    repaired = journal.repair_critical("COMMITTED")
+    assert repaired[0].payload == repaired[1].payload == recovering
+
+
+@pytest.mark.parametrize(
+    ("state", "decision", "cleanup"),
+    [
+        ("PREPARED", "committed", "pending"),
+        ("ACTIVATED", "activated", "pending"),
+        ("COMMITTED", "pending", "pending"),
+    ],
+)
+def test_illegal_state_decision_substate_combinations_are_rejected(
+    tmp_path: Path,
+    state: str,
+    decision: str,
+    cleanup: str,
+) -> None:
+    journal = TransactionJournal(tmp_path / "journal")
+    payload = _payload()
+    payload["state"] = state
+    payload["decision"] = decision
+    payload["substate"]["cleanup"] = cleanup
+
+    with pytest.raises(JournalError):
+        journal.write_progress(payload)
+
+
+def test_same_transaction_cannot_regress_from_critical_to_progress(tmp_path: Path) -> None:
+    journal = TransactionJournal(tmp_path / "journal")
+    transaction_id = str(uuid.uuid4())
+    committed = _payload(state="COMMITTED", transaction_id=transaction_id)
+    journal.write_progress(
+        _payload(
+            transaction_id=transaction_id,
+            decision_id=committed["decision_id"],
+        )
+    )
+    journal.write_critical(committed)
+
+    with pytest.raises(JournalError, match="transition"):
+        journal.write_progress(
+            _payload(
+                transaction_id=transaction_id,
+                decision_id=committed["decision_id"],
+            )
+        )
+
+
+def test_new_journal_directories_have_parent_fsync_failpoints(tmp_path: Path) -> None:
+    observed: list[str] = []
+    root = tmp_path / "one" / "two" / "journal"
+    journal = TransactionJournal(root, failpoint=observed.append)
+
+    journal.write_progress(_payload())
+
+    assert "root:before_mkdir:one" in observed
+    assert "root:after_mkdir:one" in observed
+    assert "root:before_parent_fsync:one" in observed
+    assert "root:after_parent_fsync:one" in observed
+    assert "root:before_parent_fsync:journal" in observed
+    assert "root:after_parent_fsync:journal" in observed

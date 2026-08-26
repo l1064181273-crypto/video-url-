@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "packaging" / "tools"))
 
 import process_state  # noqa: E402
+import verify_install  # noqa: E402
 from process_state import (  # noqa: E402
     LifecycleManager,
     LifecycleResult,
@@ -34,12 +35,14 @@ class FakeOperations:
         backend_state: str = "absent",
         ollama_state: str = "absent",
         health: bool = True,
+        stop_failures: set[str] | None = None,
     ) -> None:
         self.prerequisite = prerequisite or ValidationOutcome(0, "healthy")
         self.runtime = runtime or ValidationOutcome(0, "healthy")
         self._backend_state = backend_state
         self._ollama_state = ollama_state
         self.health = health
+        self.stop_failures = stop_failures or set()
         self.calls: list[str] = []
         self.launch_barrier: threading.Barrier | None = None
         self.backend_launches = 0
@@ -71,6 +74,8 @@ class FakeOperations:
 
     def stop(self, kind: str) -> None:
         self.calls.append(f"stop:{kind}")
+        if kind in self.stop_failures:
+            raise ServiceError(f"{kind} cleanup failed")
         if kind == "backend":
             self._backend_state = "absent"
         else:
@@ -198,6 +203,19 @@ def test_start_failure_cleans_only_services_created_by_this_call(
     assert operations.calls[-2:] == ["stop:backend", "stop:ollama"]
 
 
+def test_start_failure_attempts_all_created_service_cleanup_before_raising(
+    tmp_path: Path,
+) -> None:
+    operations = FakeOperations(health=False, stop_failures={"backend"})
+    manager = _manager(tmp_path, operations)
+
+    with pytest.raises(ExceptionGroup, match="start and cleanup failed") as captured:
+        manager.start(lock_held=True)
+
+    assert operations.calls[-2:] == ["stop:backend", "stop:ollama"]
+    assert len(captured.value.exceptions) == 2
+
+
 def test_already_running_only_runs_runtime_full(tmp_path: Path) -> None:
     operations = FakeOperations(backend_state="owned", ollama_state="owned")
     manager = _manager(tmp_path, operations)
@@ -299,6 +317,35 @@ class IgnoringFixtureSystemOperations(FixtureSystemOperations):
             2
         ].removeprefix("import signal;")
         return command, environment
+
+
+class FullRuntimeFixtureOperations(FixtureSystemOperations):
+    def reconcile(self) -> None:
+        for kind in ("backend", "ollama"):
+            self._reconcile_orphan(kind)
+
+    def validate(self, phase: str) -> ValidationOutcome:
+        if phase == "installed-prerequisites":
+            return ValidationOutcome(0, "healthy")
+        probes = verify_install.LocalProbes(self.data_root)
+        healthy = probes.ollama_port_state() == "owned" and self.backend_healthy()
+        return ValidationOutcome(0, "healthy") if healthy else ValidationOutcome(2, "failed")
+
+    def _service_command(self, kind: str) -> tuple[list[str], dict[str, str]]:
+        port = 8765 if kind == "backend" else 11435
+        script = (
+            "import http.server,json;"
+            "H=type('H',(http.server.BaseHTTPRequestHandler,),{"
+            "'do_GET':lambda s:(s.send_response(200),s.send_header('Content-Type',"
+            "'application/json'),s.end_headers(),s.wfile.write("
+            "json.dumps({'status':'healthy'}).encode())),"
+            "'log_message':lambda *a:None});"
+            f"http.server.HTTPServer(('127.0.0.1',{port}),H).serve_forever()"
+        )
+        return [sys.executable, "-c", script], {
+            "HOME": os.environ.get("HOME", "/"),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        }
 
 
 def _system_operations(tmp_path: Path) -> FixtureSystemOperations:
@@ -439,3 +486,272 @@ def test_unowned_backend_port_conflict_is_unsafe_and_11434_is_not_consulted(
     finally:
         backend.close()
         user_ollama.close()
+
+
+def test_snapshot_payload_persists_audit_generation_and_rejects_reuse(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "service"
+    executable.write_bytes(b"service")
+    original = ProcessSnapshot(
+        321,
+        321,
+        "same-second",
+        executable,
+        1,
+        2,
+        "a" * 64,
+        (1, 2, 3, 4, 5, 321, 7, 10),
+    )
+    reused = ProcessSnapshot(
+        321,
+        321,
+        "same-second",
+        executable,
+        1,
+        2,
+        "a" * 64,
+        (1, 2, 3, 4, 5, 321, 7, 11),
+    )
+
+    payload = process_state._snapshot_payload(original)
+
+    assert payload["audit_token"] == list(original.signal_token)
+    assert process_state._snapshot_matches(original, payload)
+    assert not process_state._snapshot_matches(reused, payload)
+
+
+@pytest.mark.parametrize("mutation", ["extra_executable_field", "invalid_audit_word"])
+def test_ownership_record_parser_rejects_invalid_nested_snapshot_schema(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    snapshot = process_state._snapshot(os.getpid())
+    assert snapshot is not None
+    payload = {
+        "schema_version": 1,
+        "kind": "backend",
+        "nonce": "a" * 32,
+        "port": 8765,
+        "supervisor": process_state._snapshot_payload(snapshot),
+        "service": process_state._snapshot_payload(snapshot),
+    }
+    if mutation == "extra_executable_field":
+        payload["service"]["executable"]["unexpected"] = True
+    else:
+        payload["service"]["audit_token"][0] = 0x1_0000_0000
+    record = tmp_path / "backend.pid"
+    record.write_text(json.dumps(payload), encoding="utf-8")
+    record.chmod(0o600)
+
+    assert process_state._read_record_payload(record, "backend", 8765) is None
+
+
+def test_stop_child_kills_remaining_descendant_after_leader_exits_on_term(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "service"
+    executable.write_bytes(b"service")
+    leader = ProcessSnapshot(501, 501, "start", executable, 1, 2, "a" * 64, (1,) * 8)
+    child = ProcessSnapshot(502, 501, "start", executable, 1, 2, "a" * 64, (2,) * 8)
+    signals: list[tuple[int, signal.Signals]] = []
+    groups = iter(((leader, child), (child,), (child,), ()))
+
+    class ExitedLeader:
+        pid = 501
+
+        @staticmethod
+        def poll() -> int | None:
+            return 0
+
+        @staticmethod
+        def wait(timeout: float) -> int:
+            return 0
+
+    monkeypatch.setattr(process_state, "_group_snapshots", lambda _pgid: next(groups, ()))
+    monkeypatch.setattr(process_state, "_token_is_live", lambda _snapshot: True)
+    monkeypatch.setattr(
+        process_state,
+        "_signal_snapshot",
+        lambda snapshot, requested: signals.append((snapshot.pid, requested)) or True,
+    )
+
+    process_state._stop_child(  # type: ignore[arg-type]
+        ExitedLeader(),
+        terminate_grace=0.01,
+        kill_wait=0.1,
+        anchor=leader,
+    )
+
+    assert (502, signal.SIGTERM) in signals
+    assert (502, signal.SIGKILL) in signals
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+def test_lifecycle_start_record_is_accepted_by_runtime_full_ownership_validation(
+    tmp_path: Path,
+) -> None:
+    base = _system_operations(tmp_path)
+    operations = FullRuntimeFixtureOperations(
+        base.data_root,
+        base.release_root,
+        terminate_grace=0.1,
+        kill_wait=1,
+    )
+    manager = LifecycleManager(base.data_root, base.release_root, operations=operations)
+
+    result = manager.start(lock_held=True)
+    try:
+        assert result == LifecycleResult(0, "started")
+        assert verify_install.LocalProbes(base.data_root).ollama_port_state() == "owned"
+        assert operations.validate("runtime-full") == ValidationOutcome(0, "healthy")
+    finally:
+        manager.stop(lock_held=True)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+def test_supervisor_sigkill_is_reconciled_without_orphaning_service(
+    tmp_path: Path,
+) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    operations.launch("backend")
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    supervisor_pid = payload["supervisor"]["pid"]
+    service_pid = payload["service"]["pid"]
+    supervisor_snapshot = process_state._snapshot(supervisor_pid)
+    service_snapshot = process_state._snapshot(service_pid)
+    try:
+        assert supervisor_snapshot is not None
+        assert service_snapshot is not None
+        assert process_state._signal_snapshot(supervisor_snapshot, signal.SIGKILL)
+        os.waitpid(supervisor_pid, 0)
+
+        operations.reconcile()
+
+        assert not record.exists()
+        with pytest.raises(ProcessLookupError):
+            os.kill(service_pid, 0)
+    finally:
+        for snapshot in (service_snapshot, supervisor_snapshot):
+            if snapshot is not None and process_state._token_is_live(snapshot):
+                process_state._signal_snapshot(snapshot, signal.SIGKILL)
+                with suppress(ChildProcessError):
+                    os.waitpid(snapshot.pid, 0)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+def test_foreign_11435_listener_winning_launch_race_is_rejected(
+    tmp_path: Path,
+) -> None:
+    base = _system_operations(tmp_path)
+
+    class NonListeningOllama(FixtureSystemOperations):
+        def __init__(self) -> None:
+            super().__init__(
+                base.data_root,
+                base.release_root,
+                terminate_grace=0.1,
+                kill_wait=0.2,
+            )
+            self.first_state = True
+
+        def state(self, kind: str) -> str:
+            if kind == "ollama" and self.first_state:
+                self.first_state = False
+                return "absent"
+            return super().state(kind)
+
+        def _service_command(self, kind: str) -> tuple[list[str], dict[str, str]]:
+            assert kind == "ollama"
+            return [
+                sys.executable,
+                "-c",
+                "import threading; threading.Event().wait()",
+            ], {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+
+    foreign = socket.socket()
+    foreign.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        foreign.bind(("127.0.0.1", 11435))
+        foreign.listen()
+    except OSError:
+        foreign.close()
+        pytest.skip("Ollama test port is occupied")
+    operations = NonListeningOllama()
+    try:
+        with pytest.raises(ServiceError, match="owned-listener"):
+            operations.launch("ollama")
+    finally:
+        foreign.close()
+        record = operations.data_root / "runtime/ollama.pid"
+        if record.exists():
+            payload = json.loads(record.read_text(encoding="utf-8"))
+            for name in ("service", "supervisor"):
+                snapshot = process_state._snapshot(payload[name]["pid"])
+                if snapshot is not None and process_state._token_is_live(snapshot):
+                    process_state._signal_snapshot(snapshot, signal.SIGKILL)
+                    with suppress(ChildProcessError):
+                        os.waitpid(snapshot.pid, 0)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+def test_real_stop_kills_child_and_grandchild_after_leader_exits_on_term(
+    tmp_path: Path,
+) -> None:
+    base = _system_operations(tmp_path)
+    pid_file = tmp_path / "descendants.json"
+
+    class DescendantFixtureOperations(FixtureSystemOperations):
+        def _service_command(self, kind: str) -> tuple[list[str], dict[str, str]]:
+            assert kind == "backend"
+            script = (
+                "import http.server,json,os,signal,sys;"
+                "child=os.fork();"
+                "\nif child==0:"
+                "\n signal.signal(signal.SIGTERM,signal.SIG_IGN); grand=os.fork();"
+                "\n if grand==0:"
+                "\n  signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                "\n  H=type('H',(http.server.BaseHTTPRequestHandler,),{"
+                "'do_GET':lambda s:(s.send_response(200),s.send_header('Content-Type',"
+                "'application/json'),s.end_headers(),s.wfile.write("
+                "json.dumps({'status':'healthy'}).encode())),"
+                "'log_message':lambda *a:None});"
+                "\n  http.server.HTTPServer(('127.0.0.1',8765),H).serve_forever()"
+                "\n else:"
+                "\n  open(sys.argv[1],'w').write(json.dumps("
+                "{'child':os.getpid(),'grandchild':grand}));"
+                "\n  os.waitpid(grand,0)"
+                "\nelse:"
+                "\n os.waitpid(child,0)"
+            )
+            return [sys.executable, "-c", script, str(pid_file)], {
+                "HOME": os.environ.get("HOME", "/"),
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            }
+
+    operations = DescendantFixtureOperations(
+        base.data_root,
+        base.release_root,
+        terminate_grace=0.1,
+        kill_wait=1,
+    )
+    snapshots: list[ProcessSnapshot] = []
+    operations.launch("backend")
+    try:
+        descendants = json.loads(pid_file.read_text(encoding="utf-8"))
+        snapshots = [
+            snapshot
+            for pid in descendants.values()
+            if (snapshot := process_state._snapshot(pid)) is not None
+        ]
+        assert len(snapshots) == 2
+
+        operations.stop("backend")
+
+        assert all(process_state._snapshot(snapshot.pid) is None for snapshot in snapshots)
+    finally:
+        for snapshot in snapshots:
+            if process_state._token_is_live(snapshot):
+                process_state._signal_snapshot(snapshot, signal.SIGKILL)

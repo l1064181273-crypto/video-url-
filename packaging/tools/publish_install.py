@@ -93,6 +93,8 @@ def tree_identity(path: Path) -> dict[str, str]:
             stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
         ):
             raise PublishError("tree identity contains an unsafe entry")
+        digest.update(b"D" if stat.S_ISDIR(metadata.st_mode) else b"F")
+        digest.update(b"\0")
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(f"{metadata.st_mode & 0o777:o}".encode("ascii"))
@@ -226,8 +228,11 @@ class FirstInstallPublisher:
                 **payload,
                 "state": "ACTIVATED",
                 "decision": "activated",
+                "substate": {**payload["substate"], "cleanup": "intent_written"},
             }
+            self._point("cleanup", "before_intent")
             self.journal.write_critical(payload)
+            self._point("cleanup", "after_intent")
             self._cleanup_previous(payload)
             self.services.copy_token(self.data_root / "config/api-token")
         except Exception:
@@ -235,6 +240,7 @@ class FirstInstallPublisher:
                 if handle is not None:
                     self.services.stop_candidate()
                 self.converge_payload(payload, committed=False)
+                self._finalize_rollback(payload)
             raise
 
     def reconcile(self, *, lock_held: bool = False) -> None:
@@ -256,6 +262,7 @@ class FirstInstallPublisher:
         if not committed:
             self.services.stop_candidate()
             self.converge_payload(latest.payload, committed=False)
+            self._finalize_rollback(latest.payload)
             return
 
         state = str(latest.payload["state"])
@@ -277,8 +284,14 @@ class FirstInstallPublisher:
                 **latest.payload,
                 "state": "ACTIVATED",
                 "decision": "activated",
+                "substate": {
+                    **latest.payload["substate"],
+                    "cleanup": "intent_written",
+                },
             }
+            self._point("cleanup", "before_intent")
             self.journal.write_critical(activated)
+            self._point("cleanup", "after_intent")
             latest_payload = activated
         else:
             latest_payload = latest.payload
@@ -347,6 +360,11 @@ class FirstInstallPublisher:
                 "extension": "pending",
                 "cleanup": "pending",
             },
+            "recovery": {
+                "component": "none",
+                "action": "none",
+                "phase": "idle",
+            },
         }
 
     def converge(self, *, committed: bool) -> None:
@@ -355,9 +373,15 @@ class FirstInstallPublisher:
             raise PublishError("journal is unavailable")
         self.converge_payload(latest.payload, committed=committed)
 
-    def converge_payload(self, payload: dict[str, Any], *, committed: bool) -> None:
-        self._converge_component("current", payload, committed)
-        self._converge_component("extension", payload, committed)
+    def converge_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        committed: bool,
+    ) -> dict[str, Any]:
+        payload = self._resume_recovery(payload)
+        payload = self._converge_component("current", payload, committed)
+        return self._converge_component("extension", payload, committed)
 
     def copy_tree(self, source: Path, destination: Path, *, sync: bool = True) -> None:
         if destination.exists() or destination.is_symlink():
@@ -456,46 +480,166 @@ class FirstInstallPublisher:
         component: str,
         payload: dict[str, Any],
         committed: bool,
-    ) -> None:
+    ) -> dict[str, Any]:
         live, next_path, previous = self._paths(component)
         identities = payload["identities"][component]
         desired = identities["new"] if committed else identities["old"]
         known = (identities["old"], identities["new"], {"kind": "absent"})
-        observed = {
-            live: path_identity(live, component),
-            next_path: path_identity(next_path, component),
-            previous: path_identity(previous, component),
-        }
+        observed = self._observed_component(component)
         if any(identity not in known for identity in observed.values()):
             raise PublishError("filesystem identity conflicts with journal")
         if desired["kind"] == "absent":
-            for path in (live, next_path, previous):
-                self._remove_known(path, component, known)
-            _fsync_directory(live.parent)
-            return
+            for label, path in (
+                ("live", live),
+                ("next", next_path),
+                ("previous", previous),
+            ):
+                if path_identity(path, component) != {"kind": "absent"}:
+                    payload = self._durable_recovery_action(
+                        payload,
+                        component,
+                        f"remove_{label}",
+                    )
+            return payload
 
         source = next((path for path, identity in observed.items() if identity == desired), None)
         if source is None:
             if desired != identities["new"]:
                 raise PublishError("old publication artifact is unavailable")
-            self._remove_known(live, component, known)
-            self._rebuild_new(component, live, payload)
+            if path_identity(live, component) != {"kind": "absent"}:
+                payload = self._durable_recovery_action(payload, component, "remove_live")
+            payload = self._durable_recovery_action(payload, component, "rebuild_live")
         elif source != live:
-            self._remove_known(live, component, known)
-            source.rename(live)
-            _fsync_directory(live.parent)
-        for path in (next_path, previous):
-            self._remove_known(path, component, known)
+            if path_identity(live, component) != {"kind": "absent"}:
+                payload = self._durable_recovery_action(payload, component, "remove_live")
+            source_label = "next" if source == next_path else "previous"
+            payload = self._durable_recovery_action(
+                payload,
+                component,
+                f"rename_{source_label}_to_live",
+            )
+        for label, path in (("next", next_path), ("previous", previous)):
+            if path_identity(path, component) != {"kind": "absent"}:
+                payload = self._durable_recovery_action(
+                    payload,
+                    component,
+                    f"remove_{label}",
+                )
         if path_identity(live, component) != desired:
             raise PublishError("publication convergence failed")
-        _fsync_directory(live.parent)
+        return payload
 
-    def _rebuild_new(self, component: str, live: Path, payload: dict[str, Any]) -> None:
+    def _observed_component(self, component: str) -> dict[Path, dict[str, str]]:
+        live, next_path, previous = self._paths(component)
+        return {
+            live: path_identity(live, component),
+            next_path: path_identity(next_path, component),
+            previous: path_identity(previous, component),
+        }
+
+    def _durable_recovery_action(
+        self,
+        payload: dict[str, Any],
+        component: str,
+        action: str,
+    ) -> dict[str, Any]:
+        point = f"recovery:{component}:{action}"
+        self._point(point, "before_intent")
+        payload = self._record_recovery(payload, component, action, "intent_written")
+        self._point(point, "after_intent")
+        return self._resume_recovery(payload)
+
+    def _resume_recovery(self, payload: dict[str, Any]) -> dict[str, Any]:
+        recovery = payload["recovery"]
+        if recovery["phase"] == "idle":
+            return payload
+        component = str(recovery["component"])
+        action = str(recovery["action"])
+        phase = str(recovery["phase"])
+        point = f"recovery:{component}:{action}"
+        if phase == "intent_written":
+            self._point(point, "before_effect")
+            self._apply_recovery_effect(component, action, payload)
+            self._point(point, "after_effect")
+            payload = self._record_recovery(
+                payload,
+                component,
+                action,
+                "effect_observed",
+            )
+            phase = "effect_observed"
+        if phase == "effect_observed":
+            self._point(point, "before_file_fsync")
+            self._sync_recovery_artifact(component, action)
+            self._point(point, "after_file_fsync")
+            payload = self._record_recovery(payload, component, action, "file_synced")
+            phase = "file_synced"
+        if phase == "file_synced":
+            parent = self._paths(component)[0].parent
+            self._point(point, "before_parent_fsync")
+            _fsync_directory(parent)
+            self._point(point, "after_parent_fsync")
+            payload = self._record_recovery(payload, component, action, "parent_synced")
+        return self._record_recovery(payload, "none", "none", "idle")
+
+    def _apply_recovery_effect(
+        self,
+        component: str,
+        action: str,
+        payload: dict[str, Any],
+    ) -> None:
+        live, next_path, previous = self._paths(component)
+        by_label = {"live": live, "next": next_path, "previous": previous}
+        identities = payload["identities"][component]
+        known = (identities["old"], identities["new"], {"kind": "absent"})
+        if action.startswith("remove_"):
+            self._remove_known(by_label[action.removeprefix("remove_")], component, known)
+            return
+        if action.startswith("rename_") and action.endswith("_to_live"):
+            source = by_label[action.removeprefix("rename_").removesuffix("_to_live")]
+            live_identity = path_identity(live, component)
+            source_identity = path_identity(source, component)
+            if live_identity in (identities["new"], identities["old"]) and source_identity == {
+                "kind": "absent"
+            }:
+                return
+            if live_identity != {"kind": "absent"}:
+                raise PublishError("recovery rename destination is occupied")
+            if source_identity == {"kind": "absent"}:
+                raise PublishError("recovery rename source is unavailable")
+            source.rename(live)
+            return
+        if action == "rebuild_live":
+            expected = identities["new"]
+            if path_identity(live, component) == expected:
+                return
+            if path_identity(live, component) != {"kind": "absent"}:
+                raise PublishError("recovery rebuild destination is occupied")
+            self._rebuild_new(component, live, payload, sync=False)
+            return
+        raise PublishError("unknown recovery action")
+
+    def _sync_recovery_artifact(self, component: str, action: str) -> None:
+        if action != "rebuild_live":
+            return
+        live = self._paths(component)[0]
+        if component == "extension":
+            _fsync_tree(live)
+
+    def _rebuild_new(
+        self,
+        component: str,
+        live: Path,
+        payload: dict[str, Any],
+        *,
+        sync: bool = True,
+    ) -> None:
         if component == "current":
             live.symlink_to(payload["identities"]["current"]["new"]["target"])
-            _fsync_directory(live.parent)
+            if sync:
+                _fsync_directory(live.parent)
         else:
-            self.copy_tree(self.release_root / "extension", live)
+            self.copy_tree(self.release_root / "extension", live, sync=sync)
 
     def _remove_known(
         self,
@@ -514,32 +658,109 @@ class FirstInstallPublisher:
             path.unlink()
 
     def _cleanup_previous(self, payload: dict[str, Any]) -> None:
-        if (
-            payload["substate"]["cleanup"] == "complete"
-            and not self.current_previous.exists()
-            and not self.current_previous.is_symlink()
-            and not self.extension_previous.exists()
-        ):
-            return
-        cleanup_intent = {
+        latest = self.journal.read_latest()
+        if latest is not None and latest.payload["transaction_id"] == payload["transaction_id"]:
+            payload = latest.payload
+        stages = {
+            "intent_written": 0,
+            "current_removed": 1,
+            "current_parent_synced": 2,
+            "extension_removed": 3,
+            "parent_synced": 4,
+            "complete": 5,
+        }
+        stage = stages[payload["substate"]["cleanup"]]
+        if stage < 1:
+            payload = self._cleanup_remove("current", self.current_previous, payload)
+            stage = 1
+        if stage < 2:
+            payload = self._cleanup_sync_parent("current", self.current_previous, payload)
+            stage = 2
+        if stage < 3:
+            payload = self._cleanup_remove("extension", self.extension_previous, payload)
+            stage = 3
+        if stage < 4:
+            payload = self._cleanup_sync_parent("extension", self.extension_previous, payload)
+        if payload["substate"]["cleanup"] != "complete":
+            self._point("cleanup", "before_complete")
+            payload = self._with_cleanup(payload, "complete")
+            self.journal.write_critical(payload)
+            self._point("cleanup", "after_complete")
+
+    def _cleanup_remove(
+        self,
+        component: str,
+        path: Path,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._point(f"cleanup:{component}", "before_remove")
+        identities = payload["identities"][component]
+        known = (identities["old"], identities["new"], {"kind": "absent"})
+        self._remove_known(path, component, known)
+        self._point(f"cleanup:{component}", "after_remove")
+        substate = "current_removed" if component == "current" else "extension_removed"
+        updated = self._with_cleanup(payload, substate)
+        self.journal.write_critical(updated)
+        return updated
+
+    def _cleanup_sync_parent(
+        self,
+        component: str,
+        path: Path,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._point(f"cleanup:{component}", "before_parent_fsync")
+        _fsync_directory(path.parent)
+        self._point(f"cleanup:{component}", "after_parent_fsync")
+        substate = "current_parent_synced" if component == "current" else "parent_synced"
+        updated = self._with_cleanup(payload, substate)
+        self.journal.write_critical(updated)
+        return updated
+
+    @staticmethod
+    def _with_cleanup(payload: dict[str, Any], cleanup: str) -> dict[str, Any]:
+        return {
             **payload,
-            "substate": {**payload["substate"], "cleanup": "intent_written"},
+            "substate": {**payload["substate"], "cleanup": cleanup},
         }
-        self.journal.write_critical(cleanup_intent)
-        known: tuple[dict[str, str], ...]
-        for component, path in (
-            ("current", self.current_previous),
-            ("extension", self.extension_previous),
-        ):
-            identities = cleanup_intent["identities"][component]
-            known = (identities["old"], identities["new"], {"kind": "absent"})
-            self._remove_known(path, component, known)
-            _fsync_directory(path.parent)
-        complete = {
-            **cleanup_intent,
-            "substate": {**cleanup_intent["substate"], "cleanup": "complete"},
+
+    def _record_recovery(
+        self,
+        payload: dict[str, Any],
+        component: str,
+        action: str,
+        phase: str,
+    ) -> dict[str, Any]:
+        updated = {
+            **payload,
+            "recovery": {
+                "component": component,
+                "action": action,
+                "phase": phase,
+            },
         }
-        self.journal.write_critical(complete)
+        if updated["state"] in {"COMMITTED", "ACTIVATED", "ROLLED_BACK"}:
+            self.journal.write_critical(updated)
+        else:
+            self.journal.write_progress(updated)
+        return updated
+
+    def _finalize_rollback(self, payload: dict[str, Any]) -> None:
+        latest = self.journal.read_latest()
+        if latest is not None and latest.payload["transaction_id"] == payload["transaction_id"]:
+            payload = latest.payload
+        rolled_back = {
+            **payload,
+            "state": "ROLLED_BACK",
+            "decision": "rolled_back",
+            "substate": {**payload["substate"], "cleanup": "complete"},
+            "recovery": {
+                "component": "none",
+                "action": "none",
+                "phase": "idle",
+            },
+        }
+        self.journal.write_critical(rolled_back)
 
     def _progress(
         self,
@@ -598,13 +819,28 @@ class SystemPublicationServices:
             operations.launch("backend", activation_read)
             if not operations.backend_healthy():
                 raise PublishError("precommit backend health failed")
-        except (OSError, ServiceError, PublishError):
+        except (OSError, ServiceError, PublishError) as start_error:
             with suppress(OSError):
                 os.close(activation_write)
-            if operations.state("backend") == "owned":
-                operations.stop("backend")
-            if created_ollama and operations.state("ollama") == "owned":
-                operations.stop("ollama")
+            cleanup_errors: list[Exception] = []
+            for kind, should_stop in (
+                ("backend", operations.state("backend") == "owned"),
+                (
+                    "ollama",
+                    created_ollama and operations.state("ollama") == "owned",
+                ),
+            ):
+                if not should_stop:
+                    continue
+                try:
+                    operations.stop(kind)
+                except Exception as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if cleanup_errors:
+                raise ExceptionGroup(
+                    "precommit start and cleanup failed",
+                    [start_error, *cleanup_errors],
+                ) from start_error
             raise
         finally:
             os.close(activation_read)
@@ -638,14 +874,24 @@ class SystemPublicationServices:
             with suppress(OSError):
                 os.close(self._active_handle.write_fd)
             self._active_handle.write_fd = -1
-        if operations.state("backend") == "owned":
-            operations.stop("backend")
-        if (
-            self._active_handle is not None
-            and self._active_handle.created_ollama
-            and operations.state("ollama") == "owned"
+        cleanup_errors: list[Exception] = []
+        for kind, should_stop in (
+            ("backend", operations.state("backend") == "owned"),
+            (
+                "ollama",
+                self._active_handle is not None
+                and self._active_handle.created_ollama
+                and operations.state("ollama") == "owned",
+            ),
         ):
-            operations.stop("ollama")
+            if not should_stop:
+                continue
+            try:
+                operations.stop(kind)
+            except Exception as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        if cleanup_errors:
+            raise ExceptionGroup("candidate cleanup failed", cleanup_errors)
 
     def copy_token(self, token_path: Path) -> None:
         completed = subprocess_run_pbcopy(token_path)

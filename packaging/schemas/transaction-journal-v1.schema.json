@@ -29,7 +29,8 @@
         "decision",
         "paths",
         "identities",
-        "substate"
+        "substate",
+        "recovery"
       ],
       "properties": {
         "operation": {
@@ -56,11 +57,12 @@
             "EXTENSION_SWITCHED",
             "SERVICE_PRECOMMIT_READY",
             "COMMITTED",
-            "ACTIVATED"
+            "ACTIVATED",
+            "ROLLED_BACK"
           ]
         },
         "decision": {
-          "enum": ["pending", "committed", "activated"]
+          "enum": ["pending", "committed", "activated", "rolled_back"]
         },
         "paths": {
           "$ref": "#/$defs/pathGroups"
@@ -80,11 +82,145 @@
               "$ref": "#/$defs/switchSubstate"
             },
             "cleanup": {
-              "enum": ["pending", "intent_written", "parent_synced", "complete"]
+              "enum": [
+                "pending",
+                "intent_written",
+                "current_removed",
+                "current_parent_synced",
+                "extension_removed",
+                "parent_synced",
+                "complete"
+              ]
+            }
+          }
+        },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["component", "action", "phase"],
+          "properties": {
+            "component": {
+              "enum": ["none", "current", "extension"]
+            },
+            "action": {
+              "type": "string",
+              "minLength": 1
+            },
+            "phase": {
+              "enum": [
+                "idle",
+                "intent_written",
+                "effect_observed",
+                "file_synced",
+                "parent_synced"
+              ]
             }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "PREPARED",
+                  "CURRENT_SWITCHING",
+                  "CURRENT_SWITCHED",
+                  "EXTENSION_SWITCHING",
+                  "EXTENSION_SWITCHED",
+                  "SERVICE_PRECOMMIT_READY"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "const": "pending"
+              },
+              "substate": {
+                "properties": {
+                  "cleanup": {
+                    "const": "pending"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "COMMITTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "const": "committed"
+              },
+              "substate": {
+                "properties": {
+                  "cleanup": {
+                    "const": "pending"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "ACTIVATED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "const": "activated"
+              },
+              "substate": {
+                "properties": {
+                  "cleanup": {
+                    "not": {
+                      "const": "pending"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "ROLLED_BACK"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "const": "rolled_back"
+              },
+              "substate": {
+                "properties": {
+                  "cleanup": {
+                    "const": "complete"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {
