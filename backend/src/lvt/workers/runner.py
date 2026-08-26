@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import select
 import threading
 import time
 from collections.abc import Callable
@@ -50,6 +52,74 @@ class WorkerShutdownError(RuntimeError):
 
 class WorkerStartupError(RuntimeError):
     pass
+
+
+class ActivationBarrier:
+    def __init__(self, descriptor: int) -> None:
+        if type(descriptor) is not int or descriptor < 0:
+            raise ValueError("activation descriptor must be non-negative")
+        self.descriptor = descriptor
+        self._activated = threading.Event()
+        self._closed = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
+        self._activation_count = 0
+
+    @property
+    def activated(self) -> bool:
+        return self._activated.is_set()
+
+    @property
+    def activation_count(self) -> int:
+        with self._state_lock:
+            return self._activation_count
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._watch,
+            name="lvt-precommit-activation",
+            daemon=False,
+        )
+        self._thread.start()
+
+    def wait(self, stop: threading.Event) -> bool:
+        while not self._activated.is_set():
+            if stop.is_set():
+                return False
+            self._activated.wait(0.05)
+            if self._closed.is_set() and not self._activated.is_set():
+                return False
+        return True
+
+    def wait_closed(self, timeout: float | None = None) -> bool:
+        return self._closed.wait(timeout)
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    def _watch(self) -> None:
+        try:
+            while not self._stop.is_set():
+                readable, _, _ = select.select([self.descriptor], [], [], 0.05)
+                if not readable:
+                    continue
+                token = os.read(self.descriptor, 1)
+                if token == b"A":
+                    with self._state_lock:
+                        if not self._activated.is_set():
+                            self._activation_count += 1
+                            self._activated.set()
+                return
+        except OSError:
+            pass
+        finally:
+            self._closed.set()
 
 
 class CancelRequestResult(StrEnum):
@@ -106,6 +176,7 @@ class JobWorkerPool:
         clock: Clock | None = None,
         poll_interval: float = 0.25,
         worker_park_hook: Callable[[int], None] | None = None,
+        activation_barrier: ActivationBarrier | None = None,
     ) -> None:
         if type(concurrency) is not int or concurrency not in {1, 2}:
             raise ValueError("worker concurrency must be 1 or 2")
@@ -126,6 +197,7 @@ class JobWorkerPool:
         self._capacity_condition = threading.Condition(self._admission_lock)
         self._parked_workers: set[int] = set()
         self._worker_park_hook = worker_park_hook
+        self._activation_barrier = activation_barrier
         self._state_lock = threading.Lock()
         self._fatal_errors: list[WorkerFatalError] = []
         self._fatal_event = threading.Event()
@@ -445,6 +517,10 @@ class JobWorkerPool:
 
     def _worker_main(self, worker_index: int, pipeline: WorkerPipeline) -> None:
         try:
+            if self._activation_barrier is not None and not self._activation_barrier.wait(
+                self._stop
+            ):
+                return
             while not self._stop.is_set():
                 park_hook: Callable[[int], None] | None = None
                 with self._capacity_condition:

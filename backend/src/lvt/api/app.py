@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import sqlite3
 from collections.abc import Callable
@@ -27,6 +28,7 @@ from lvt.core.models import JobOptions
 from lvt.db.repository import DeleteFinalizationError, DeleteJobResult, JobRepository
 from lvt.security.urls import validate_public_media_url
 from lvt.workers.runner import (
+    ActivationBarrier,
     CancelRequestResult,
     Clock,
     JobWorkerPool,
@@ -56,6 +58,7 @@ def create_app(
     worker_concurrency: int | None = None,
     worker_poll_interval: float = 0.25,
     worker_clock: Clock | None = None,
+    precommit_activation_fd: int | None = None,
 ) -> FastAPI:
     repository = JobRepository(db_path)
     if worker_concurrency is not None and (
@@ -64,6 +67,15 @@ def create_app(
         raise ValueError("worker_concurrency must be 1 or 2")
     file_store = JobFileStore(work_root or db_path.parent / "work")
     instance_lock = ProcessInstanceLock(db_path.with_name(f"{db_path.name}.instance.lock"))
+    activation_descriptor = precommit_activation_fd
+    if activation_descriptor is None and "LVT_PRECOMMIT_ACTIVATION_FD" in os.environ:
+        try:
+            activation_descriptor = int(os.environ["LVT_PRECOMMIT_ACTIVATION_FD"])
+        except ValueError as exc:
+            raise ValueError("LVT_PRECOMMIT_ACTIVATION_FD must be an integer") from exc
+    activation_barrier = (
+        ActivationBarrier(activation_descriptor) if activation_descriptor is not None else None
+    )
     worker_pool = (
         JobWorkerPool(
             repository=repository,
@@ -71,6 +83,7 @@ def create_app(
             concurrency=worker_concurrency or 1,
             clock=worker_clock,
             poll_interval=worker_poll_interval,
+            activation_barrier=activation_barrier,
         )
         if pipeline_builder is not None
         else None
@@ -88,6 +101,8 @@ def create_app(
             effective_concurrency = repository.get_worker_concurrency()
             recovery = repository.recover_startup()
             _app.state.startup_recovery = recovery
+            if activation_barrier is not None:
+                activation_barrier.start()
             if worker_pool is not None:
                 worker_pool.set_initial_concurrency(effective_concurrency)
                 worker_pool.start()
@@ -97,6 +112,8 @@ def create_app(
                 if worker_pool is not None:
                     await asyncio.to_thread(worker_pool.stop)
         finally:
+            if activation_barrier is not None:
+                activation_barrier.close()
             if worker_pool is None or worker_pool.live_thread_count == 0:
                 instance_lock.release()
 
@@ -106,6 +123,7 @@ def create_app(
     app.state.instance_lock = instance_lock
     app.state.file_store = file_store
     app.state.capabilities_provider = capabilities_provider
+    app.state.activation_barrier = activation_barrier
 
     def require_token(
         supplied_token: Annotated[str | None, Header(alias="X-LVT-Token")] = None,

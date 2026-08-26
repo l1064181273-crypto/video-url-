@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-video-transcriber.invalid/schemas/transaction-journal-v1.schema.json",
+  "title": "Local Video Transcriber Transaction Journal Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generation", "payload", "checksum"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "checksum": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "transaction_id",
+        "decision_id",
+        "version",
+        "state",
+        "decision",
+        "paths",
+        "identities",
+        "substate"
+      ],
+      "properties": {
+        "operation": {
+          "enum": ["first_install", "upgrade"]
+        },
+        "transaction_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "decision_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "PREPARED",
+            "CURRENT_SWITCHING",
+            "CURRENT_SWITCHED",
+            "EXTENSION_SWITCHING",
+            "EXTENSION_SWITCHED",
+            "SERVICE_PRECOMMIT_READY",
+            "COMMITTED",
+            "ACTIVATED"
+          ]
+        },
+        "decision": {
+          "enum": ["pending", "committed", "activated"]
+        },
+        "paths": {
+          "$ref": "#/$defs/pathGroups"
+        },
+        "identities": {
+          "$ref": "#/$defs/identityGroups"
+        },
+        "substate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["current", "extension", "cleanup"],
+          "properties": {
+            "current": {
+              "$ref": "#/$defs/switchSubstate"
+            },
+            "extension": {
+              "$ref": "#/$defs/switchSubstate"
+            },
+            "cleanup": {
+              "enum": ["pending", "intent_written", "parent_synced", "complete"]
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*\\\\).+$"
+    },
+    "pathGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["live", "next", "previous"],
+      "properties": {
+        "live": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "next": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "previous": {
+          "$ref": "#/$defs/relativePath"
+        }
+      }
+    },
+    "pathGroups": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "extension"],
+      "properties": {
+        "current": {
+          "$ref": "#/$defs/pathGroup"
+        },
+        "extension": {
+          "$ref": "#/$defs/pathGroup"
+        }
+      }
+    },
+    "identity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "const": "absent"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "target", "sha256"],
+          "properties": {
+            "kind": {
+              "const": "symlink"
+            },
+            "target": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "sha256"],
+          "properties": {
+            "kind": {
+              "const": "tree"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "identityPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["old", "new"],
+      "properties": {
+        "old": {
+          "$ref": "#/$defs/identity"
+        },
+        "new": {
+          "$ref": "#/$defs/identity"
+        }
+      }
+    },
+    "identityGroups": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "extension"],
+      "properties": {
+        "current": {
+          "$ref": "#/$defs/identityPair"
+        },
+        "extension": {
+          "$ref": "#/$defs/identityPair"
+        }
+      }
+    },
+    "switchSubstate": {
+      "enum": [
+        "pending",
+        "intent_written",
+        "next_prepared",
+        "next_parent_synced",
+        "old_to_previous_renamed",
+        "parent_synced_after_old",
+        "next_to_live_renamed",
+        "parent_synced_after_live",
+        "identity_verified"
+      ]
+    }
+  }
+}

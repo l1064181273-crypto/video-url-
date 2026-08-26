@@ -122,4 +122,30 @@ provision_arguments=(
 if (( skip_models )); then
   provision_arguments+=("--skip-models")
 fi
-exec "${python_path}" "${provision_tool}" "${provision_arguments[@]}"
+set +e
+"${python_path}" "${provision_tool}" "${provision_arguments[@]}"
+typeset provision_status=$?
+set -e
+if (( provision_status != 0 )); then
+  exit "${provision_status}"
+fi
+if [[ "${phase}" == "dependencies" ]]; then
+  exit 0
+fi
+
+typeset publish_tool="${release_root}/packaging/tools/publish_install.py"
+if [[ ! -e "${publish_tool}" ]]; then
+  # Older checkpoint fixtures intentionally stop after dependency verification.
+  exit 0
+fi
+lvt_assert_within_root "${release_root}" "${publish_tool}" || {
+  lvt_log ERROR "INSTALL_PATH_UNSAFE：发布工具路径不安全"
+  exit 2
+}
+if [[ ! -f "${publish_tool}" || -L "${publish_tool}" ]]; then
+  lvt_log ERROR "INSTALL_MISSING：发布工具缺失"
+  exit 2
+fi
+exec "${python_path}" "${publish_tool}" \
+  --data-root "${data_root}" \
+  --release-root "${candidate}"

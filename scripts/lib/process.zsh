@@ -33,3 +33,30 @@ function lvt_project_port_in_use() {
   [[ "${port}" == 11435 ]] || return 2
   /usr/bin/nc -z -w 1 127.0.0.1 "${port}" >/dev/null 2>&1
 }
+
+function lvt_current_release() {
+  local data_root="${1-}"
+  local current="${data_root}/app/current"
+  local releases="${data_root}/app/releases"
+  if [[ "${data_root}" != /* || ! -L "${current}" || ! -d "${releases}" || -L "${releases}" ]]; then
+    return 1
+  fi
+  local resolved_current="${current:A}"
+  local resolved_releases="${releases:A}"
+  if [[ "${resolved_current}" != "${resolved_releases}/"* ]]; then
+    return 1
+  fi
+  print -r -- "${resolved_current}"
+}
+
+function lvt_release_python() {
+  local release_root="${1-}"
+  local executable="${release_root}/.venv/bin/python"
+  if [[
+    "${release_root}" != /* ||
+    ! -x "${executable}"
+  ]]; then
+    return 1
+  fi
+  print -r -- "${executable}"
+}
