@@ -256,8 +256,9 @@ def test_system_publication_services_starts_installed_lvt_main_with_real_probes(
     assert capabilities["ollama"].get("status") == "available"
     assert capabilities["checked_at"] != "2026-08-26T00:00:00+00:00"
     _cleanup_production_services(services, data_root, release)
-    assert not (data_root / "runtime/backend.pid").exists()
-    assert not (data_root / "runtime/ollama.pid").exists()
+    operations = SystemServiceOperations(data_root, release)
+    assert operations.state("backend") == "absent"
+    assert operations.state("ollama") == "absent"
 
 
 def test_chrome_instructions_use_stable_extension_path_without_token(
@@ -711,8 +712,9 @@ def test_real_chromium_loads_stable_extension_and_renders_seven_capabilities(
     result = json.loads(result_marker.read_text(encoding="ascii"))
     assert result == {"ok": True}
     assert browser_test.returncode in {0, -signal.SIGKILL}, transcript
-    assert not (data_root / "runtime/backend.pid").exists()
-    assert not (data_root / "runtime/ollama.pid").exists()
+    operations = SystemServiceOperations(data_root, release)
+    assert operations.state("backend") == "absent"
+    assert operations.state("ollama") == "absent"
     assert secret not in transcript
     assert secret not in process_transcript
     assert secret not in (profile / "chrome.log").read_text(encoding="utf-8", errors="replace")

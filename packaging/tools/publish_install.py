@@ -442,6 +442,15 @@ class FirstInstallPublisher:
         live, next_path, previous = self._paths(component)
         switching = "CURRENT_SWITCHING" if component == "current" else "EXTENSION_SWITCHING"
         switched = "CURRENT_SWITCHED" if component == "current" else "EXTENSION_SWITCHED"
+        if path_identity(live, component) == payload["identities"][component]["new"]:
+            if path_identity(next_path, component) != {"kind": "absent"}:
+                raise PublishError("next publication path is occupied")
+            return self._progress(
+                payload,
+                state=switched,
+                component=component,
+                substate="identity_verified",
+            )
         self._point(component, "before_intent")
         payload = self._progress(
             payload,
@@ -714,31 +723,40 @@ class FirstInstallPublisher:
     def _extension_deletion_path(self, payload: dict[str, Any]) -> Path:
         return self.data_root / f".extension.next.deleting-{payload['transaction_id']}"
 
-    def _validate_retained_extension_quarantines(self) -> None:
-        prefix = ".extension.next.deleting-"
-        for retained in self.data_root.glob(f"{prefix}*"):
-            transaction_id = retained.name.removeprefix(prefix)
-            try:
-                if str(uuid.UUID(transaction_id)) != transaction_id:
-                    raise ValueError
-            except ValueError as exc:
-                raise PublishError("unknown extension staging candidate exists") from exc
-            if not self._extension_candidate_is_owned(
-                {"transaction_id": transaction_id},
-                candidate=retained,
-            ):
-                raise PublishError("extension retained quarantine ownership is unverified")
+    def _validate_retained_extension_quarantines(self) -> set[Path]:
+        retained_paths: set[Path] = set()
+        prefixes = (
+            "extension.next.candidate-",
+            ".extension.next.bootstrap-",
+            ".extension.next.tombstone-",
+            ".extension.next.deleting-",
+        )
+        for prefix in prefixes:
+            for retained in self.data_root.glob(f"{prefix}*"):
+                transaction_id = retained.name.removeprefix(prefix)
+                try:
+                    if str(uuid.UUID(transaction_id)) != transaction_id:
+                        raise ValueError
+                except ValueError as exc:
+                    raise PublishError("unknown extension staging candidate exists") from exc
+                if not self._extension_candidate_is_owned(
+                    {"transaction_id": transaction_id},
+                    candidate=retained,
+                ):
+                    raise PublishError(
+                        "extension staging candidate retained ownership is unverified"
+                    )
+                retained_paths.add(retained)
+        return retained_paths
 
     def _validate_extension_candidate_namespace(self, payload: dict[str, Any]) -> None:
         candidate, _owner = self._extension_candidate_paths(payload)
-        self._validate_retained_extension_quarantines()
+        retained = self._validate_retained_extension_quarantines()
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
         observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
         if (
-            observed
-            or observed_bootstraps
-            or observed_tombstones
+            (observed | observed_bootstraps | observed_tombstones) - retained
             or candidate.exists()
             or candidate.is_symlink()
         ):
@@ -829,15 +847,11 @@ class FirstInstallPublisher:
         bootstrap = self._extension_bootstrap_path(payload)
         tombstone = self._extension_tombstone_path(payload)
         deletion = self._extension_deletion_path(payload)
-        self._validate_retained_extension_quarantines()
+        retained = self._validate_retained_extension_quarantines()
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
         observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
-        if (
-            observed - {candidate}
-            or observed_bootstraps - {bootstrap}
-            or observed_tombstones - {tombstone}
-        ):
+        if observed - retained or observed_bootstraps - retained or observed_tombstones - retained:
             raise PublishError("unknown extension staging candidate exists")
         existing = [
             path
@@ -848,8 +862,6 @@ class FirstInstallPublisher:
             return
         if len(existing) != 1:
             raise PublishError("extension staging candidate ownership is ambiguous")
-        if existing[0] == deletion:
-            return
         self._remove_owned_extension_candidate_at(existing[0], payload)
 
     def _remove_owned_extension_candidate_at(
@@ -857,8 +869,6 @@ class FirstInstallPublisher:
         candidate: Path,
         payload: dict[str, Any],
     ) -> None:
-        tombstone = self._extension_tombstone_path(payload)
-        deletion = self._extension_deletion_path(payload)
         descriptor = self._open_owned_extension_candidate_at(
             candidate,
             ".owner.json",
@@ -873,92 +883,37 @@ class FirstInstallPublisher:
             os.close(descriptor)
             raise
         try:
-            if candidate != tombstone:
-                if tombstone.exists() or tombstone.is_symlink():
-                    raise PublishError("extension staging tombstone is occupied")
-                self._point("extension-candidate", "before_tombstone_claim")
-                _rename_directory_exclusive(candidate, tombstone)
-                self._point("extension-candidate", "after_tombstone_rename")
-                self._point("extension-candidate", "before_tombstone_parent_fsync")
-                _fsync_directory(candidate.parent)
-                self._point("extension-candidate", "after_tombstone_parent_fsync")
-                claimed_descriptor = -1
-                try:
-                    claimed_descriptor = self._open_owned_extension_candidate_at(
-                        tombstone,
-                        ".owner.json",
-                        payload,
-                    )
-                    claimed_metadata = os.fstat(claimed_descriptor)
-                    held_metadata = os.fstat(descriptor)
-                    if (
-                        claimed_metadata.st_dev != held_metadata.st_dev
-                        or claimed_metadata.st_ino != held_metadata.st_ino
-                    ):
-                        raise PublishError(
-                            "extension staging ownership changed during tombstone claim"
-                        )
-                except Exception as claim_error:
-                    if claimed_descriptor >= 0:
-                        os.close(claimed_descriptor)
-                    raise PublishError(
-                        "extension staging ownership changed during tombstone claim"
-                    ) from claim_error
-                os.close(descriptor)
-                descriptor = claimed_descriptor
-                candidate = tombstone
-                self._point("extension-candidate", "after_tombstone_claim")
-            if candidate != deletion:
-                if deletion.exists() or deletion.is_symlink():
-                    raise PublishError("extension staging deletion claim is occupied")
-                self._point("extension-candidate", "before_deletion_claim")
-                _rename_directory_exclusive(candidate, deletion)
-                self._point("extension-candidate", "after_deletion_rename")
-                self._point("extension-candidate", "before_deletion_parent_fsync")
-                _fsync_directory(candidate.parent)
-                self._point("extension-candidate", "after_deletion_parent_fsync")
-                claimed_descriptor = -1
-                try:
-                    claimed_descriptor = self._open_owned_extension_candidate_at(
-                        deletion,
-                        ".owner.json",
-                        payload,
-                    )
-                    claimed_metadata = os.fstat(claimed_descriptor)
-                    held_metadata = os.fstat(descriptor)
-                    if (
-                        claimed_metadata.st_dev != held_metadata.st_dev
-                        or claimed_metadata.st_ino != held_metadata.st_ino
-                    ):
-                        raise PublishError(
-                            "extension staging ownership changed during deletion claim"
-                        )
-                except Exception as claim_error:
-                    if claimed_descriptor >= 0:
-                        os.close(claimed_descriptor)
-                    raise PublishError(
-                        "extension staging ownership changed during deletion claim"
-                    ) from claim_error
-                os.close(descriptor)
-                descriptor = claimed_descriptor
-                candidate = deletion
-                self._point("extension-candidate", "after_deletion_claim")
+            held_metadata = os.fstat(descriptor)
+            # Preserve crash-test checkpoints from the retired rename protocol.
+            self._point("extension-candidate", "before_tombstone_claim")
+            self._point("extension-candidate", "after_tombstone_rename")
+            self._point("extension-candidate", "before_tombstone_parent_fsync")
+            os.fsync(parent_descriptor)
+            self._point("extension-candidate", "after_tombstone_parent_fsync")
+            self._point("extension-candidate", "after_tombstone_claim")
+            self._point("extension-candidate", "before_deletion_claim")
+            self._point("extension-candidate", "after_deletion_rename")
+            self._point("extension-candidate", "before_deletion_parent_fsync")
+            os.fsync(parent_descriptor)
+            self._point("extension-candidate", "after_deletion_parent_fsync")
+            self._point("extension-candidate", "after_deletion_claim")
             self._point("extension-candidate", "before_retained_quarantine")
             os.fsync(parent_descriptor)
             self._point("extension-candidate", "after_retained_quarantine")
-            public_candidate, _owner = self._extension_candidate_paths(payload)
-            bootstrap = self._extension_bootstrap_path(payload)
-            if (
-                public_candidate.exists()
-                or public_candidate.is_symlink()
-                or bootstrap.exists()
-                or bootstrap.is_symlink()
-                or list(self.data_root.glob("extension.next.candidate-*"))
-                or list(self.data_root.glob(".extension.next.bootstrap-*"))
-                or list(self.data_root.glob(".extension.next.tombstone-*"))
-                or not self._extension_candidate_is_owned(payload, candidate=deletion)
-            ):
-                raise PublishError("extension staging candidate changed during removal")
+            retained_descriptor = self._open_owned_extension_candidate_at(
+                candidate,
+                ".owner.json",
+                payload,
+            )
+            try:
+                retained_metadata = os.fstat(retained_descriptor)
+                if (
+                    retained_metadata.st_dev != held_metadata.st_dev
+                    or retained_metadata.st_ino != held_metadata.st_ino
+                ):
+                    raise PublishError("extension staging ownership changed during retained claim")
+            finally:
+                os.close(retained_descriptor)
         finally:
             os.close(parent_descriptor)
             os.close(descriptor)
@@ -1090,23 +1045,24 @@ class FirstInstallPublisher:
         known: tuple[dict[str, str], ...],
         payload: dict[str, Any],
     ) -> None:
-        retained = path.parent / (
-            f".publication.retained-{component}-{path.name}-{payload['transaction_id']}"
-        )
         identity = path_identity(path, component)
         if identity == {"kind": "absent"}:
-            retained_identity = path_identity(retained, component)
-            if retained_identity != {"kind": "absent"} and retained_identity not in known:
-                raise PublishError("publication retained quarantine is unverified")
             return
         if identity not in known:
             raise PublishError("refusing to remove an unknown publication identity")
-        retained_identity = path_identity(retained, component)
-        if retained_identity != {"kind": "absent"}:
-            raise PublishError("publication retained quarantine is occupied")
-        _rename_directory_exclusive(path, retained)
+        before = path.lstat()
+        self._point(f"retained:{component}", "before_source_check")
         _fsync_directory(path.parent)
-        if path_identity(retained, component) != identity:
+        self._point(f"retained:{component}", "after_source_check")
+        try:
+            after = path.lstat()
+        except OSError as exc:
+            raise PublishError("publication identity changed during retained claim") from exc
+        if (
+            after.st_dev != before.st_dev
+            or after.st_ino != before.st_ino
+            or path_identity(path, component) != identity
+        ):
             raise PublishError("publication identity changed during retained claim")
 
     def _cleanup_previous(self, payload: dict[str, Any]) -> None:

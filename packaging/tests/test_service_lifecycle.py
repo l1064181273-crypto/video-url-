@@ -428,7 +428,7 @@ def test_real_supervisor_record_is_generation_bound_and_stop_reaps_service(
         operations.stop("backend")
 
     assert operations.state("backend") == "absent"
-    assert not record.exists()
+    assert record.is_file()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
@@ -452,7 +452,7 @@ def test_real_supervisor_escalates_ignoring_service_to_kill(tmp_path: Path) -> N
 
     with pytest.raises(ProcessLookupError):
         os.kill(service_pid, 0)
-    assert not record.exists()
+    assert record.is_file()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
@@ -836,16 +836,14 @@ def test_stop_claim_never_removes_public_replacement(
     record.chmod(0o600)
     claimed = threading.Barrier(2)
     resume = threading.Barrier(2)
-    original_rename = process_state._rename_entry_exclusive
     signals: list[int] = []
 
-    def synchronized_rename(parent: int, source: str, destination: str) -> None:
-        original_rename(parent, source, destination)
-        if source == "backend.pid" and destination.startswith(".backend.pid.claim-"):
+    def synchronized_claim(name: str) -> None:
+        if name == "claim:before_source_check":
             claimed.wait(timeout=5)
             resume.wait(timeout=5)
 
-    monkeypatch.setattr(process_state, "_rename_entry_exclusive", synchronized_rename)
+    monkeypatch.setattr(process_state, "_record_boundary", synchronized_claim)
     monkeypatch.setattr(process_state, "_verified_record_members", lambda _payload: ())
     monkeypatch.setattr(process_state, "_port_open", lambda _port: False)
     monkeypatch.setattr(
@@ -864,14 +862,72 @@ def test_stop_claim_never_removes_public_replacement(
     worker = threading.Thread(target=stop)
     worker.start()
     claimed.wait(timeout=5)
+    displaced = record.parent / "displaced-owned-record"
+    record.rename(displaced)
     record.symlink_to(tmp_path / "foreign-target")
     resume.wait(timeout=5)
     worker.join(timeout=5)
 
     assert not worker.is_alive()
-    assert errors == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], ServiceError)
     assert signals == []
     assert record.is_symlink()
+    assert json.loads(displaced.read_text(encoding="utf-8")) == payload
+
+
+def test_record_writer_preserves_source_replacement_before_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    current = _ownership_payload(tmp_path)
+    record.write_text(json.dumps(current), encoding="utf-8")
+    record.chmod(0o600)
+    replacement = record.parent / "foreign-record"
+    replacement.write_text("foreign\n", encoding="utf-8")
+    replacement.chmod(0o600)
+    displaced = record.parent / "displaced-owned-record"
+    before_claim = threading.Barrier(2)
+    resume = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def synchronized_write(name: str) -> None:
+        if name == "write:before_source_check":
+            before_claim.wait(timeout=5)
+            resume.wait(timeout=5)
+
+    monkeypatch.setattr(process_state, "_record_boundary", synchronized_write)
+
+    def write() -> None:
+        try:
+            process_state._write_record(
+                record,
+                _ownership_payload(tmp_path, generation=2),
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=write)
+    worker.start()
+    before_claim.wait(timeout=5)
+    record.rename(displaced)
+    replacement.rename(record)
+    foreign_before = record.stat()
+    resume.wait(timeout=5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ServiceError)
+    foreign_after = record.stat()
+    assert (foreign_after.st_dev, foreign_after.st_ino) == (
+        foreign_before.st_dev,
+        foreign_before.st_ino,
+    )
+    assert record.read_text(encoding="utf-8") == "foreign\n"
+    assert json.loads(displaced.read_text(encoding="utf-8")) == current
 
 
 def test_record_writer_never_overwrites_unverified_public_entry(tmp_path: Path) -> None:
@@ -889,12 +945,116 @@ def test_record_writer_never_overwrites_unverified_public_entry(tmp_path: Path) 
     assert record.read_text(encoding="utf-8") == "foreign-record\n"
 
 
+def test_public_record_generation_must_exceed_retained_same_nonce(
+    tmp_path: Path,
+) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    record.write_text(json.dumps(_ownership_payload(tmp_path, generation=1)), encoding="utf-8")
+    record.chmod(0o600)
+    claim = runtime / ".backend.pid.claim-00000000000000000005-retained"
+    claim.write_text(json.dumps(_ownership_payload(tmp_path, generation=5)), encoding="utf-8")
+    claim.chmod(0o600)
+
+    with pytest.raises(ServiceError, match="generation"):
+        operations._open_current_record("backend")
+
+    record.write_text(json.dumps(_ownership_payload(tmp_path, generation=2)), encoding="utf-8")
+    with pytest.raises(ServiceError, match="generation"):
+        operations._open_current_record("backend")
+
+
+def test_duplicate_or_corrupt_retained_generation_blocks_public_record(
+    tmp_path: Path,
+) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    record.write_text(json.dumps(_ownership_payload(tmp_path, generation=6)), encoding="utf-8")
+    record.chmod(0o600)
+    for suffix in ("left", "right"):
+        claim = runtime / f".backend.pid.claim-00000000000000000005-{suffix}"
+        claim.write_text(json.dumps(_ownership_payload(tmp_path, generation=5)), encoding="utf-8")
+        claim.chmod(0o600)
+
+    with pytest.raises(ServiceError, match="duplicate"):
+        operations._open_current_record("backend")
+
+    for claim in runtime.glob(".backend.pid.claim-*"):
+        claim.unlink()
+    corrupt = runtime / ".backend.pid.claim-00000000000000000005-corrupt"
+    corrupt.write_text("{", encoding="utf-8")
+    corrupt.chmod(0o600)
+    with pytest.raises(ServiceError, match="unverified"):
+        operations._open_current_record("backend")
+
+
+@pytest.mark.parametrize("kind", ["backend", "ollama"])
+@pytest.mark.parametrize("entry_kind", ["fifo", "socket", "directory"])
+def test_special_ownership_record_is_bounded_unsafe(
+    tmp_path: Path,
+    kind: str,
+    entry_kind: str,
+) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime" / f"{kind}.pid"
+    held_socket: socket.socket | None = None
+    short_link: Path | None = None
+    if entry_kind == "fifo":
+        os.mkfifo(record, 0o600)
+    elif entry_kind == "socket":
+        held_socket = socket.socket(socket.AF_UNIX)
+        short_link = Path("/tmp") / f"lvt-record-{os.getpid()}-{kind}"
+        short_link.unlink(missing_ok=True)
+        short_link.symlink_to(record.parent, target_is_directory=True)
+        held_socket.bind(str(short_link / record.name))
+    elif entry_kind == "directory":
+        record.mkdir()
+    else:
+        raise AssertionError("unknown special entry kind")
+
+    result: list[str] = []
+    worker = threading.Thread(target=lambda: result.append(operations.state(kind)), daemon=True)
+    worker.start()
+    worker.join(timeout=1)
+    try:
+        assert not worker.is_alive()
+        assert result == ["unsafe"]
+    finally:
+        if held_socket is not None:
+            held_socket.close()
+        if short_link is not None:
+            short_link.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize(("kind", "port"), [("backend", 8765), ("ollama", 11435)])
+def test_device_record_open_is_nonblocking_and_rejected(kind: str, port: int) -> None:
+    parent = os.open(
+        "/dev",
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    result: list[object] = []
+    worker = threading.Thread(
+        target=lambda: result.append(process_state._open_record_at(parent, "null", kind, port)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=1)
+    try:
+        assert not worker.is_alive()
+        assert result == [None]
+    finally:
+        os.close(parent)
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
 def test_retained_record_claims_allow_a_new_service_generation(tmp_path: Path) -> None:
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", 8765)) == 0:
             pytest.skip("backend test port is occupied")
     operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
 
     first = operations.launch("backend")
     operations.stop("backend")
@@ -905,8 +1065,9 @@ def test_retained_record_claims_allow_a_new_service_generation(tmp_path: Path) -
     finally:
         operations.stop("backend")
 
-    claims = list((operations.data_root / "runtime").glob(".backend.pid.claim-*"))
-    assert len(claims) >= 2
+    generations = list((operations.data_root / "runtime").glob(".backend.pid.generation-*"))
+    assert record.is_file()
+    assert len(generations) >= 1
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
@@ -951,7 +1112,7 @@ def test_supervisor_sigkill_is_reconciled_without_orphaning_service(
 
         operations.reconcile()
 
-        assert not record.exists()
+        assert record.is_file()
         with pytest.raises(ProcessLookupError):
             os.kill(service_pid, 0)
     finally:
@@ -1013,7 +1174,8 @@ def test_reconcile_reaps_recorded_descendant_after_leader_and_supervisor_exit(
     try:
         descendant_pid = int(descendant_path.read_text(encoding="ascii"))
         for _ in range(500):
-            payload = json.loads(record.read_text(encoding="utf-8"))
+            payload = process_state._read_record_payload(record, "backend", 8765)
+            assert payload is not None
             members = payload.get("members", [])
             if any(member.get("pid") == descendant_pid for member in members):
                 break
@@ -1050,7 +1212,7 @@ def test_reconcile_reaps_recorded_descendant_after_leader_and_supervisor_exit(
         operations.reconcile()
 
         assert not process_state._token_is_live(descendant_snapshot)
-        assert not record.exists()
+        assert record.is_file()
     finally:
         if record.exists():
             cleanup_payload = json.loads(record.read_text(encoding="utf-8"))

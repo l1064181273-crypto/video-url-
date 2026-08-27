@@ -28,6 +28,7 @@ from publish_install import (  # noqa: E402
     ActivationHandle,
     FirstInstallPublisher,
     PublishError,
+    path_identity,
     tree_identity,
 )
 from transaction_journal import TransactionJournal  # noqa: E402
@@ -102,6 +103,22 @@ def _publisher(
     )
 
 
+def _assert_only_journaled_publication_artifacts(
+    publisher: FirstInstallPublisher,
+) -> None:
+    latest = publisher.journal.read_latest()
+    assert latest is not None
+    for component in ("current", "extension"):
+        known = (
+            latest.payload["identities"][component]["old"],
+            latest.payload["identities"][component]["new"],
+            {"kind": "absent"},
+        )
+        for path in publisher._paths(component):
+            assert path_identity(path, component) in known
+    publisher._validate_retained_extension_quarantines()
+
+
 def test_first_publish_has_strict_phase_switch_commit_activate_order(tmp_path: Path) -> None:
     services = FakeServices()
     publisher = _publisher(tmp_path, services)
@@ -125,7 +142,9 @@ def test_first_publish_has_strict_phase_switch_commit_activate_order(tmp_path: P
     assert not publisher.extension_previous.exists()
 
 
-def test_runtime_failure_before_commit_restores_first_install_absence(tmp_path: Path) -> None:
+def test_runtime_failure_before_commit_retains_only_journaled_artifacts(
+    tmp_path: Path,
+) -> None:
     services = FakeServices(runtime_ok=False)
     publisher = _publisher(tmp_path, services)
 
@@ -134,8 +153,7 @@ def test_runtime_failure_before_commit_restores_first_install_absence(tmp_path: 
 
     assert services.activate_call_count == 0
     assert services.calls[-1] == "stop:candidate"
-    assert not publisher.current.exists() and not publisher.current.is_symlink()
-    assert not publisher.extension.exists()
+    _assert_only_journaled_publication_artifacts(publisher)
 
 
 class SimulatedCrash(BaseException):
@@ -232,7 +250,7 @@ class ForkedPrecommitServices(FakeServices):
         "after_live_parent_fsync",
     ],
 )
-def test_switch_failpoints_recover_without_false_corruption(
+def test_switch_failpoints_recover_to_journaled_retained_state(
     tmp_path: Path,
     component: str,
     boundary: str,
@@ -258,15 +276,14 @@ def test_switch_failpoints_recover_without_false_corruption(
     recovered.reconcile(lock_held=True)
     recovered.reconcile(lock_held=True)
 
-    assert not recovered.current.exists() and not recovered.current.is_symlink()
-    assert not recovered.extension.exists()
+    _assert_only_journaled_publication_artifacts(recovered)
 
 
 @pytest.mark.parametrize(
     "boundary",
     ["before_next_file_fsync", "after_next_file_fsync"],
 )
-def test_extension_file_fsync_failpoints_recover_to_absence(
+def test_extension_file_fsync_failpoints_recover_without_partial_artifacts(
     tmp_path: Path,
     boundary: str,
 ) -> None:
@@ -289,8 +306,7 @@ def test_extension_file_fsync_failpoints_recover_to_absence(
         services=FakeServices(),
     )
     recovered.reconcile(lock_held=True)
-    assert not recovered.current.exists() and not recovered.current.is_symlink()
-    assert not recovered.extension.exists()
+    _assert_only_journaled_publication_artifacts(recovered)
 
 
 @pytest.mark.parametrize(
@@ -353,8 +369,7 @@ def test_commit_failpoints_never_activate_before_double_reopen(
         assert recovered.journal.verify_critical("ACTIVATED")
     else:
         assert recovered_services.activate_call_count == 0
-        assert not recovered.current.exists() and not recovered.current.is_symlink()
-        assert not recovered.extension.exists()
+        _assert_only_journaled_publication_artifacts(recovered)
 
 
 @pytest.mark.parametrize("damaged", ["slot-a.json", "slot-b.json"])
@@ -467,14 +482,28 @@ def test_live_next_previous_matrix_converges_idempotently(
     put(publisher.extension_next, next_value, "extension")
     put(publisher.extension_previous, previous, "extension")
 
+    source_replacement_required = (committed and live == "old") or (
+        not committed and expected == "old" and live == "new"
+    )
+    if source_replacement_required:
+        first_snapshot = publisher.filesystem_snapshot()
+        for _ in range(2):
+            with pytest.raises(PublishError):
+                latest = publisher.journal.read_latest()
+                publisher.converge_payload(
+                    payload if latest is None else latest.payload,
+                    committed=committed,
+                )
+        assert publisher.filesystem_snapshot() == first_snapshot
+        return
+
     publisher.converge_payload(payload, committed=committed)
     first_snapshot = publisher.filesystem_snapshot()
     publisher.converge_payload(payload, committed=committed)
 
     assert publisher.filesystem_snapshot() == first_snapshot
     if expected == "absent":
-        assert not publisher.current.exists() and not publisher.current.is_symlink()
-        assert not publisher.extension.exists()
+        _assert_only_journaled_publication_artifacts(publisher)
     elif expected == "old":
         assert os.readlink(publisher.current) == "releases/old"
         assert tree_identity(publisher.extension) == payload["identities"]["extension"]["old"]
@@ -973,14 +1002,14 @@ def test_extension_staging_sigkill_never_leaves_partial_next(
         recovered.reconcile(lock_held=True)
         recovered.reconcile(lock_held=True)
 
-        assert not recovered.current.exists() and not recovered.current.is_symlink()
-        assert not recovered.extension.exists()
-        assert not recovered.extension_next.exists()
-        assert not list(data_root.glob("extension.next.candidate-*"))
+        _assert_only_journaled_publication_artifacts(recovered)
         assert not list(data_root.glob("extension.next.candidate-*.owner"))
-        assert not list(data_root.glob(".extension.next.bootstrap-*"))
-        assert not list(data_root.glob(".extension.next.tombstone-*"))
-        retained = list(data_root.glob(".extension.next.deleting-*"))
+        retained = [
+            *data_root.glob("extension.next.candidate-*"),
+            *data_root.glob(".extension.next.bootstrap-*"),
+            *data_root.glob(".extension.next.tombstone-*"),
+            *data_root.glob(".extension.next.deleting-*"),
+        ]
         assert len(retained) == 1
         assert recovered._extension_candidate_is_owned(
             recovered.journal.read_latest().payload,  # type: ignore[union-attr]
@@ -1084,9 +1113,17 @@ def test_extension_candidate_recovery_rejects_mismatched_owner_identity(
 
 def test_extension_candidate_removal_claim_preserves_foreign_replacement(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    publisher = _publisher(tmp_path, FakeServices())
+    before_claim = threading.Barrier(2)
+    resume = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def failpoint(name: str) -> None:
+        if name == "extension-candidate:before_tombstone_claim":
+            before_claim.wait(timeout=5)
+            resume.wait(timeout=5)
+
+    publisher = _publisher(tmp_path, FakeServices(), failpoint=failpoint)
     payload = publisher.prepare_payload()
     publisher.journal.write_progress(payload)
     candidate = publisher._extension_candidate_paths(payload)[0]
@@ -1098,28 +1135,114 @@ def test_extension_candidate_removal_claim_preserves_foreign_replacement(
     replacement.mkdir()
     foreign = replacement / "untrusted"
     foreign.write_text("external\n", encoding="utf-8")
-    original_rename = publish_install._rename_directory_exclusive
+    foreign_before = foreign.stat()
 
-    def replace_before_claim(source: Path, destination: Path) -> None:
-        if source == candidate:
-            candidate.rename(displaced)
-            replacement.rename(candidate)
-        original_rename(source, destination)
+    def remove() -> None:
+        try:
+            publisher._remove_owned_extension_candidate(payload)
+        except BaseException as exc:
+            errors.append(exc)
 
-    monkeypatch.setattr(
-        publish_install,
-        "_rename_directory_exclusive",
-        replace_before_claim,
+    worker = threading.Thread(target=remove)
+    worker.start()
+    before_claim.wait(timeout=5)
+    candidate.rename(displaced)
+    replacement.rename(candidate)
+    resume.wait(timeout=5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], PublishError)
+    preserved = candidate / "untrusted"
+    foreign_after = preserved.stat()
+    assert (foreign_after.st_dev, foreign_after.st_ino) == (
+        foreign_before.st_dev,
+        foreign_before.st_ino,
     )
-
-    with pytest.raises(PublishError, match="ownership changed during tombstone claim"):
-        publisher._remove_owned_extension_candidate(payload)
-
-    retained_foreign = publisher._extension_tombstone_path(payload)
-    assert retained_foreign.is_dir()
-    assert (retained_foreign / "untrusted").read_text(encoding="utf-8") == "external\n"
+    assert preserved.read_text(encoding="utf-8") == "external\n"
     assert displaced.is_dir()
     assert (displaced / "owned").read_text(encoding="utf-8") == "owned\n"
+
+
+def test_remove_known_preserves_source_replacement_at_original_name(
+    tmp_path: Path,
+) -> None:
+    before_claim = threading.Barrier(2)
+    resume = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def failpoint(name: str) -> None:
+        if name == "retained:extension:before_source_check":
+            before_claim.wait(timeout=5)
+            resume.wait(timeout=5)
+
+    publisher = _publisher(tmp_path, FakeServices(), failpoint=failpoint)
+    payload = publisher.prepare_payload()
+    previous = publisher.extension_previous
+    displaced = previous.parent / "displaced-owned-previous"
+    replacement = previous.parent / "foreign-previous"
+    previous.mkdir()
+    (previous / "owned").write_text("owned\n", encoding="utf-8")
+    identity = tree_identity(previous)
+    replacement.mkdir()
+    foreign = replacement / "untrusted"
+    foreign.write_text("external\n", encoding="utf-8")
+    foreign_before = foreign.stat()
+
+    def retain() -> None:
+        try:
+            publisher._remove_known(
+                previous,
+                "extension",
+                (identity, {"kind": "absent"}),
+                payload,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=retain)
+    worker.start()
+    before_claim.wait(timeout=5)
+    previous.rename(displaced)
+    replacement.rename(previous)
+    resume.wait(timeout=5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], PublishError)
+    preserved = previous / "untrusted"
+    foreign_after = preserved.stat()
+    assert (foreign_after.st_dev, foreign_after.st_ino) == (
+        foreign_before.st_dev,
+        foreign_before.st_ino,
+    )
+    assert preserved.read_text(encoding="utf-8") == "external\n"
+    assert (displaced / "owned").read_text(encoding="utf-8") == "owned\n"
+
+
+def test_extension_candidate_is_retained_at_original_name(tmp_path: Path) -> None:
+    publisher = _publisher(tmp_path, FakeServices())
+    payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
+    candidate = publisher._extension_candidate_paths(payload)[0]
+    candidate.mkdir(mode=0o700)
+    publisher._write_extension_candidate_owner(candidate, payload)
+    nested = candidate / "payload/nested"
+    nested.mkdir(parents=True)
+    content = nested / "asset.js"
+    content.write_text("owned-content\n", encoding="utf-8")
+    before = content.stat()
+
+    publisher._remove_owned_extension_candidate(payload)
+
+    after = content.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert content.read_text(encoding="utf-8") == "owned-content\n"
+    assert (candidate / ".owner.json").is_file()
+    assert not publisher._extension_tombstone_path(payload).exists()
+    assert not publisher._extension_deletion_path(payload).exists()
 
 
 def test_retained_quarantine_never_deletes_claimed_contents(tmp_path: Path) -> None:
@@ -1137,7 +1260,7 @@ def test_retained_quarantine_never_deletes_claimed_contents(tmp_path: Path) -> N
 
     publisher._remove_owned_extension_candidate(payload)
 
-    retained = publisher._extension_deletion_path(payload)
+    retained = candidate
     preserved = retained / "payload/nested/asset.js"
     after = preserved.stat()
     assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
@@ -1159,7 +1282,6 @@ def test_post_claim_name_swap_preserves_foreign_inode_and_content(tmp_path: Path
     payload = publisher.prepare_payload()
     publisher.journal.write_progress(payload)
     candidate = publisher._extension_candidate_paths(payload)[0]
-    deletion = publisher._extension_deletion_path(payload)
     displaced = publisher.data_root / "displaced-retained-quarantine"
     replacement = publisher.data_root / "foreign-replacement"
     candidate.mkdir(mode=0o700)
@@ -1179,15 +1301,15 @@ def test_post_claim_name_swap_preserves_foreign_inode_and_content(tmp_path: Path
     worker = threading.Thread(target=remove)
     worker.start()
     claimed.wait(timeout=5)
-    deletion.rename(displaced)
-    replacement.rename(deletion)
+    candidate.rename(displaced)
+    replacement.rename(candidate)
     resume.wait(timeout=5)
     worker.join(timeout=5)
 
     assert not worker.is_alive()
     assert len(errors) == 1
     assert isinstance(errors[0], PublishError)
-    preserved = deletion / "untrusted"
+    preserved = candidate / "untrusted"
     foreign_after = preserved.stat()
     assert (foreign_after.st_dev, foreign_after.st_ino) == (
         foreign_before.st_dev,

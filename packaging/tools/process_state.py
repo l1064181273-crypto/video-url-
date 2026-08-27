@@ -75,6 +75,19 @@ class ClaimedRecord:
         os.close(self.parent_descriptor)
 
 
+@dataclass
+class RecordEntry:
+    generation: int
+    name: str
+    payload: dict[str, Any]
+    descriptor: int
+    metadata: os.stat_result
+    retained: bool
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+
+
 class ServiceOperations(Protocol):
     def reconcile(self) -> None: ...
 
@@ -540,7 +553,10 @@ def _entry_is_absent(parent_descriptor: int, name: str) -> bool:
     try:
         descriptor = os.open(
             name,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
             dir_fd=parent_descriptor,
         )
     except OSError as exc:
@@ -569,7 +585,10 @@ def _open_record_at(
     try:
         descriptor = os.open(
             name,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
             dir_fd=parent_descriptor,
         )
     except OSError:
@@ -675,18 +694,128 @@ def _open_record_at(
             os.close(descriptor)
 
 
+def _scan_record_entries(
+    parent_descriptor: int,
+    base_name: str,
+    kind: str,
+    port: int,
+) -> tuple[list[RecordEntry], list[RecordEntry]]:
+    generation_prefix = f".{base_name}.generation-"
+    claim_prefix = f".{base_name}.claim-"
+    temporary_prefix = f".{base_name}.tmp-"
+    names = os.listdir(parent_descriptor)
+    if any(name.startswith(temporary_prefix) for name in names):
+        raise ServiceError("service ownership record temporary is unverified")
+    public_names = [
+        name for name in names if name == base_name or name.startswith(generation_prefix)
+    ]
+    claim_names = [name for name in names if name.startswith(claim_prefix)]
+    records: list[RecordEntry] = []
+    claims: list[RecordEntry] = []
+    try:
+        for name, retained in (
+            *((name, False) for name in public_names),
+            *((name, True) for name in claim_names),
+        ):
+            opened = _open_record_at(parent_descriptor, name, kind, port)
+            if opened is None:
+                raise ServiceError(
+                    f"{kind} {'claimed ' if retained else ''}ownership record is unverified"
+                )
+            payload, descriptor, metadata = opened
+            generation = int(payload.get("record_generation", 1))
+            nonce = str(payload["nonce"])
+            if name.startswith(generation_prefix) and name != (
+                f"{generation_prefix}{nonce}-{generation:020d}"
+            ):
+                os.close(descriptor)
+                raise ServiceError(f"{kind} ownership record generation name is invalid")
+            if name.startswith(claim_prefix):
+                encoded_generation = name.removeprefix(claim_prefix).split("-", 1)[0]
+                if encoded_generation != f"{generation:020d}":
+                    os.close(descriptor)
+                    raise ServiceError(f"{kind} claimed ownership generation is invalid")
+            entry = RecordEntry(generation, name, payload, descriptor, metadata, retained)
+            (claims if retained else records).append(entry)
+        seen: set[tuple[str, int]] = set()
+        for entry in [*records, *claims]:
+            key = (str(entry.payload["nonce"]), entry.generation)
+            if key in seen:
+                raise ServiceError(f"{kind} ownership record generation is duplicate")
+            seen.add(key)
+        return records, claims
+    except Exception:
+        for entry in [*records, *claims]:
+            with suppress(OSError):
+                entry.close()
+        raise
+
+
+def _close_record_entries(entries: list[RecordEntry], *, except_fd: int = -1) -> None:
+    for entry in entries:
+        if entry.descriptor != except_fd:
+            with suppress(OSError):
+                entry.close()
+
+
+def _select_record_entry(
+    records: list[RecordEntry],
+    claims: list[RecordEntry],
+    kind: str,
+    *,
+    preferred_nonce: str | None = None,
+) -> RecordEntry | None:
+    newest_record_by_nonce: dict[str, RecordEntry] = {}
+    newest_claim_by_nonce: dict[str, RecordEntry] = {}
+    for entry, destination in (
+        *((entry, newest_record_by_nonce) for entry in records),
+        *((entry, newest_claim_by_nonce) for entry in claims),
+    ):
+        nonce = str(entry.payload["nonce"])
+        previous = destination.get(nonce)
+        if previous is None or entry.generation > previous.generation:
+            destination[nonce] = entry
+    for nonce, record in newest_record_by_nonce.items():
+        claim = newest_claim_by_nonce.get(nonce)
+        if claim is not None and record.generation <= claim.generation:
+            raise ServiceError(f"{kind} ownership record generation rolled back")
+    newest_by_nonce = dict(newest_claim_by_nonce)
+    newest_by_nonce.update(newest_record_by_nonce)
+    if not newest_by_nonce:
+        return None
+    active: list[RecordEntry] = []
+    for entry in newest_by_nonce.values():
+        members = _verified_record_members_eventually(entry.payload)
+        if members is None:
+            raise ServiceError(f"{kind} ownership record is unverified")
+        if members:
+            active.append(entry)
+    if len(active) > 1:
+        raise ServiceError(f"{kind} ownership record generation is ambiguous")
+    if active:
+        return active[0]
+    if preferred_nonce is not None and preferred_nonce in newest_by_nonce:
+        return newest_by_nonce[preferred_nonce]
+    return max(
+        newest_by_nonce.values(),
+        key=lambda entry: (entry.generation, str(entry.payload["nonce"])),
+    )
+
+
 def _read_record_payload(path: Path, kind: str, port: int) -> dict[str, Any] | None:
     try:
         parent_descriptor = _open_record_parent(path)
     except (OSError, ServiceError):
         return None
     try:
-        opened = _open_record_at(parent_descriptor, path.name, kind, port)
-        if opened is None:
-            return None
-        payload, descriptor, _metadata = opened
-        os.close(descriptor)
-        return payload
+        records, claims = _scan_record_entries(parent_descriptor, path.name, kind, port)
+        try:
+            selected = _select_record_entry(records, claims, kind)
+            return None if selected is None else selected.payload
+        finally:
+            _close_record_entries([*records, *claims])
+    except ServiceError:
+        return None
     finally:
         os.close(parent_descriptor)
 
@@ -973,38 +1102,6 @@ def _http_health(port: int, path: str, key: str, value: str) -> bool:
         connection.close()
 
 
-def _rename_entry_exclusive(
-    parent_descriptor: int,
-    source_name: str,
-    destination_name: str,
-) -> None:
-    try:
-        system = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-        renameatx_np = system.renameatx_np
-    except (AttributeError, OSError) as exc:
-        raise ServiceError("exclusive ownership record rename is unavailable") from exc
-    renameatx_np.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameatx_np.restype = ctypes.c_int
-    if (
-        renameatx_np(
-            parent_descriptor,
-            os.fsencode(source_name),
-            parent_descriptor,
-            os.fsencode(destination_name),
-            0x00000004,
-        )
-        != 0
-    ):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), destination_name)
-
-
 def _open_record_lock(parent_descriptor: int) -> int:
     descriptor = os.open(
         ".service-record.lock",
@@ -1025,6 +1122,10 @@ def _open_record_lock(parent_descriptor: int) -> int:
     return descriptor
 
 
+def _record_boundary(_name: str) -> None:
+    return
+
+
 def _write_record(
     path: Path,
     payload: dict[str, Any],
@@ -1042,116 +1143,101 @@ def _write_record(
     except Exception:
         os.close(owned_parent_descriptor)
         raise
-    temporary_name = f".{path.name}.tmp-{uuid.uuid4().hex}"
+    entries: list[RecordEntry] = []
     try:
-        descriptor = os.open(
-            temporary_name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=owned_parent_descriptor,
-        )
-    except Exception:
-        os.close(lock_descriptor)
-        os.close(owned_parent_descriptor)
-        raise
-    try:
-        view = memoryview(encoded)
-        while view:
-            written = os.write(descriptor, view)
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        existing = _open_record_at(
+        records, claims = _scan_record_entries(
             owned_parent_descriptor,
             path.name,
             str(payload["kind"]),
             int(payload["port"]),
         )
-        if existing is None:
-            if not _entry_is_absent(owned_parent_descriptor, path.name):
-                raise ServiceError("service ownership record is unverified")
-            claim_names = [
-                name
-                for name in os.listdir(owned_parent_descriptor)
-                if name.startswith(f".{path.name}.claim-")
-            ]
-            if claim_names:
-                claim_payloads: list[dict[str, Any]] = []
-                for claim_name in claim_names:
-                    claim = _open_record_at(
-                        owned_parent_descriptor,
-                        claim_name,
-                        str(payload["kind"]),
-                        int(payload["port"]),
-                    )
-                    if claim is None:
-                        raise ServiceError("service ownership record publication is blocked")
-                    claim_payload, claim_descriptor, _claim_metadata = claim
-                    os.close(claim_descriptor)
-                    claim_payloads.append(claim_payload)
-                matching = [
-                    claim for claim in claim_payloads if claim["nonce"] == payload.get("nonce")
-                ]
-                continuing_generation = (
-                    max(int(claim.get("record_generation", 1)) for claim in matching) + 1
-                    if matching
-                    else None
-                )
-                stale_claims_converged = all(
-                    _verified_record_members(claim) == () for claim in claim_payloads
-                )
-                if not (
-                    payload.get("record_generation") == continuing_generation
-                    or (
-                        payload.get("record_generation") == 1
-                        and not matching
-                        and stale_claims_converged
-                    )
-                ):
-                    raise ServiceError("service ownership record publication is blocked")
-            elif payload.get("record_generation") != 1:
-                raise ServiceError("service ownership record publication is blocked")
+        entries = [*records, *claims]
+        generation = payload.get("record_generation")
+        if type(generation) is not int or generation <= 0:
+            raise ServiceError("service ownership record generation is invalid")
+        nonce = str(payload["nonce"])
+        matching = [entry for entry in entries if entry.payload["nonce"] == nonce]
+        if matching:
+            newest = max(matching, key=lambda entry: entry.generation)
+            if generation != newest.generation + 1:
+                raise ServiceError("service ownership record generation changed")
         else:
-            current, current_descriptor, current_metadata = existing
+            if generation != 1:
+                raise ServiceError("service ownership record publication is blocked")
+            for entry in entries:
+                if _verified_record_members(entry.payload) != ():
+                    raise ServiceError("service ownership record publication is blocked")
+            newest = None
+        if newest is not None:
+            _record_boundary("write:before_source_check")
+            reopened = _open_record_at(
+                owned_parent_descriptor,
+                newest.name,
+                str(payload["kind"]),
+                int(payload["port"]),
+            )
+            if reopened is None:
+                raise ServiceError("service ownership record changed before publication")
+            reopened_payload, reopened_descriptor, reopened_metadata = reopened
             try:
-                if current["nonce"] != payload.get("nonce") or current.get(
-                    "record_generation", 1
-                ) + 1 != payload.get("record_generation"):
-                    raise ServiceError("service ownership record generation changed")
-                claim_name = (
-                    f".{path.name}.claim-"
-                    f"{current.get('record_generation', 1):020d}-{uuid.uuid4().hex}"
-                )
-                _rename_entry_exclusive(owned_parent_descriptor, path.name, claim_name)
-                claimed = _open_record_at(
-                    owned_parent_descriptor,
-                    claim_name,
-                    str(payload["kind"]),
-                    int(payload["port"]),
-                )
-                if claimed is None:
-                    raise ServiceError("service ownership record claim is unverified")
-                claimed_payload, claimed_descriptor, claimed_metadata = claimed
-                try:
-                    if (
-                        claimed_payload != current
-                        or claimed_metadata.st_dev != current_metadata.st_dev
-                        or claimed_metadata.st_ino != current_metadata.st_ino
-                    ):
-                        raise ServiceError("service ownership record changed during claim")
-                finally:
-                    os.close(claimed_descriptor)
+                if (
+                    reopened_payload != newest.payload
+                    or reopened_metadata.st_dev != newest.metadata.st_dev
+                    or reopened_metadata.st_ino != newest.metadata.st_ino
+                ):
+                    raise ServiceError("service ownership record changed before publication")
             finally:
-                os.close(current_descriptor)
-        _rename_entry_exclusive(owned_parent_descriptor, temporary_name, path.name)
+                os.close(reopened_descriptor)
+        target_name = (
+            path.name
+            if not entries and _entry_is_absent(owned_parent_descriptor, path.name)
+            else f".{path.name}.generation-{nonce}-{generation:020d}"
+        )
+        _record_boundary("write:before_destination_publish")
+        try:
+            descriptor = os.open(
+                target_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                0o600,
+                dir_fd=owned_parent_descriptor,
+            )
+        except FileExistsError as exc:
+            raise ServiceError("service ownership record publication is blocked") from exc
+        try:
+            published_metadata = os.fstat(descriptor)
+            view = memoryview(encoded)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         os.fsync(owned_parent_descriptor)
+        published = _open_record_at(
+            owned_parent_descriptor,
+            target_name,
+            str(payload["kind"]),
+            int(payload["port"]),
+        )
+        if published is None:
+            raise ServiceError("service ownership record publication is unverified")
+        published_payload, published_descriptor, published_final_metadata = published
+        try:
+            if (
+                published_payload != payload
+                or published_final_metadata.st_dev != published_metadata.st_dev
+                or published_final_metadata.st_ino != published_metadata.st_ino
+            ):
+                raise ServiceError("service ownership record publication changed")
+        finally:
+            os.close(published_descriptor)
     finally:
+        _close_record_entries(entries)
         os.close(lock_descriptor)
         os.close(owned_parent_descriptor)
 
@@ -1447,20 +1533,31 @@ class SystemServiceOperations:
 
     def _open_current_record(self, kind: str) -> ClaimedRecord | None:
         parent_descriptor = self._trusted_runtime_parent()
-        opened = _open_record_at(
-            parent_descriptor,
-            f"{kind}.pid",
-            kind,
-            self._port(kind),
-        )
-        if opened is None:
-            if _entry_is_absent(parent_descriptor, f"{kind}.pid"):
+        entries: list[RecordEntry] = []
+        try:
+            records, claims = _scan_record_entries(
+                parent_descriptor,
+                f"{kind}.pid",
+                kind,
+                self._port(kind),
+            )
+            entries = [*records, *claims]
+            selected = _select_record_entry(records, claims, kind)
+            if selected is None:
                 os.close(parent_descriptor)
                 return None
-            os.close(parent_descriptor)
-            raise ServiceError(f"{kind} service ownership is unverified")
-        payload, descriptor, _metadata = opened
-        return ClaimedRecord(parent_descriptor, descriptor, f"{kind}.pid", payload)
+            _close_record_entries(entries, except_fd=selected.descriptor)
+            return ClaimedRecord(
+                parent_descriptor,
+                selected.descriptor,
+                selected.name,
+                selected.payload,
+            )
+        except Exception:
+            _close_record_entries(entries)
+            with suppress(OSError):
+                os.close(parent_descriptor)
+            raise
 
     def _existing_claim(
         self,
@@ -1469,63 +1566,33 @@ class SystemServiceOperations:
         preferred_nonce: str | None = None,
     ) -> ClaimedRecord | None:
         parent_descriptor = self._trusted_runtime_parent()
-        prefix = f".{kind}.pid.claim-"
-        opened_claims: list[tuple[int, str, dict[str, Any], int]] = []
+        entries: list[RecordEntry] = []
         try:
-            for name in os.listdir(parent_descriptor):
-                if not name.startswith(prefix):
-                    continue
-                opened = _open_record_at(parent_descriptor, name, kind, self._port(kind))
-                if opened is None:
-                    raise ServiceError(f"{kind} claimed ownership record is unverified")
-                payload, descriptor, _metadata = opened
-                opened_claims.append(
-                    (int(payload.get("record_generation", 1)), name, payload, descriptor)
-                )
-            if not opened_claims:
+            records, claims = _scan_record_entries(
+                parent_descriptor,
+                f"{kind}.pid",
+                kind,
+                self._port(kind),
+            )
+            entries = [*records, *claims]
+            selected = _select_record_entry(
+                [],
+                claims,
+                kind,
+                preferred_nonce=preferred_nonce,
+            )
+            if selected is None:
                 os.close(parent_descriptor)
                 return None
-            newest_by_nonce: dict[
-                str,
-                tuple[int, str, dict[str, Any], int],
-            ] = {}
-            for candidate in opened_claims:
-                nonce = str(candidate[2]["nonce"])
-                previous = newest_by_nonce.get(nonce)
-                if previous is None or candidate[0] > previous[0]:
-                    newest_by_nonce[nonce] = candidate
-                elif candidate[0] == previous[0]:
-                    raise ServiceError(f"{kind} claimed ownership record is ambiguous")
-            active: list[tuple[int, str, dict[str, Any], int]] = []
-            for candidate in newest_by_nonce.values():
-                members = _verified_record_members_eventually(candidate[2])
-                if members is None:
-                    raise ServiceError(f"{kind} claimed ownership record is unverified")
-                if members:
-                    active.append(candidate)
-            if len(active) > 1:
-                raise ServiceError(f"{kind} claimed ownership record is ambiguous")
-            preferred = (
-                newest_by_nonce.get(preferred_nonce) if preferred_nonce is not None else None
+            _close_record_entries(entries, except_fd=selected.descriptor)
+            return ClaimedRecord(
+                parent_descriptor,
+                selected.descriptor,
+                selected.name,
+                selected.payload,
             )
-            generation, name, payload, descriptor = (
-                active[0]
-                if active
-                else (
-                    preferred
-                    if preferred is not None
-                    else max(newest_by_nonce.values(), key=lambda item: item[0])
-                )
-            )
-            del generation
-            for _generation, _name, _payload, other_descriptor in opened_claims:
-                if other_descriptor != descriptor:
-                    os.close(other_descriptor)
-            return ClaimedRecord(parent_descriptor, descriptor, name, payload)
         except Exception:
-            for _generation, _name, _payload, descriptor in opened_claims:
-                with suppress(OSError):
-                    os.close(descriptor)
+            _close_record_entries(entries)
             with suppress(OSError):
                 os.close(parent_descriptor)
             raise
@@ -1538,45 +1605,52 @@ class SystemServiceOperations:
     ) -> ClaimedRecord | None:
         parent_descriptor = self._trusted_runtime_parent()
         lock_descriptor = _open_record_lock(parent_descriptor)
+        entries: list[RecordEntry] = []
         try:
-            name = f"{kind}.pid"
-            opened = _open_record_at(parent_descriptor, name, kind, self._port(kind))
-            if opened is None:
-                if not _entry_is_absent(parent_descriptor, name):
-                    raise ServiceError(f"{kind} service ownership is unverified")
-                os.close(parent_descriptor)
-                return self._existing_claim(kind, preferred_nonce=preferred_nonce)
-            payload, descriptor, metadata = opened
-            claim_name = (
-                f".{name}.claim-{payload.get('record_generation', 1):020d}-{uuid.uuid4().hex}"
-            )
-            _rename_entry_exclusive(parent_descriptor, name, claim_name)
-            os.fsync(parent_descriptor)
-            claimed = _open_record_at(
+            records, claims = _scan_record_entries(
                 parent_descriptor,
-                claim_name,
+                f"{kind}.pid",
                 kind,
                 self._port(kind),
             )
-            if claimed is None:
-                os.close(descriptor)
+            entries = [*records, *claims]
+            selected = _select_record_entry(
+                records,
+                claims,
+                kind,
+                preferred_nonce=preferred_nonce,
+            )
+            if selected is None:
+                os.close(parent_descriptor)
+                return None
+            _record_boundary("claim:before_source_check")
+            reopened = _open_record_at(
+                parent_descriptor,
+                selected.name,
+                kind,
+                self._port(kind),
+            )
+            if reopened is None:
                 raise ServiceError(f"{kind} ownership changed during claim")
-            claimed_payload, claimed_descriptor, claimed_metadata = claimed
-            os.close(descriptor)
-            if (
-                claimed_payload != payload
-                or claimed_metadata.st_dev != metadata.st_dev
-                or claimed_metadata.st_ino != metadata.st_ino
-            ):
-                os.close(claimed_descriptor)
-                raise ServiceError(f"{kind} ownership changed during claim")
+            reopened_payload, reopened_descriptor, reopened_metadata = reopened
+            try:
+                if (
+                    reopened_payload != selected.payload
+                    or reopened_metadata.st_dev != selected.metadata.st_dev
+                    or reopened_metadata.st_ino != selected.metadata.st_ino
+                ):
+                    raise ServiceError(f"{kind} ownership changed during claim")
+            finally:
+                os.close(reopened_descriptor)
+            _close_record_entries(entries, except_fd=selected.descriptor)
             return ClaimedRecord(
                 parent_descriptor,
-                claimed_descriptor,
-                claim_name,
-                claimed_payload,
+                selected.descriptor,
+                selected.name,
+                selected.payload,
             )
         except Exception:
+            _close_record_entries(entries)
             os.close(parent_descriptor)
             raise
         finally:
@@ -1625,19 +1699,11 @@ class SystemServiceOperations:
         except ServiceError:
             return "unsafe"
         if record is None:
-            try:
-                claim = self._existing_claim(kind)
-            except ServiceError:
-                return "unsafe"
-            if claim is not None:
-                try:
-                    members = _verified_record_members_eventually(claim.payload)
-                    if members is None or members:
-                        return "unsafe"
-                finally:
-                    claim.close()
             return "unsafe" if _port_open(port) else "absent"
         try:
+            members = _verified_record_members_eventually(record.payload)
+            if members == () and not _port_open(port):
+                return "absent"
             verified = _verified_record_payload_eventually(record.payload, kind)
             return (
                 "owned"
