@@ -907,6 +907,7 @@ def test_real_publisher_sigkill_before_commit_never_releases_worker_barrier(
         "extension-copy:after_first_file",
         "extension-copy:after_middle_file",
         "extension-copy:before_complete",
+        "extension-candidate:after_tombstone_claim",
     ],
 )
 def test_extension_staging_sigkill_never_leaves_partial_next(
@@ -967,6 +968,7 @@ def test_extension_staging_sigkill_never_leaves_partial_next(
         assert not list(data_root.glob("extension.next.candidate-*"))
         assert not list(data_root.glob("extension.next.candidate-*.owner"))
         assert not list(data_root.glob(".extension.next.bootstrap-*"))
+        assert not list(data_root.glob(".extension.next.tombstone-*"))
     finally:
         os.close(marker_read)
         os.close(gate_write)
@@ -1061,6 +1063,45 @@ def test_extension_candidate_recovery_rejects_mismatched_owner_identity(
         publisher.reconcile(lock_held=True)
 
     assert foreign.read_text(encoding="utf-8") == "external\n"
+
+
+def test_extension_candidate_removal_claim_preserves_foreign_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = _publisher(tmp_path, FakeServices())
+    payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
+    candidate = publisher._extension_candidate_paths(payload)[0]
+    displaced = publisher.data_root / "displaced-owned-candidate"
+    replacement = publisher.data_root / "replacement"
+    candidate.mkdir(mode=0o700)
+    publisher._write_extension_candidate_owner(candidate, payload)
+    (candidate / "owned").write_text("owned\n", encoding="utf-8")
+    replacement.mkdir()
+    foreign = replacement / "untrusted"
+    foreign.write_text("external\n", encoding="utf-8")
+    original_rename = publish_install._rename_directory_exclusive
+
+    def replace_before_claim(source: Path, destination: Path) -> None:
+        if source == candidate:
+            candidate.rename(displaced)
+            replacement.rename(candidate)
+        original_rename(source, destination)
+
+    monkeypatch.setattr(
+        publish_install,
+        "_rename_directory_exclusive",
+        replace_before_claim,
+    )
+
+    with pytest.raises(PublishError, match="ownership changed during tombstone claim"):
+        publisher._remove_owned_extension_candidate(payload)
+
+    assert candidate.is_dir()
+    assert (candidate / "untrusted").read_text(encoding="utf-8") == "external\n"
+    assert displaced.is_dir()
+    assert (displaced / "owned").read_text(encoding="utf-8") == "owned\n"
 
 
 def test_stale_activation_handle_cannot_stop_second_service_generation(

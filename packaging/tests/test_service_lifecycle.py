@@ -382,7 +382,9 @@ def test_real_supervisor_record_is_generation_bound_and_stop_reaps_service(
             "port",
             "supervisor",
             "service",
+            "members",
         }
+        assert payload["members"][0] == payload["service"]
         assert payload["port"] == 8765
         assert record.stat().st_mode & 0o777 == 0o600
     finally:
@@ -456,6 +458,7 @@ def test_stale_or_reused_service_record_fails_closed_without_signal(
         payload["supervisor"]["pid"] = 999_999
     elif tamper == "executable":
         payload["supervisor"]["executable"]["sha256"] = "f" * 64
+    payload["members"] = [payload["service"]]
     record.write_text(json.dumps(payload), encoding="utf-8")
     record.chmod(0o600)
 
@@ -536,6 +539,7 @@ def test_ownership_record_parser_rejects_invalid_nested_snapshot_schema(
         "port": 8765,
         "supervisor": process_state._snapshot_payload(snapshot),
         "service": process_state._snapshot_payload(snapshot),
+        "members": [process_state._snapshot_payload(snapshot)],
     }
     if mutation == "extra_executable_field":
         payload["service"]["executable"]["unexpected"] = True
@@ -643,6 +647,97 @@ def test_reused_session_leader_pid_rejects_untracked_descendant_without_signal(
     assert signals == []
 
 
+@pytest.mark.parametrize("conflict", ["reused_member", "unknown_member"])
+def test_orphan_recovery_rejects_unverified_members_without_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    conflict: str,
+) -> None:
+    executable = tmp_path / "service"
+    executable.write_bytes(b"service")
+    supervisor = ProcessSnapshot(
+        700,
+        700,
+        "supervisor",
+        executable,
+        1,
+        2,
+        "a" * 64,
+        (1,) * 8,
+    )
+    member = ProcessSnapshot(
+        701,
+        700,
+        "member",
+        executable,
+        1,
+        2,
+        "a" * 64,
+        (2,) * 8,
+    )
+    replacement = ProcessSnapshot(
+        701 if conflict == "reused_member" else 702,
+        700,
+        "foreign",
+        executable,
+        1,
+        2,
+        "a" * 64,
+        (3,) * 8,
+    )
+    payload = {
+        "schema_version": 1,
+        "kind": "backend",
+        "nonce": "a" * 32,
+        "port": 8765,
+        "supervisor": process_state._snapshot_payload(supervisor),
+        "service": process_state._snapshot_payload(member),
+        "members": [process_state._snapshot_payload(member)],
+    }
+    live = (
+        {member.pid: replacement}
+        if conflict == "reused_member"
+        else {member.pid: member, replacement.pid: replacement}
+    )
+    signals: list[int] = []
+    monkeypatch.setattr(process_state, "_snapshot", lambda pid: live.get(pid))
+    monkeypatch.setattr(
+        process_state,
+        "_group_snapshots",
+        lambda _pgid: tuple(live.values()),
+    )
+    monkeypatch.setattr(process_state, "_token_is_live", lambda _snapshot: True)
+    monkeypatch.setattr(
+        process_state,
+        "_signal_snapshot",
+        lambda snapshot, _requested: signals.append(snapshot.pid) or True,
+    )
+    operations = _system_operations(tmp_path)
+
+    with pytest.raises(ServiceError, match="ownership is unverified"):
+        operations._stop_recorded_members("backend", payload)
+
+    assert signals == []
+
+
+def test_converged_cleanup_accepts_record_removed_by_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    payload: dict[str, object] = {}
+    monkeypatch.setattr(process_state, "_verified_record_members", lambda _payload: ())
+    monkeypatch.setattr(process_state, "_port_open", lambda _port: False)
+
+    operations._remove_converged_record(record, "backend", payload)
+
+    record.write_text("{}\n", encoding="utf-8")
+    record.chmod(0o600)
+    with pytest.raises(ServiceError, match="record changed"):
+        operations._remove_converged_record(record, "backend", payload)
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
 def test_lifecycle_start_record_is_accepted_by_runtime_full_ownership_validation(
     tmp_path: Path,
@@ -691,6 +786,115 @@ def test_supervisor_sigkill_is_reconciled_without_orphaning_service(
     finally:
         for snapshot in (service_snapshot, supervisor_snapshot):
             if snapshot is not None and process_state._token_is_live(snapshot):
+                process_state._signal_snapshot(snapshot, signal.SIGKILL)
+                with suppress(ChildProcessError):
+                    os.waitpid(snapshot.pid, 0)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+def test_reconcile_reaps_recorded_descendant_after_leader_and_supervisor_exit(
+    tmp_path: Path,
+) -> None:
+    base = _system_operations(tmp_path)
+    descendant_path = tmp_path / "descendant.pid"
+    release_path = tmp_path / "release-leader"
+
+    class DetachedDescendantOperations(FixtureSystemOperations):
+        def _service_command(self, kind: str) -> tuple[list[str], dict[str, str]]:
+            assert kind == "backend"
+            script = (
+                "import http.server,json,os,signal,sys,threading;"
+                "descendant=os.fork();"
+                "\nif descendant==0:"
+                "\n signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                "open(sys.argv[1],'w').write(str(os.getpid()));signal.pause()"
+                "\nelse:"
+                "\n H=type('H',(http.server.BaseHTTPRequestHandler,),{"
+                "'do_GET':lambda s:(s.send_response(200),s.send_header('Content-Type',"
+                "'application/json'),s.end_headers(),s.wfile.write("
+                "json.dumps({'status':'healthy'}).encode())),"
+                "'log_message':lambda *a:None});"
+                "server=http.server.HTTPServer(('127.0.0.1',8765),H);"
+                "threading.Thread(target=server.serve_forever,daemon=True).start();"
+                "\n while not os.path.exists(sys.argv[2]):"
+                "\n  threading.Event().wait(0.01)"
+            )
+            return [
+                sys.executable,
+                "-c",
+                script,
+                str(descendant_path),
+                str(release_path),
+            ], {
+                "HOME": os.environ.get("HOME", "/"),
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            }
+
+    operations = DetachedDescendantOperations(
+        base.data_root,
+        base.release_root,
+        terminate_grace=5,
+        kill_wait=1,
+    )
+    record = operations.data_root / "runtime/backend.pid"
+    snapshots: list[ProcessSnapshot] = []
+    operations.launch("backend")
+    try:
+        descendant_pid = int(descendant_path.read_text(encoding="ascii"))
+        for _ in range(500):
+            payload = json.loads(record.read_text(encoding="utf-8"))
+            members = payload.get("members", [])
+            if any(member.get("pid") == descendant_pid for member in members):
+                break
+            threading.Event().wait(0.01)
+        else:
+            pytest.fail("descendant identity was not persisted")
+
+        supervisor_snapshot = process_state._snapshot(payload["supervisor"]["pid"])
+        leader_snapshot = process_state._snapshot(payload["service"]["pid"])
+        descendant_snapshot = process_state._snapshot(descendant_pid)
+        snapshots = [
+            snapshot
+            for snapshot in (supervisor_snapshot, leader_snapshot, descendant_snapshot)
+            if snapshot is not None
+        ]
+        assert supervisor_snapshot is not None
+        assert leader_snapshot is not None
+        assert descendant_snapshot is not None
+
+        release_path.write_text("exit\n", encoding="ascii")
+        for _ in range(500):
+            if not process_state._token_is_live(leader_snapshot):
+                break
+            threading.Event().wait(0.01)
+        assert not process_state._token_is_live(leader_snapshot)
+        assert process_state._token_is_live(descendant_snapshot)
+        assert record.exists()
+
+        assert process_state._signal_snapshot(supervisor_snapshot, signal.SIGKILL)
+        os.waitpid(supervisor_snapshot.pid, 0)
+        assert process_state._token_is_live(descendant_snapshot)
+        assert record.exists()
+
+        operations.reconcile()
+
+        assert not process_state._token_is_live(descendant_snapshot)
+        assert not record.exists()
+    finally:
+        if record.exists():
+            cleanup_payload = json.loads(record.read_text(encoding="utf-8"))
+            cleanup_entries = [
+                cleanup_payload.get("supervisor"),
+                cleanup_payload.get("service"),
+                *cleanup_payload.get("members", []),
+            ]
+            for entry in cleanup_entries:
+                if isinstance(entry, dict):
+                    snapshot = process_state._snapshot(entry.get("pid", -1))
+                    if snapshot is not None and snapshot not in snapshots:
+                        snapshots.append(snapshot)
+        for snapshot in snapshots:
+            if process_state._token_is_live(snapshot):
                 process_state._signal_snapshot(snapshot, signal.SIGKILL)
                 with suppress(ChildProcessError):
                     os.waitpid(snapshot.pid, 0)

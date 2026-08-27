@@ -667,13 +667,19 @@ class FirstInstallPublisher:
     def _reconcile_extension_candidate(self, payload: dict[str, Any]) -> dict[str, Any]:
         candidate, _owner = self._extension_candidate_paths(payload)
         bootstrap = self._extension_bootstrap_path(payload)
+        tombstone = self._extension_tombstone_path(payload)
         expected = {candidate}
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
-        if observed - expected or observed_bootstraps - {bootstrap}:
+        observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
+        if (
+            observed - expected
+            or observed_bootstraps - {bootstrap}
+            or observed_tombstones - {tombstone}
+        ):
             raise PublishError("unknown extension staging candidate exists")
         owned_paths = [
-            path for path in (candidate, bootstrap) if path.exists() or path.is_symlink()
+            path for path in (candidate, bootstrap, tombstone) if path.exists() or path.is_symlink()
         ]
         if owned_paths:
             if len(owned_paths) != 1 or not self._extension_candidate_is_owned(
@@ -696,11 +702,21 @@ class FirstInstallPublisher:
     def _extension_bootstrap_path(self, payload: dict[str, Any]) -> Path:
         return self.data_root / f".extension.next.bootstrap-{payload['transaction_id']}"
 
+    def _extension_tombstone_path(self, payload: dict[str, Any]) -> Path:
+        return self.data_root / f".extension.next.tombstone-{payload['transaction_id']}"
+
     def _validate_extension_candidate_namespace(self, payload: dict[str, Any]) -> None:
         candidate, _owner = self._extension_candidate_paths(payload)
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
-        if observed or observed_bootstraps or candidate.exists() or candidate.is_symlink():
+        observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
+        if (
+            observed
+            or observed_bootstraps
+            or observed_tombstones
+            or candidate.exists()
+            or candidate.is_symlink()
+        ):
             raise PublishError("extension staging namespace is occupied")
 
     def _extension_candidate_is_owned(
@@ -719,10 +735,6 @@ class FirstInstallPublisher:
             return False
         os.close(descriptor)
         return True
-
-    def _open_owned_extension_candidate(self, payload: dict[str, Any]) -> int:
-        candidate, owner = self._extension_candidate_paths(payload)
-        return self._open_owned_extension_candidate_at(candidate, owner.name, payload)
 
     def _open_owned_extension_candidate_at(
         self,
@@ -790,7 +802,19 @@ class FirstInstallPublisher:
     def _remove_owned_extension_candidate(self, payload: dict[str, Any]) -> None:
         candidate, _owner = self._extension_candidate_paths(payload)
         bootstrap = self._extension_bootstrap_path(payload)
-        existing = [path for path in (candidate, bootstrap) if path.exists() or path.is_symlink()]
+        tombstone = self._extension_tombstone_path(payload)
+        observed = set(self.data_root.glob("extension.next.candidate-*"))
+        observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
+        observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
+        if (
+            observed - {candidate}
+            or observed_bootstraps - {bootstrap}
+            or observed_tombstones - {tombstone}
+        ):
+            raise PublishError("unknown extension staging candidate exists")
+        existing = [
+            path for path in (candidate, bootstrap, tombstone) if path.exists() or path.is_symlink()
+        ]
         if not existing:
             return
         if len(existing) != 1:
@@ -802,23 +826,75 @@ class FirstInstallPublisher:
         candidate: Path,
         payload: dict[str, Any],
     ) -> None:
+        original = candidate
+        tombstone = self._extension_tombstone_path(payload)
         descriptor = self._open_owned_extension_candidate_at(
             candidate,
             ".owner.json",
             payload,
         )
         try:
+            parent_descriptor = os.open(
+                candidate.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except Exception:
+            os.close(descriptor)
+            raise
+        try:
+            if candidate != tombstone:
+                if tombstone.exists() or tombstone.is_symlink():
+                    raise PublishError("extension staging tombstone is occupied")
+                self._point("extension-candidate", "before_tombstone_claim")
+                _rename_directory_exclusive(candidate, tombstone)
+                _fsync_directory(candidate.parent)
+                claimed_descriptor = -1
+                try:
+                    claimed_descriptor = self._open_owned_extension_candidate_at(
+                        tombstone,
+                        ".owner.json",
+                        payload,
+                    )
+                    claimed_metadata = os.fstat(claimed_descriptor)
+                    held_metadata = os.fstat(descriptor)
+                    if (
+                        claimed_metadata.st_dev != held_metadata.st_dev
+                        or claimed_metadata.st_ino != held_metadata.st_ino
+                    ):
+                        raise PublishError(
+                            "extension staging ownership changed during tombstone claim"
+                        )
+                except Exception as claim_error:
+                    if claimed_descriptor >= 0:
+                        os.close(claimed_descriptor)
+                    with suppress(Exception):
+                        if not original.exists() and not original.is_symlink():
+                            _rename_directory_exclusive(tombstone, original)
+                            _fsync_directory(original.parent)
+                    raise PublishError(
+                        "extension staging ownership changed during tombstone claim"
+                    ) from claim_error
+                os.close(descriptor)
+                descriptor = claimed_descriptor
+                candidate = tombstone
+                self._point("extension-candidate", "after_tombstone_claim")
             self._remove_directory_contents(descriptor)
-            path_metadata = os.stat(candidate, follow_symlinks=False)
-            held_metadata = os.fstat(descriptor)
+            os.rmdir(candidate.name, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+            public_candidate, _owner = self._extension_candidate_paths(payload)
+            bootstrap = self._extension_bootstrap_path(payload)
             if (
-                path_metadata.st_dev != held_metadata.st_dev
-                or path_metadata.st_ino != held_metadata.st_ino
+                public_candidate.exists()
+                or public_candidate.is_symlink()
+                or bootstrap.exists()
+                or bootstrap.is_symlink()
+                or list(self.data_root.glob("extension.next.candidate-*"))
+                or list(self.data_root.glob(".extension.next.bootstrap-*"))
+                or list(self.data_root.glob(".extension.next.tombstone-*"))
             ):
-                raise PublishError("extension staging directory changed before removal")
-            candidate.rmdir()
-            _fsync_directory(candidate.parent)
+                raise PublishError("extension staging candidate changed during removal")
         finally:
+            os.close(parent_descriptor)
             os.close(descriptor)
 
     def _remove_directory_contents(self, descriptor: int) -> None:
