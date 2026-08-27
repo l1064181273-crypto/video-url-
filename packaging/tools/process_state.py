@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fcntl
 import hashlib
 import http.client
 import json
@@ -60,6 +61,18 @@ class ServiceIdentity:
     nonce: str
     supervisor: ProcessSnapshot
     service: ProcessSnapshot
+
+
+@dataclass
+class ClaimedRecord:
+    parent_descriptor: int
+    descriptor: int
+    name: str
+    payload: dict[str, Any]
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+        os.close(self.parent_descriptor)
 
 
 class ServiceOperations(Protocol):
@@ -399,6 +412,13 @@ def _verified_record(
     payload = _read_record_payload(path, kind, port)
     if payload is None:
         return None
+    return _verified_record_payload(payload, kind)
+
+
+def _verified_record_payload(
+    payload: dict[str, Any],
+    kind: str,
+) -> tuple[ProcessSnapshot, ProcessSnapshot] | None:
     try:
         supervisor = _snapshot(payload["supervisor"]["pid"])
         service = _snapshot(payload["service"]["pid"])
@@ -442,6 +462,22 @@ def _verified_record_eventually(
         time.sleep(0.01)
 
 
+def _verified_record_payload_eventually(
+    payload: dict[str, Any],
+    kind: str,
+    *,
+    timeout: float = 0.5,
+) -> tuple[ProcessSnapshot, ProcessSnapshot] | None:
+    deadline = time.monotonic() + timeout
+    while True:
+        verified = _verified_record_payload(payload, kind)
+        if verified is not None:
+            return verified
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.01)
+
+
 def _service_identity(
     kind: str,
     payload: dict[str, Any],
@@ -464,39 +500,151 @@ def _record_matches_identity(payload: dict[str, Any], expected: ServiceIdentity)
     )
 
 
-def _record_is_absent(path: Path) -> bool:
+def _open_record_parent(path: Path) -> int:
+    parent = path.parent
+    if not parent.is_absolute() or ".." in parent.parts:
+        raise ServiceError("service runtime parent is unsafe")
+    descriptor = os.open(
+        "/",
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
     try:
-        path.lstat()
+        for component in parent.parts[1:]:
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        metadata = os.fstat(descriptor)
+        path_metadata = os.stat(path.parent, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o022
+            or metadata.st_dev != path_metadata.st_dev
+            or metadata.st_ino != path_metadata.st_ino
+        ):
+            raise ServiceError("service runtime parent is unsafe")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _entry_is_absent(parent_descriptor: int, name: str) -> bool:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
     except OSError as exc:
         return exc.errno == errno.ENOENT
+    os.close(descriptor)
     return False
 
 
-def _read_record_payload(path: Path, kind: str, port: int) -> dict[str, Any] | None:
+def _record_is_absent(path: Path) -> bool:
     try:
-        metadata = path.lstat()
+        parent_descriptor = _open_record_parent(path)
+    except (OSError, ServiceError):
+        return False
+    try:
+        return _entry_is_absent(parent_descriptor, path.name)
+    finally:
+        os.close(parent_descriptor)
+
+
+def _open_record_at(
+    parent_descriptor: int,
+    name: str,
+    kind: str,
+    port: int,
+) -> tuple[dict[str, Any], int, os.stat_result] | None:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+    except OSError:
+        return None
+    keep_open = False
+    try:
+        metadata = os.fstat(descriptor)
         if (
-            path.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
+            not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != os.geteuid()
             or metadata.st_nlink != 1
             or metadata.st_mode & 0o777 != 0o600
+            or metadata.st_size > 1024 * 1024
         ):
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        chunks: list[bytes] = []
+        remaining = metadata.st_size + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        repeated = b""
+        while len(repeated) <= metadata.st_size:
+            chunk = os.read(descriptor, min(metadata.st_size + 1 - len(repeated), 64 * 1024))
+            if not chunk:
+                break
+            repeated += chunk
+        final_metadata = os.fstat(descriptor)
+        if (
+            len(encoded) != metadata.st_size
+            or repeated != encoded
+            or final_metadata.st_dev != metadata.st_dev
+            or final_metadata.st_ino != metadata.st_ino
+            or final_metadata.st_size != metadata.st_size
+            or final_metadata.st_mtime_ns != metadata.st_mtime_ns
+            or final_metadata.st_ctime_ns != metadata.st_ctime_ns
+        ):
+            return None
+        payload = json.loads(encoded)
         if (
             not isinstance(payload, dict)
             or set(payload)
-            != {
-                "schema_version",
-                "kind",
-                "nonce",
-                "port",
-                "supervisor",
-                "service",
-                "members",
-            }
+            not in (
+                {
+                    "schema_version",
+                    "kind",
+                    "nonce",
+                    "port",
+                    "supervisor",
+                    "service",
+                    "members",
+                },
+                {
+                    "schema_version",
+                    "record_generation",
+                    "kind",
+                    "nonce",
+                    "port",
+                    "supervisor",
+                    "service",
+                    "members",
+                },
+            )
             or payload.get("schema_version") != 1
+            or (
+                "record_generation" in payload
+                and (
+                    type(payload["record_generation"]) is not int
+                    or payload["record_generation"] <= 0
+                )
+            )
             or payload.get("kind") != kind
             or payload.get("port") != port
             or not isinstance(payload.get("nonce"), str)
@@ -504,8 +652,8 @@ def _read_record_payload(path: Path, kind: str, port: int) -> dict[str, Any] | N
             or any(character not in "0123456789abcdef" for character in payload["nonce"])
         ):
             return None
-        for name in ("supervisor", "service"):
-            if not _snapshot_payload_is_valid(payload.get(name)):
+        for field in ("supervisor", "service"):
+            if not _snapshot_payload_is_valid(payload.get(field)):
                 return None
         members = payload.get("members")
         if (
@@ -518,9 +666,29 @@ def _read_record_payload(path: Path, kind: str, port: int) -> dict[str, Any] | N
             or any(member["pgid"] != payload["supervisor"]["pgid"] for member in members)
         ):
             return None
-        return payload
+        keep_open = True
+        return payload, descriptor, metadata
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
+    finally:
+        if not keep_open:
+            os.close(descriptor)
+
+
+def _read_record_payload(path: Path, kind: str, port: int) -> dict[str, Any] | None:
+    try:
+        parent_descriptor = _open_record_parent(path)
+    except (OSError, ServiceError):
+        return None
+    try:
+        opened = _open_record_at(parent_descriptor, path.name, kind, port)
+        if opened is None:
+            return None
+        payload, descriptor, _metadata = opened
+        os.close(descriptor)
+        return payload
+    finally:
+        os.close(parent_descriptor)
 
 
 def _verified_record_members(payload: dict[str, Any]) -> tuple[ProcessSnapshot, ...] | None:
@@ -547,6 +715,21 @@ def _verified_record_members(payload: dict[str, Any]) -> tuple[ProcessSnapshot, 
         ):
             return None
     return tuple(live)
+
+
+def _verified_record_members_eventually(
+    payload: dict[str, Any],
+    *,
+    timeout: float = 0.5,
+) -> tuple[ProcessSnapshot, ...] | None:
+    deadline = time.monotonic() + timeout
+    while True:
+        members = _verified_record_members(payload)
+        if members is not None:
+            return members
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.01)
 
 
 def verify_owned_service_record(
@@ -790,16 +973,91 @@ def _http_health(port: int, path: str, key: str, value: str) -> bool:
         connection.close()
 
 
-def _write_record(path: Path, payload: dict[str, Any]) -> None:
+def _rename_entry_exclusive(
+    parent_descriptor: int,
+    source_name: str,
+    destination_name: str,
+) -> None:
+    try:
+        system = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        renameatx_np = system.renameatx_np
+    except (AttributeError, OSError) as exc:
+        raise ServiceError("exclusive ownership record rename is unavailable") from exc
+    renameatx_np.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameatx_np.restype = ctypes.c_int
+    if (
+        renameatx_np(
+            parent_descriptor,
+            os.fsencode(source_name),
+            parent_descriptor,
+            os.fsencode(destination_name),
+            0x00000004,
+        )
+        != 0
+    ):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination_name)
+
+
+def _open_record_lock(parent_descriptor: int) -> int:
+    descriptor = os.open(
+        ".service-record.lock",
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=parent_descriptor,
+    )
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or metadata.st_mode & 0o777 != 0o600
+    ):
+        os.close(descriptor)
+        raise ServiceError("service ownership lock is unsafe")
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    return descriptor
+
+
+def _write_record(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    parent_descriptor: int | None = None,
+) -> None:
     encoded = (
         json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
-    temporary = path.parent / f".{path.name}.tmp-{uuid.uuid4().hex}"
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-        0o600,
+    owned_parent_descriptor = (
+        _open_record_parent(path) if parent_descriptor is None else os.dup(parent_descriptor)
     )
+    try:
+        lock_descriptor = _open_record_lock(owned_parent_descriptor)
+    except Exception:
+        os.close(owned_parent_descriptor)
+        raise
+    temporary_name = f".{path.name}.tmp-{uuid.uuid4().hex}"
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=owned_parent_descriptor,
+        )
+    except Exception:
+        os.close(lock_descriptor)
+        os.close(owned_parent_descriptor)
+        raise
     try:
         view = memoryview(encoded)
         while view:
@@ -809,10 +1067,93 @@ def _write_record(path: Path, payload: dict[str, Any]) -> None:
     finally:
         os.close(descriptor)
     try:
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
+        existing = _open_record_at(
+            owned_parent_descriptor,
+            path.name,
+            str(payload["kind"]),
+            int(payload["port"]),
+        )
+        if existing is None:
+            if not _entry_is_absent(owned_parent_descriptor, path.name):
+                raise ServiceError("service ownership record is unverified")
+            claim_names = [
+                name
+                for name in os.listdir(owned_parent_descriptor)
+                if name.startswith(f".{path.name}.claim-")
+            ]
+            if claim_names:
+                claim_payloads: list[dict[str, Any]] = []
+                for claim_name in claim_names:
+                    claim = _open_record_at(
+                        owned_parent_descriptor,
+                        claim_name,
+                        str(payload["kind"]),
+                        int(payload["port"]),
+                    )
+                    if claim is None:
+                        raise ServiceError("service ownership record publication is blocked")
+                    claim_payload, claim_descriptor, _claim_metadata = claim
+                    os.close(claim_descriptor)
+                    claim_payloads.append(claim_payload)
+                matching = [
+                    claim for claim in claim_payloads if claim["nonce"] == payload.get("nonce")
+                ]
+                continuing_generation = (
+                    max(int(claim.get("record_generation", 1)) for claim in matching) + 1
+                    if matching
+                    else None
+                )
+                stale_claims_converged = all(
+                    _verified_record_members(claim) == () for claim in claim_payloads
+                )
+                if not (
+                    payload.get("record_generation") == continuing_generation
+                    or (
+                        payload.get("record_generation") == 1
+                        and not matching
+                        and stale_claims_converged
+                    )
+                ):
+                    raise ServiceError("service ownership record publication is blocked")
+            elif payload.get("record_generation") != 1:
+                raise ServiceError("service ownership record publication is blocked")
+        else:
+            current, current_descriptor, current_metadata = existing
+            try:
+                if current["nonce"] != payload.get("nonce") or current.get(
+                    "record_generation", 1
+                ) + 1 != payload.get("record_generation"):
+                    raise ServiceError("service ownership record generation changed")
+                claim_name = (
+                    f".{path.name}.claim-"
+                    f"{current.get('record_generation', 1):020d}-{uuid.uuid4().hex}"
+                )
+                _rename_entry_exclusive(owned_parent_descriptor, path.name, claim_name)
+                claimed = _open_record_at(
+                    owned_parent_descriptor,
+                    claim_name,
+                    str(payload["kind"]),
+                    int(payload["port"]),
+                )
+                if claimed is None:
+                    raise ServiceError("service ownership record claim is unverified")
+                claimed_payload, claimed_descriptor, claimed_metadata = claimed
+                try:
+                    if (
+                        claimed_payload != current
+                        or claimed_metadata.st_dev != current_metadata.st_dev
+                        or claimed_metadata.st_ino != current_metadata.st_ino
+                    ):
+                        raise ServiceError("service ownership record changed during claim")
+                finally:
+                    os.close(claimed_descriptor)
+            finally:
+                os.close(current_descriptor)
+        _rename_entry_exclusive(owned_parent_descriptor, temporary_name, path.name)
+        os.fsync(owned_parent_descriptor)
     finally:
-        temporary.unlink(missing_ok=True)
+        os.close(lock_descriptor)
+        os.close(owned_parent_descriptor)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -922,12 +1263,20 @@ def _stop_child(
 
 def _supervise(arguments: argparse.Namespace) -> int:
     record = arguments.record
+    try:
+        runtime_metadata = os.fstat(arguments.record_parent_fd)
+    except OSError as exc:
+        raise ServiceError("service runtime parent descriptor is unavailable") from exc
     if (
         arguments.kind not in {"backend", "ollama"}
         or len(arguments.nonce) != 32
         or not all(character in "0123456789abcdef" for character in arguments.nonce)
         or arguments.port not in {8765, 11435}
         or not arguments.command
+        or record.name != f"{arguments.kind}.pid"
+        or not stat.S_ISDIR(runtime_metadata.st_mode)
+        or runtime_metadata.st_uid != os.geteuid()
+        or runtime_metadata.st_mode & 0o022
     ):
         raise ServiceError("service supervisor arguments are invalid")
     guard = _snapshot(os.getpid())
@@ -967,8 +1316,16 @@ def _supervise(arguments: argparse.Namespace) -> int:
             if pid != guard.pid
         ]
         if members != record_payload["members"]:
-            record_payload = {**record_payload, "members": members}
-            _write_record(record, record_payload)
+            record_payload = {
+                **record_payload,
+                "record_generation": record_payload["record_generation"] + 1,
+                "members": members,
+            }
+            _write_record(
+                record,
+                record_payload,
+                parent_descriptor=arguments.record_parent_fd,
+            )
 
     def request_shutdown(_signum: int, _frame: object) -> None:
         shutdown.set()
@@ -991,6 +1348,7 @@ def _supervise(arguments: argparse.Namespace) -> int:
         tracked[service.pid] = service
         record_payload = {
             "schema_version": 1,
+            "record_generation": 1,
             "kind": arguments.kind,
             "nonce": arguments.nonce,
             "port": arguments.port,
@@ -998,7 +1356,11 @@ def _supervise(arguments: argparse.Namespace) -> int:
             "service": _snapshot_payload(service),
             "members": [_snapshot_payload(service)],
         }
-        _write_record(record, record_payload)
+        _write_record(
+            record,
+            record_payload,
+            parent_descriptor=arguments.record_parent_fd,
+        )
         os.write(arguments.ready_fd, b"R")
         os.close(arguments.ready_fd)
         while process.poll() is None and not shutdown.wait(0.05):
@@ -1020,8 +1382,6 @@ def _supervise(arguments: argparse.Namespace) -> int:
             protected_pids=frozenset({supervisor.pid}),
             on_tracked_change=persist_tracked_members,
         )
-        record.unlink(missing_ok=True)
-        _fsync_directory(record.parent)
         return 0
     except BaseException as supervision_error:
         print(
@@ -1057,6 +1417,171 @@ class SystemServiceOperations:
         self.release_root = release_root
         self.terminate_grace = terminate_grace
         self.kill_wait = kill_wait
+        self._runtime_parent_descriptor = _open_record_parent(
+            self.data_root / "runtime/backend.pid"
+        )
+
+    def __del__(self) -> None:
+        descriptor = getattr(self, "_runtime_parent_descriptor", -1)
+        if descriptor >= 0:
+            with suppress(OSError):
+                os.close(descriptor)
+            self._runtime_parent_descriptor = -1
+
+    def _trusted_runtime_parent(self) -> int:
+        try:
+            observed = _open_record_parent(self.data_root / "runtime/backend.pid")
+        except OSError as exc:
+            raise ServiceError("service runtime parent changed") from exc
+        try:
+            expected_metadata = os.fstat(self._runtime_parent_descriptor)
+            observed_metadata = os.fstat(observed)
+            if (
+                expected_metadata.st_dev != observed_metadata.st_dev
+                or expected_metadata.st_ino != observed_metadata.st_ino
+            ):
+                raise ServiceError("service runtime parent changed")
+        finally:
+            os.close(observed)
+        return os.dup(self._runtime_parent_descriptor)
+
+    def _open_current_record(self, kind: str) -> ClaimedRecord | None:
+        parent_descriptor = self._trusted_runtime_parent()
+        opened = _open_record_at(
+            parent_descriptor,
+            f"{kind}.pid",
+            kind,
+            self._port(kind),
+        )
+        if opened is None:
+            if _entry_is_absent(parent_descriptor, f"{kind}.pid"):
+                os.close(parent_descriptor)
+                return None
+            os.close(parent_descriptor)
+            raise ServiceError(f"{kind} service ownership is unverified")
+        payload, descriptor, _metadata = opened
+        return ClaimedRecord(parent_descriptor, descriptor, f"{kind}.pid", payload)
+
+    def _existing_claim(
+        self,
+        kind: str,
+        *,
+        preferred_nonce: str | None = None,
+    ) -> ClaimedRecord | None:
+        parent_descriptor = self._trusted_runtime_parent()
+        prefix = f".{kind}.pid.claim-"
+        opened_claims: list[tuple[int, str, dict[str, Any], int]] = []
+        try:
+            for name in os.listdir(parent_descriptor):
+                if not name.startswith(prefix):
+                    continue
+                opened = _open_record_at(parent_descriptor, name, kind, self._port(kind))
+                if opened is None:
+                    raise ServiceError(f"{kind} claimed ownership record is unverified")
+                payload, descriptor, _metadata = opened
+                opened_claims.append(
+                    (int(payload.get("record_generation", 1)), name, payload, descriptor)
+                )
+            if not opened_claims:
+                os.close(parent_descriptor)
+                return None
+            newest_by_nonce: dict[
+                str,
+                tuple[int, str, dict[str, Any], int],
+            ] = {}
+            for candidate in opened_claims:
+                nonce = str(candidate[2]["nonce"])
+                previous = newest_by_nonce.get(nonce)
+                if previous is None or candidate[0] > previous[0]:
+                    newest_by_nonce[nonce] = candidate
+                elif candidate[0] == previous[0]:
+                    raise ServiceError(f"{kind} claimed ownership record is ambiguous")
+            active: list[tuple[int, str, dict[str, Any], int]] = []
+            for candidate in newest_by_nonce.values():
+                members = _verified_record_members_eventually(candidate[2])
+                if members is None:
+                    raise ServiceError(f"{kind} claimed ownership record is unverified")
+                if members:
+                    active.append(candidate)
+            if len(active) > 1:
+                raise ServiceError(f"{kind} claimed ownership record is ambiguous")
+            preferred = (
+                newest_by_nonce.get(preferred_nonce) if preferred_nonce is not None else None
+            )
+            generation, name, payload, descriptor = (
+                active[0]
+                if active
+                else (
+                    preferred
+                    if preferred is not None
+                    else max(newest_by_nonce.values(), key=lambda item: item[0])
+                )
+            )
+            del generation
+            for _generation, _name, _payload, other_descriptor in opened_claims:
+                if other_descriptor != descriptor:
+                    os.close(other_descriptor)
+            return ClaimedRecord(parent_descriptor, descriptor, name, payload)
+        except Exception:
+            for _generation, _name, _payload, descriptor in opened_claims:
+                with suppress(OSError):
+                    os.close(descriptor)
+            with suppress(OSError):
+                os.close(parent_descriptor)
+            raise
+
+    def _claim_record(
+        self,
+        kind: str,
+        *,
+        preferred_nonce: str | None = None,
+    ) -> ClaimedRecord | None:
+        parent_descriptor = self._trusted_runtime_parent()
+        lock_descriptor = _open_record_lock(parent_descriptor)
+        try:
+            name = f"{kind}.pid"
+            opened = _open_record_at(parent_descriptor, name, kind, self._port(kind))
+            if opened is None:
+                if not _entry_is_absent(parent_descriptor, name):
+                    raise ServiceError(f"{kind} service ownership is unverified")
+                os.close(parent_descriptor)
+                return self._existing_claim(kind, preferred_nonce=preferred_nonce)
+            payload, descriptor, metadata = opened
+            claim_name = (
+                f".{name}.claim-{payload.get('record_generation', 1):020d}-{uuid.uuid4().hex}"
+            )
+            _rename_entry_exclusive(parent_descriptor, name, claim_name)
+            os.fsync(parent_descriptor)
+            claimed = _open_record_at(
+                parent_descriptor,
+                claim_name,
+                kind,
+                self._port(kind),
+            )
+            if claimed is None:
+                os.close(descriptor)
+                raise ServiceError(f"{kind} ownership changed during claim")
+            claimed_payload, claimed_descriptor, claimed_metadata = claimed
+            os.close(descriptor)
+            if (
+                claimed_payload != payload
+                or claimed_metadata.st_dev != metadata.st_dev
+                or claimed_metadata.st_ino != metadata.st_ino
+            ):
+                os.close(claimed_descriptor)
+                raise ServiceError(f"{kind} ownership changed during claim")
+            return ClaimedRecord(
+                parent_descriptor,
+                claimed_descriptor,
+                claim_name,
+                claimed_payload,
+            )
+        except Exception:
+            os.close(parent_descriptor)
+            raise
+        finally:
+            with suppress(OSError):
+                os.close(lock_descriptor)
 
     def reconcile(self) -> None:
         from publish_install import FirstInstallPublisher
@@ -1094,16 +1619,33 @@ class SystemServiceOperations:
         return ValidationOutcome(exit_code, status)
 
     def state(self, kind: str) -> str:
-        record_path = self._record_path(kind)
         port = self._port(kind)
-        if _record_is_absent(record_path):
+        try:
+            record = self._open_current_record(kind)
+        except ServiceError:
+            return "unsafe"
+        if record is None:
+            try:
+                claim = self._existing_claim(kind)
+            except ServiceError:
+                return "unsafe"
+            if claim is not None:
+                try:
+                    members = _verified_record_members_eventually(claim.payload)
+                    if members is None or members:
+                        return "unsafe"
+                finally:
+                    claim.close()
             return "unsafe" if _port_open(port) else "absent"
-        verified = _verified_record_eventually(record_path, kind, port)
-        return (
-            "owned"
-            if verified is not None and _owned_group_listens_eventually(verified[1], port)
-            else "unsafe"
-        )
+        try:
+            verified = _verified_record_payload_eventually(record.payload, kind)
+            return (
+                "owned"
+                if verified is not None and _owned_group_listens_eventually(verified[1], port)
+                else "unsafe"
+            )
+        finally:
+            record.close()
 
     def launch(self, kind: str, activation_fd: int | None = None) -> ServiceIdentity:
         if self.state(kind) != "absent":
@@ -1111,7 +1653,7 @@ class SystemServiceOperations:
         command, environment = self._service_command(kind)
         nonce = uuid.uuid4().hex
         record_path = self._record_path(kind)
-        record_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        runtime_parent_descriptor = self._trusted_runtime_parent()
         ready_read, ready_write = os.pipe()
         supervisor = Path(__file__).resolve(strict=True)
         python = self.release_root / ".venv/bin/python"
@@ -1121,6 +1663,8 @@ class SystemServiceOperations:
             "supervise",
             "--record",
             str(record_path),
+            "--record-parent-fd",
+            str(runtime_parent_descriptor),
             "--kind",
             kind,
             "--nonce",
@@ -1134,25 +1678,32 @@ class SystemServiceOperations:
             "--kill-wait",
             str(self.kill_wait),
         ]
-        pass_fds = [ready_write]
+        pass_fds = [ready_write, runtime_parent_descriptor]
         if activation_fd is not None:
             arguments.extend(["--activation-fd", str(activation_fd)])
             pass_fds.append(activation_fd)
         arguments.extend(["--", *command])
         log_path = self.data_root / "logs" / f"{kind}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with log_path.open("ab", buffering=0) as log:
-            process = subprocess.Popen(
-                arguments,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
-                close_fds=True,
-                pass_fds=tuple(pass_fds),
-                start_new_session=True,
-            )
+        try:
+            with log_path.open("ab", buffering=0) as log:
+                process = subprocess.Popen(
+                    arguments,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=log,
+                    close_fds=True,
+                    pass_fds=tuple(pass_fds),
+                    start_new_session=True,
+                )
+        except Exception:
+            os.close(ready_read)
+            os.close(ready_write)
+            os.close(runtime_parent_descriptor)
+            raise
         os.close(ready_write)
+        os.close(runtime_parent_descriptor)
         try:
             readable, _, _ = select.select([ready_read], [], [], 5)
             ready = os.read(ready_read, 1) if readable else b""
@@ -1168,14 +1719,17 @@ class SystemServiceOperations:
         deadline = time.monotonic() + 10
         port = self._port(kind)
         while time.monotonic() < deadline:
-            payload = _read_record_payload(record_path, kind, port)
-            verified = _verified_record(record_path, kind, port)
-            if (
-                payload is not None
-                and verified is not None
-                and _owned_group_listens(verified[1], port)
-            ):
-                return _service_identity(kind, payload, verified)
+            try:
+                record = self._open_current_record(kind)
+            except ServiceError:
+                record = None
+            if record is not None:
+                try:
+                    verified = _verified_record_payload_eventually(record.payload, kind)
+                    if verified is not None and _owned_group_listens(verified[1], port):
+                        return _service_identity(kind, record.payload, verified)
+                finally:
+                    record.close()
             if process.poll() is not None:
                 break
             time.sleep(0.05)
@@ -1211,57 +1765,60 @@ class SystemServiceOperations:
         *,
         expected: ServiceIdentity | None = None,
     ) -> None:
-        record_path = self._record_path(kind)
-        payload = _read_record_payload(record_path, kind, self._port(kind))
-        verified = _verified_record_eventually(record_path, kind, self._port(kind))
-        if expected is not None and (
-            payload is None or not _record_matches_identity(payload, expected)
-        ):
-            if _record_is_absent(record_path) and not _port_open(self._port(kind)):
+        record = self._claim_record(kind)
+        if record is None:
+            if not _port_open(self._port(kind)):
                 return
-            raise ServiceError(f"{kind} service generation changed")
-        if verified is None:
-            if _record_is_absent(record_path) and not _port_open(self._port(kind)):
-                return
-            if payload is None:
-                raise ServiceError(f"{kind} service ownership is unverified")
-            self._stop_recorded_members(kind, payload)
-            self._remove_converged_record(record_path, kind, payload)
-            return
-        if payload is None:
             raise ServiceError(f"{kind} service ownership is unverified")
-        current = _service_identity(kind, payload, verified)
-        if expected is not None and current != expected:
-            raise ServiceError(f"{kind} service generation changed")
-        supervisor, _service = verified
-        if not _signal_snapshot(supervisor, signal.SIGTERM):
-            raise ServiceError(f"{kind} supervisor signal was rejected")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if _record_is_absent(record_path):
-                if _port_open(self._port(kind)):
-                    raise ServiceError(f"{kind} foreign listener remains after shutdown")
+        try:
+            payload = record.payload
+            if expected is not None and not _record_matches_identity(payload, expected):
+                raise ServiceError(f"{kind} service generation changed")
+            verified = _verified_record_payload_eventually(payload, kind)
+            if verified is None:
+                self._stop_recorded_members(kind, payload)
+                self._remove_converged_record(record, kind)
                 return
-            time.sleep(0.05)
-        current_payload = _read_record_payload(record_path, kind, self._port(kind))
-        if current_payload is None:
-            raise ServiceError(f"{kind} service changed during shutdown")
-        if expected is not None and not _record_matches_identity(current_payload, expected):
-            raise ServiceError(f"{kind} service generation changed")
-        self._stop_recorded_members(kind, current_payload)
-        self._remove_converged_record(record_path, kind, current_payload)
+            current = _service_identity(kind, payload, verified)
+            if expected is not None and current != expected:
+                raise ServiceError(f"{kind} service generation changed")
+            supervisor, _service = verified
+            if not _signal_snapshot(supervisor, signal.SIGTERM):
+                raise ServiceError(f"{kind} supervisor signal was rejected")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if not _token_is_live(supervisor):
+                    break
+                time.sleep(0.05)
+            latest = self._claim_record(kind, preferred_nonce=str(payload["nonce"]))
+            if latest is not None:
+                if latest.payload["nonce"] != payload["nonce"]:
+                    latest.close()
+                    raise ServiceError(f"{kind} service generation changed")
+                record.close()
+                record = latest
+                payload = latest.payload
+            self._stop_recorded_members(kind, payload)
+            self._remove_converged_record(record, kind)
+        finally:
+            record.close()
 
     def _reconcile_orphan(self, kind: str) -> None:
-        record_path = self._record_path(kind)
-        if _record_is_absent(record_path):
+        record = self._open_current_record(kind)
+        if record is not None:
+            try:
+                if _verified_record_payload_eventually(record.payload, kind) is not None:
+                    return
+            finally:
+                record.close()
+        record = self._claim_record(kind)
+        if record is None:
             return
-        if _verified_record(record_path, kind, self._port(kind)) is not None:
-            return
-        payload = _read_record_payload(record_path, kind, self._port(kind))
-        if payload is None:
-            raise ServiceError(f"{kind} orphan ownership is unverified")
-        self._stop_recorded_members(kind, payload)
-        self._remove_converged_record(record_path, kind, payload)
+        try:
+            self._stop_recorded_members(kind, record.payload)
+            self._remove_converged_record(record, kind)
+        finally:
+            record.close()
 
     def _stop_recorded_members(self, kind: str, payload: dict[str, Any]) -> None:
         live = _verified_record_members(payload)
@@ -1300,20 +1857,34 @@ class SystemServiceOperations:
 
     def _remove_converged_record(
         self,
-        record_path: Path,
+        record: ClaimedRecord,
         kind: str,
-        payload: dict[str, Any],
     ) -> None:
+        payload = record.payload
         if _verified_record_members(payload) != ():
             raise ServiceError(f"{kind} recorded members did not converge")
         if _port_open(self._port(kind)):
             raise ServiceError(f"{kind} port remains occupied after cleanup")
-        if _record_is_absent(record_path):
-            return
-        if _read_record_payload(record_path, kind, self._port(kind)) != payload:
+        opened = _open_record_at(
+            record.parent_descriptor,
+            record.name,
+            kind,
+            self._port(kind),
+        )
+        if opened is None:
             raise ServiceError(f"{kind} ownership record changed before cleanup")
-        record_path.unlink(missing_ok=True)
-        _fsync_directory(record_path.parent)
+        current_payload, descriptor, metadata = opened
+        try:
+            held_metadata = os.fstat(record.descriptor)
+            if (
+                current_payload != payload
+                or metadata.st_dev != held_metadata.st_dev
+                or metadata.st_ino != held_metadata.st_ino
+            ):
+                raise ServiceError(f"{kind} ownership record changed before cleanup")
+        finally:
+            os.close(descriptor)
+        os.fsync(record.parent_descriptor)
 
     def ownership_records_converged(self) -> bool:
         process_root = self.data_root / "runtime/processes"
@@ -1395,6 +1966,7 @@ def main(argv: list[str] | None = None) -> int:
     if selected[:1] == ["supervise"]:
         parser = argparse.ArgumentParser(description="监督单个应用服务")
         parser.add_argument("--record", required=True, type=Path)
+        parser.add_argument("--record-parent-fd", required=True, type=int)
         parser.add_argument("--kind", required=True)
         parser.add_argument("--nonce", required=True)
         parser.add_argument("--port", required=True, type=int)

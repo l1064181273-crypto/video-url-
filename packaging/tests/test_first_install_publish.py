@@ -907,7 +907,18 @@ def test_real_publisher_sigkill_before_commit_never_releases_worker_barrier(
         "extension-copy:after_first_file",
         "extension-copy:after_middle_file",
         "extension-copy:before_complete",
+        "extension-candidate:before_tombstone_claim",
+        "extension-candidate:after_tombstone_rename",
+        "extension-candidate:before_tombstone_parent_fsync",
+        "extension-candidate:after_tombstone_parent_fsync",
         "extension-candidate:after_tombstone_claim",
+        "extension-candidate:before_deletion_claim",
+        "extension-candidate:after_deletion_rename",
+        "extension-candidate:before_deletion_parent_fsync",
+        "extension-candidate:after_deletion_parent_fsync",
+        "extension-candidate:after_deletion_claim",
+        "extension-candidate:before_retained_quarantine",
+        "extension-candidate:after_retained_quarantine",
     ],
 )
 def test_extension_staging_sigkill_never_leaves_partial_next(
@@ -969,6 +980,12 @@ def test_extension_staging_sigkill_never_leaves_partial_next(
         assert not list(data_root.glob("extension.next.candidate-*.owner"))
         assert not list(data_root.glob(".extension.next.bootstrap-*"))
         assert not list(data_root.glob(".extension.next.tombstone-*"))
+        retained = list(data_root.glob(".extension.next.deleting-*"))
+        assert len(retained) == 1
+        assert recovered._extension_candidate_is_owned(
+            recovered.journal.read_latest().payload,  # type: ignore[union-attr]
+            candidate=retained[0],
+        )
     finally:
         os.close(marker_read)
         os.close(gate_write)
@@ -1098,9 +1115,85 @@ def test_extension_candidate_removal_claim_preserves_foreign_replacement(
     with pytest.raises(PublishError, match="ownership changed during tombstone claim"):
         publisher._remove_owned_extension_candidate(payload)
 
-    assert candidate.is_dir()
-    assert (candidate / "untrusted").read_text(encoding="utf-8") == "external\n"
+    retained_foreign = publisher._extension_tombstone_path(payload)
+    assert retained_foreign.is_dir()
+    assert (retained_foreign / "untrusted").read_text(encoding="utf-8") == "external\n"
     assert displaced.is_dir()
+    assert (displaced / "owned").read_text(encoding="utf-8") == "owned\n"
+
+
+def test_retained_quarantine_never_deletes_claimed_contents(tmp_path: Path) -> None:
+    publisher = _publisher(tmp_path, FakeServices())
+    payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
+    candidate = publisher._extension_candidate_paths(payload)[0]
+    candidate.mkdir(mode=0o700)
+    publisher._write_extension_candidate_owner(candidate, payload)
+    nested = candidate / "payload/nested"
+    nested.mkdir(parents=True)
+    content = nested / "asset.js"
+    content.write_text("external-inode-must-survive\n", encoding="utf-8")
+    before = content.stat()
+
+    publisher._remove_owned_extension_candidate(payload)
+
+    retained = publisher._extension_deletion_path(payload)
+    preserved = retained / "payload/nested/asset.js"
+    after = preserved.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert preserved.read_text(encoding="utf-8") == "external-inode-must-survive\n"
+    assert (retained / ".owner.json").is_file()
+
+
+def test_post_claim_name_swap_preserves_foreign_inode_and_content(tmp_path: Path) -> None:
+    claimed = threading.Barrier(2)
+    resume = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def failpoint(name: str) -> None:
+        if name == "extension-candidate:after_deletion_claim":
+            claimed.wait(timeout=5)
+            resume.wait(timeout=5)
+
+    publisher = _publisher(tmp_path, FakeServices(), failpoint=failpoint)
+    payload = publisher.prepare_payload()
+    publisher.journal.write_progress(payload)
+    candidate = publisher._extension_candidate_paths(payload)[0]
+    deletion = publisher._extension_deletion_path(payload)
+    displaced = publisher.data_root / "displaced-retained-quarantine"
+    replacement = publisher.data_root / "foreign-replacement"
+    candidate.mkdir(mode=0o700)
+    publisher._write_extension_candidate_owner(candidate, payload)
+    (candidate / "owned").write_text("owned\n", encoding="utf-8")
+    replacement.mkdir()
+    foreign = replacement / "untrusted"
+    foreign.write_text("external\n", encoding="utf-8")
+    foreign_before = foreign.stat()
+
+    def remove() -> None:
+        try:
+            publisher._remove_owned_extension_candidate(payload)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=remove)
+    worker.start()
+    claimed.wait(timeout=5)
+    deletion.rename(displaced)
+    replacement.rename(deletion)
+    resume.wait(timeout=5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], PublishError)
+    preserved = deletion / "untrusted"
+    foreign_after = preserved.stat()
+    assert (foreign_after.st_dev, foreign_after.st_ino) == (
+        foreign_before.st_dev,
+        foreign_before.st_ino,
+    )
+    assert preserved.read_text(encoding="utf-8") == "external\n"
     assert (displaced / "owned").read_text(encoding="utf-8") == "owned\n"
 
 

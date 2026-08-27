@@ -669,23 +669,24 @@ class FirstInstallPublisher:
         bootstrap = self._extension_bootstrap_path(payload)
         tombstone = self._extension_tombstone_path(payload)
         deletion = self._extension_deletion_path(payload)
+        self._validate_retained_extension_quarantines()
         expected = {candidate}
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
         observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
-        observed_deletions = set(self.data_root.glob(".extension.next.deleting-*"))
         if (
             observed - expected
             or observed_bootstraps - {bootstrap}
             or observed_tombstones - {tombstone}
-            or observed_deletions - {deletion}
         ):
             raise PublishError("unknown extension staging candidate exists")
         owned_paths = [
-            path
-            for path in (candidate, bootstrap, tombstone, deletion)
-            if path.exists() or path.is_symlink()
+            path for path in (candidate, bootstrap, tombstone) if path.exists() or path.is_symlink()
         ]
+        if deletion.exists() or deletion.is_symlink():
+            if owned_paths:
+                raise PublishError("extension staging candidate ownership is ambiguous")
+            return payload
         if owned_paths:
             if len(owned_paths) != 1 or not self._extension_candidate_is_owned(
                 payload,
@@ -713,17 +714,31 @@ class FirstInstallPublisher:
     def _extension_deletion_path(self, payload: dict[str, Any]) -> Path:
         return self.data_root / f".extension.next.deleting-{payload['transaction_id']}"
 
+    def _validate_retained_extension_quarantines(self) -> None:
+        prefix = ".extension.next.deleting-"
+        for retained in self.data_root.glob(f"{prefix}*"):
+            transaction_id = retained.name.removeprefix(prefix)
+            try:
+                if str(uuid.UUID(transaction_id)) != transaction_id:
+                    raise ValueError
+            except ValueError as exc:
+                raise PublishError("unknown extension staging candidate exists") from exc
+            if not self._extension_candidate_is_owned(
+                {"transaction_id": transaction_id},
+                candidate=retained,
+            ):
+                raise PublishError("extension retained quarantine ownership is unverified")
+
     def _validate_extension_candidate_namespace(self, payload: dict[str, Any]) -> None:
         candidate, _owner = self._extension_candidate_paths(payload)
+        self._validate_retained_extension_quarantines()
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
         observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
-        observed_deletions = set(self.data_root.glob(".extension.next.deleting-*"))
         if (
             observed
             or observed_bootstraps
             or observed_tombstones
-            or observed_deletions
             or candidate.exists()
             or candidate.is_symlink()
         ):
@@ -814,15 +829,14 @@ class FirstInstallPublisher:
         bootstrap = self._extension_bootstrap_path(payload)
         tombstone = self._extension_tombstone_path(payload)
         deletion = self._extension_deletion_path(payload)
+        self._validate_retained_extension_quarantines()
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
         observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
-        observed_deletions = set(self.data_root.glob(".extension.next.deleting-*"))
         if (
             observed - {candidate}
             or observed_bootstraps - {bootstrap}
             or observed_tombstones - {tombstone}
-            or observed_deletions - {deletion}
         ):
             raise PublishError("unknown extension staging candidate exists")
         existing = [
@@ -834,6 +848,8 @@ class FirstInstallPublisher:
             return
         if len(existing) != 1:
             raise PublishError("extension staging candidate ownership is ambiguous")
+        if existing[0] == deletion:
+            return
         self._remove_owned_extension_candidate_at(existing[0], payload)
 
     def _remove_owned_extension_candidate_at(
@@ -841,7 +857,6 @@ class FirstInstallPublisher:
         candidate: Path,
         payload: dict[str, Any],
     ) -> None:
-        original = candidate
         tombstone = self._extension_tombstone_path(payload)
         deletion = self._extension_deletion_path(payload)
         descriptor = self._open_owned_extension_candidate_at(
@@ -863,7 +878,10 @@ class FirstInstallPublisher:
                     raise PublishError("extension staging tombstone is occupied")
                 self._point("extension-candidate", "before_tombstone_claim")
                 _rename_directory_exclusive(candidate, tombstone)
+                self._point("extension-candidate", "after_tombstone_rename")
+                self._point("extension-candidate", "before_tombstone_parent_fsync")
                 _fsync_directory(candidate.parent)
+                self._point("extension-candidate", "after_tombstone_parent_fsync")
                 claimed_descriptor = -1
                 try:
                     claimed_descriptor = self._open_owned_extension_candidate_at(
@@ -883,10 +901,6 @@ class FirstInstallPublisher:
                 except Exception as claim_error:
                     if claimed_descriptor >= 0:
                         os.close(claimed_descriptor)
-                    with suppress(Exception):
-                        if not original.exists() and not original.is_symlink():
-                            _rename_directory_exclusive(tombstone, original)
-                            _fsync_directory(original.parent)
                     raise PublishError(
                         "extension staging ownership changed during tombstone claim"
                     ) from claim_error
@@ -899,7 +913,10 @@ class FirstInstallPublisher:
                     raise PublishError("extension staging deletion claim is occupied")
                 self._point("extension-candidate", "before_deletion_claim")
                 _rename_directory_exclusive(candidate, deletion)
+                self._point("extension-candidate", "after_deletion_rename")
+                self._point("extension-candidate", "before_deletion_parent_fsync")
                 _fsync_directory(candidate.parent)
+                self._point("extension-candidate", "after_deletion_parent_fsync")
                 claimed_descriptor = -1
                 try:
                     claimed_descriptor = self._open_owned_extension_candidate_at(
@@ -919,10 +936,6 @@ class FirstInstallPublisher:
                 except Exception as claim_error:
                     if claimed_descriptor >= 0:
                         os.close(claimed_descriptor)
-                    with suppress(Exception):
-                        if not candidate.exists() and not candidate.is_symlink():
-                            _rename_directory_exclusive(deletion, candidate)
-                            _fsync_directory(candidate.parent)
                     raise PublishError(
                         "extension staging ownership changed during deletion claim"
                     ) from claim_error
@@ -930,9 +943,9 @@ class FirstInstallPublisher:
                 descriptor = claimed_descriptor
                 candidate = deletion
                 self._point("extension-candidate", "after_deletion_claim")
-            self._remove_directory_contents(descriptor)
-            os.rmdir(candidate.name, dir_fd=parent_descriptor)
+            self._point("extension-candidate", "before_retained_quarantine")
             os.fsync(parent_descriptor)
+            self._point("extension-candidate", "after_retained_quarantine")
             public_candidate, _owner = self._extension_candidate_paths(payload)
             bootstrap = self._extension_bootstrap_path(payload)
             if (
@@ -943,28 +956,12 @@ class FirstInstallPublisher:
                 or list(self.data_root.glob("extension.next.candidate-*"))
                 or list(self.data_root.glob(".extension.next.bootstrap-*"))
                 or list(self.data_root.glob(".extension.next.tombstone-*"))
-                or list(self.data_root.glob(".extension.next.deleting-*"))
+                or not self._extension_candidate_is_owned(payload, candidate=deletion)
             ):
                 raise PublishError("extension staging candidate changed during removal")
         finally:
             os.close(parent_descriptor)
             os.close(descriptor)
-
-    def _remove_directory_contents(self, descriptor: int) -> None:
-        for entry in os.scandir(descriptor):
-            if entry.is_dir(follow_symlinks=False):
-                child = os.open(
-                    entry.name,
-                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=descriptor,
-                )
-                try:
-                    self._remove_directory_contents(child)
-                finally:
-                    os.close(child)
-                os.rmdir(entry.name, dir_fd=descriptor)
-            else:
-                os.unlink(entry.name, dir_fd=descriptor)
 
     def _observed_component(self, component: str) -> dict[Path, dict[str, str]]:
         live, next_path, previous = self._paths(component)
@@ -1033,7 +1030,12 @@ class FirstInstallPublisher:
             self._remove_owned_extension_candidate(payload)
             return
         if action.startswith("remove_"):
-            self._remove_known(by_label[action.removeprefix("remove_")], component, known)
+            self._remove_known(
+                by_label[action.removeprefix("remove_")],
+                component,
+                known,
+                payload,
+            )
             return
         if action.startswith("rename_") and action.endswith("_to_live"):
             source = by_label[action.removeprefix("rename_").removesuffix("_to_live")]
@@ -1086,16 +1088,26 @@ class FirstInstallPublisher:
         path: Path,
         component: str,
         known: tuple[dict[str, str], ...],
+        payload: dict[str, Any],
     ) -> None:
+        retained = path.parent / (
+            f".publication.retained-{component}-{path.name}-{payload['transaction_id']}"
+        )
         identity = path_identity(path, component)
         if identity == {"kind": "absent"}:
+            retained_identity = path_identity(retained, component)
+            if retained_identity != {"kind": "absent"} and retained_identity not in known:
+                raise PublishError("publication retained quarantine is unverified")
             return
         if identity not in known:
             raise PublishError("refusing to remove an unknown publication identity")
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+        retained_identity = path_identity(retained, component)
+        if retained_identity != {"kind": "absent"}:
+            raise PublishError("publication retained quarantine is occupied")
+        _rename_directory_exclusive(path, retained)
+        _fsync_directory(path.parent)
+        if path_identity(retained, component) != identity:
+            raise PublishError("publication identity changed during retained claim")
 
     def _cleanup_previous(self, payload: dict[str, Any]) -> None:
         latest = self.journal.read_latest()
@@ -1136,7 +1148,7 @@ class FirstInstallPublisher:
         self._point(f"cleanup:{component}", "before_remove")
         identities = payload["identities"][component]
         known = (identities["old"], identities["new"], {"kind": "absent"})
-        self._remove_known(path, component, known)
+        self._remove_known(path, component, known, payload)
         self._point(f"cleanup:{component}", "after_remove")
         substate = "current_removed" if component == "current" else "extension_removed"
         updated = self._with_cleanup(payload, substate)

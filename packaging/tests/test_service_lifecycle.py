@@ -360,6 +360,41 @@ def _system_operations(tmp_path: Path) -> FixtureSystemOperations:
     return FixtureSystemOperations(data_root, release, terminate_grace=0.1, kill_wait=1)
 
 
+def _ownership_payload(tmp_path: Path, *, generation: int = 1) -> dict[str, object]:
+    executable = tmp_path / "owned-service"
+    executable.write_bytes(b"service")
+    supervisor = ProcessSnapshot(
+        700,
+        700,
+        "supervisor",
+        executable,
+        1,
+        2,
+        "a" * 64,
+        (1,) * 8,
+    )
+    service = ProcessSnapshot(
+        701,
+        700,
+        "service",
+        executable,
+        1,
+        2,
+        "a" * 64,
+        (2,) * 8,
+    )
+    return {
+        "schema_version": 1,
+        "record_generation": generation,
+        "kind": "backend",
+        "nonce": "a" * 32,
+        "port": 8765,
+        "supervisor": process_state._snapshot_payload(supervisor),
+        "service": process_state._snapshot_payload(service),
+        "members": [process_state._snapshot_payload(service)],
+    }
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
 def test_real_supervisor_record_is_generation_bound_and_stop_reaps_service(
     tmp_path: Path,
@@ -377,6 +412,7 @@ def test_real_supervisor_record_is_generation_bound_and_stop_reaps_service(
         payload = json.loads(record.read_text(encoding="utf-8"))
         assert set(payload) == {
             "schema_version",
+            "record_generation",
             "kind",
             "nonce",
             "port",
@@ -384,6 +420,7 @@ def test_real_supervisor_record_is_generation_bound_and_stop_reaps_service(
             "service",
             "members",
         }
+        assert payload["record_generation"] >= 1
         assert payload["members"][0] == payload["service"]
         assert payload["port"] == 8765
         assert record.stat().st_mode & 0o777 == 0o600
@@ -720,22 +757,156 @@ def test_orphan_recovery_rejects_unverified_members_without_signal(
     assert signals == []
 
 
-def test_converged_cleanup_accepts_record_removed_by_supervisor(
+def test_converged_cleanup_retains_claim_and_rejects_name_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     operations = _system_operations(tmp_path)
     record = operations.data_root / "runtime/backend.pid"
-    payload: dict[str, object] = {}
+    payload = _ownership_payload(tmp_path)
+    record.write_text(json.dumps(payload), encoding="utf-8")
+    record.chmod(0o600)
     monkeypatch.setattr(process_state, "_verified_record_members", lambda _payload: ())
     monkeypatch.setattr(process_state, "_port_open", lambda _port: False)
 
-    operations._remove_converged_record(record, "backend", payload)
+    claimed = operations._claim_record("backend")
+    assert claimed is not None
+    operations._remove_converged_record(claimed, "backend")
+    claim_path = record.parent / claimed.name
+    assert claim_path.is_file()
 
-    record.write_text("{}\n", encoding="utf-8")
+    displaced = record.parent / "displaced-claim"
+    claim_path.rename(displaced)
+    claim_path.write_text("{}\n", encoding="utf-8")
+    claim_path.chmod(0o600)
+    try:
+        with pytest.raises(ServiceError, match="record changed"):
+            operations._remove_converged_record(claimed, "backend")
+        assert claim_path.read_text(encoding="utf-8") == "{}\n"
+        assert json.loads(displaced.read_text(encoding="utf-8")) == payload
+    finally:
+        claimed.close()
+
+
+def test_dangling_record_and_replaced_runtime_parent_are_unsafe(tmp_path: Path) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    record.symlink_to(tmp_path / "missing-record")
+
+    assert operations.state("backend") == "unsafe"
+    with pytest.raises(ServiceError, match="unverified"):
+        operations.stop("backend")
+    assert record.is_symlink()
+
+    trusted_runtime = operations.data_root / "trusted-runtime"
+    runtime.rename(trusted_runtime)
+    replacement = tmp_path / "replacement-runtime"
+    replacement.mkdir()
+    runtime.symlink_to(replacement, target_is_directory=True)
+
+    assert operations.state("backend") == "unsafe"
+    with pytest.raises(ServiceError, match="runtime parent changed"):
+        operations.stop("backend")
+    assert runtime.is_symlink()
+
+
+def test_backend_and_ollama_dangling_records_are_both_unsafe(tmp_path: Path) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    for kind in ("backend", "ollama"):
+        (runtime / f"{kind}.pid").symlink_to(tmp_path / f"missing-{kind}")
+
+    assert operations.state("backend") == "unsafe"
+    assert operations.state("ollama") == "unsafe"
+    for kind in ("backend", "ollama"):
+        with pytest.raises(ServiceError, match="unverified"):
+            operations.stop(kind)
+        assert (runtime / f"{kind}.pid").is_symlink()
+
+
+def test_stop_claim_never_removes_public_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    payload = _ownership_payload(tmp_path)
+    record.write_text(json.dumps(payload), encoding="utf-8")
     record.chmod(0o600)
-    with pytest.raises(ServiceError, match="record changed"):
-        operations._remove_converged_record(record, "backend", payload)
+    claimed = threading.Barrier(2)
+    resume = threading.Barrier(2)
+    original_rename = process_state._rename_entry_exclusive
+    signals: list[int] = []
+
+    def synchronized_rename(parent: int, source: str, destination: str) -> None:
+        original_rename(parent, source, destination)
+        if source == "backend.pid" and destination.startswith(".backend.pid.claim-"):
+            claimed.wait(timeout=5)
+            resume.wait(timeout=5)
+
+    monkeypatch.setattr(process_state, "_rename_entry_exclusive", synchronized_rename)
+    monkeypatch.setattr(process_state, "_verified_record_members", lambda _payload: ())
+    monkeypatch.setattr(process_state, "_port_open", lambda _port: False)
+    monkeypatch.setattr(
+        process_state,
+        "_signal_snapshot",
+        lambda snapshot, _requested: signals.append(snapshot.pid) or True,
+    )
+    errors: list[BaseException] = []
+
+    def stop() -> None:
+        try:
+            operations.stop("backend")
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=stop)
+    worker.start()
+    claimed.wait(timeout=5)
+    record.symlink_to(tmp_path / "foreign-target")
+    resume.wait(timeout=5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert signals == []
+    assert record.is_symlink()
+
+
+def test_record_writer_never_overwrites_unverified_public_entry(tmp_path: Path) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    record.write_text("foreign-record\n", encoding="utf-8")
+    record.chmod(0o600)
+    before = record.stat()
+
+    with pytest.raises(ServiceError, match="unverified"):
+        process_state._write_record(record, _ownership_payload(tmp_path))
+
+    after = record.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert record.read_text(encoding="utf-8") == "foreign-record\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
+def test_retained_record_claims_allow_a_new_service_generation(tmp_path: Path) -> None:
+    with socket.socket() as probe:
+        if probe.connect_ex(("127.0.0.1", 8765)) == 0:
+            pytest.skip("backend test port is occupied")
+    operations = _system_operations(tmp_path)
+
+    first = operations.launch("backend")
+    operations.stop("backend")
+    second = operations.launch("backend")
+    try:
+        assert second.nonce != first.nonce
+        assert operations.state("backend") == "owned"
+    finally:
+        operations.stop("backend")
+
+    claims = list((operations.data_root / "runtime").glob(".backend.pid.claim-*"))
+    assert len(claims) >= 2
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
@@ -1023,6 +1194,10 @@ def test_supervisor_adopts_descendants_when_leader_exits_before_first_group_scan
 ) -> None:
     record = tmp_path / "runtime/backend.pid"
     record.parent.mkdir(parents=True)
+    record_parent_fd = os.open(
+        record.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
     descendants_path = tmp_path / "descendants.json"
     ready_read, ready_write = os.pipe()
     activation_read, activation_write = os.pipe()
@@ -1063,6 +1238,7 @@ def test_supervisor_adopts_descendants_when_leader_exits_before_first_group_scan
     monkeypatch.setattr(process_state, "_extend_tracked_group", release_before_first_scan)
     arguments = argparse.Namespace(
         record=record,
+        record_parent_fd=record_parent_fd,
         kind="backend",
         nonce="a" * 32,
         port=8765,
@@ -1084,6 +1260,7 @@ def test_supervisor_adopts_descendants_when_leader_exits_before_first_group_scan
             os._exit(result)
 
     os.close(ready_write)
+    os.close(record_parent_fd)
     os.close(activation_read)
     os.close(activation_write)
     supervisor_snapshot = process_state._snapshot(supervisor_pid)
@@ -1096,7 +1273,7 @@ def test_supervisor_adopts_descendants_when_leader_exits_before_first_group_scan
         assert found == supervisor_pid
         assert os.waitstatus_to_exitcode(status) == 0
         assert all(process_state._snapshot(pid) is None for pid in descendants.values())
-        assert not record.exists()
+        assert record.is_file()
     finally:
         with suppress(OSError):
             os.close(ready_read)
