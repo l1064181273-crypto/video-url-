@@ -668,18 +668,23 @@ class FirstInstallPublisher:
         candidate, _owner = self._extension_candidate_paths(payload)
         bootstrap = self._extension_bootstrap_path(payload)
         tombstone = self._extension_tombstone_path(payload)
+        deletion = self._extension_deletion_path(payload)
         expected = {candidate}
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
         observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
+        observed_deletions = set(self.data_root.glob(".extension.next.deleting-*"))
         if (
             observed - expected
             or observed_bootstraps - {bootstrap}
             or observed_tombstones - {tombstone}
+            or observed_deletions - {deletion}
         ):
             raise PublishError("unknown extension staging candidate exists")
         owned_paths = [
-            path for path in (candidate, bootstrap, tombstone) if path.exists() or path.is_symlink()
+            path
+            for path in (candidate, bootstrap, tombstone, deletion)
+            if path.exists() or path.is_symlink()
         ]
         if owned_paths:
             if len(owned_paths) != 1 or not self._extension_candidate_is_owned(
@@ -705,15 +710,20 @@ class FirstInstallPublisher:
     def _extension_tombstone_path(self, payload: dict[str, Any]) -> Path:
         return self.data_root / f".extension.next.tombstone-{payload['transaction_id']}"
 
+    def _extension_deletion_path(self, payload: dict[str, Any]) -> Path:
+        return self.data_root / f".extension.next.deleting-{payload['transaction_id']}"
+
     def _validate_extension_candidate_namespace(self, payload: dict[str, Any]) -> None:
         candidate, _owner = self._extension_candidate_paths(payload)
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
         observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
+        observed_deletions = set(self.data_root.glob(".extension.next.deleting-*"))
         if (
             observed
             or observed_bootstraps
             or observed_tombstones
+            or observed_deletions
             or candidate.exists()
             or candidate.is_symlink()
         ):
@@ -803,17 +813,22 @@ class FirstInstallPublisher:
         candidate, _owner = self._extension_candidate_paths(payload)
         bootstrap = self._extension_bootstrap_path(payload)
         tombstone = self._extension_tombstone_path(payload)
+        deletion = self._extension_deletion_path(payload)
         observed = set(self.data_root.glob("extension.next.candidate-*"))
         observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
         observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
+        observed_deletions = set(self.data_root.glob(".extension.next.deleting-*"))
         if (
             observed - {candidate}
             or observed_bootstraps - {bootstrap}
             or observed_tombstones - {tombstone}
+            or observed_deletions - {deletion}
         ):
             raise PublishError("unknown extension staging candidate exists")
         existing = [
-            path for path in (candidate, bootstrap, tombstone) if path.exists() or path.is_symlink()
+            path
+            for path in (candidate, bootstrap, tombstone, deletion)
+            if path.exists() or path.is_symlink()
         ]
         if not existing:
             return
@@ -828,6 +843,7 @@ class FirstInstallPublisher:
     ) -> None:
         original = candidate
         tombstone = self._extension_tombstone_path(payload)
+        deletion = self._extension_deletion_path(payload)
         descriptor = self._open_owned_extension_candidate_at(
             candidate,
             ".owner.json",
@@ -878,6 +894,42 @@ class FirstInstallPublisher:
                 descriptor = claimed_descriptor
                 candidate = tombstone
                 self._point("extension-candidate", "after_tombstone_claim")
+            if candidate != deletion:
+                if deletion.exists() or deletion.is_symlink():
+                    raise PublishError("extension staging deletion claim is occupied")
+                self._point("extension-candidate", "before_deletion_claim")
+                _rename_directory_exclusive(candidate, deletion)
+                _fsync_directory(candidate.parent)
+                claimed_descriptor = -1
+                try:
+                    claimed_descriptor = self._open_owned_extension_candidate_at(
+                        deletion,
+                        ".owner.json",
+                        payload,
+                    )
+                    claimed_metadata = os.fstat(claimed_descriptor)
+                    held_metadata = os.fstat(descriptor)
+                    if (
+                        claimed_metadata.st_dev != held_metadata.st_dev
+                        or claimed_metadata.st_ino != held_metadata.st_ino
+                    ):
+                        raise PublishError(
+                            "extension staging ownership changed during deletion claim"
+                        )
+                except Exception as claim_error:
+                    if claimed_descriptor >= 0:
+                        os.close(claimed_descriptor)
+                    with suppress(Exception):
+                        if not candidate.exists() and not candidate.is_symlink():
+                            _rename_directory_exclusive(deletion, candidate)
+                            _fsync_directory(candidate.parent)
+                    raise PublishError(
+                        "extension staging ownership changed during deletion claim"
+                    ) from claim_error
+                os.close(descriptor)
+                descriptor = claimed_descriptor
+                candidate = deletion
+                self._point("extension-candidate", "after_deletion_claim")
             self._remove_directory_contents(descriptor)
             os.rmdir(candidate.name, dir_fd=parent_descriptor)
             os.fsync(parent_descriptor)
@@ -891,6 +943,7 @@ class FirstInstallPublisher:
                 or list(self.data_root.glob("extension.next.candidate-*"))
                 or list(self.data_root.glob(".extension.next.bootstrap-*"))
                 or list(self.data_root.glob(".extension.next.tombstone-*"))
+                or list(self.data_root.glob(".extension.next.deleting-*"))
             ):
                 raise PublishError("extension staging candidate changed during removal")
         finally:

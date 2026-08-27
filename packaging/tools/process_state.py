@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import http.client
 import json
@@ -461,6 +462,14 @@ def _record_matches_identity(payload: dict[str, Any], expected: ServiceIdentity)
         and payload.get("supervisor") == _snapshot_payload(expected.supervisor)
         and payload.get("service") == _snapshot_payload(expected.service)
     )
+
+
+def _record_is_absent(path: Path) -> bool:
+    try:
+        path.lstat()
+    except OSError as exc:
+        return exc.errno == errno.ENOENT
+    return False
 
 
 def _read_record_payload(path: Path, kind: str, port: int) -> dict[str, Any] | None:
@@ -1087,7 +1096,7 @@ class SystemServiceOperations:
     def state(self, kind: str) -> str:
         record_path = self._record_path(kind)
         port = self._port(kind)
-        if not record_path.exists():
+        if _record_is_absent(record_path):
             return "unsafe" if _port_open(port) else "absent"
         verified = _verified_record_eventually(record_path, kind, port)
         return (
@@ -1208,11 +1217,11 @@ class SystemServiceOperations:
         if expected is not None and (
             payload is None or not _record_matches_identity(payload, expected)
         ):
-            if not record_path.exists() and not _port_open(self._port(kind)):
+            if _record_is_absent(record_path) and not _port_open(self._port(kind)):
                 return
             raise ServiceError(f"{kind} service generation changed")
         if verified is None:
-            if not record_path.exists() and not _port_open(self._port(kind)):
+            if _record_is_absent(record_path) and not _port_open(self._port(kind)):
                 return
             if payload is None:
                 raise ServiceError(f"{kind} service ownership is unverified")
@@ -1229,7 +1238,7 @@ class SystemServiceOperations:
             raise ServiceError(f"{kind} supervisor signal was rejected")
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if not record_path.exists():
+            if _record_is_absent(record_path):
                 if _port_open(self._port(kind)):
                     raise ServiceError(f"{kind} foreign listener remains after shutdown")
                 return
@@ -1244,7 +1253,7 @@ class SystemServiceOperations:
 
     def _reconcile_orphan(self, kind: str) -> None:
         record_path = self._record_path(kind)
-        if not record_path.exists():
+        if _record_is_absent(record_path):
             return
         if _verified_record(record_path, kind, self._port(kind)) is not None:
             return
@@ -1299,7 +1308,7 @@ class SystemServiceOperations:
             raise ServiceError(f"{kind} recorded members did not converge")
         if _port_open(self._port(kind)):
             raise ServiceError(f"{kind} port remains occupied after cleanup")
-        if not record_path.exists():
+        if _record_is_absent(record_path):
             return
         if _read_record_payload(record_path, kind, self._port(kind)) != payload:
             raise ServiceError(f"{kind} ownership record changed before cleanup")
