@@ -818,7 +818,35 @@ test("job controls, confirmed delete, and paginated events use the real backend"
     await expect(deleteButton).toBeFocused();
     const completedTab = page.getByRole("tab", { name: "已完成" });
     await completedTab.focus();
-    await completedTab.press("Space");
+    const keyboardEvents = await completedTab.evaluate((button) => {
+      let clicks = 0;
+      let cancelled = 0;
+      const countClick = (): void => {
+        clicks += 1;
+      };
+      button.addEventListener("click", countClick);
+      for (const [key, repeat] of [
+        ["Enter", false],
+        ["Enter", true],
+        [" ", false],
+        [" ", true],
+      ] as const) {
+        const event = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key,
+          repeat,
+        });
+        button.dispatchEvent(event);
+        if (event.defaultPrevented) {
+          cancelled += 1;
+        }
+      }
+      button.removeEventListener("click", countClick);
+      return { cancelled, clicks };
+    });
+    expect(keyboardEvents).toEqual({ cancelled: 4, clicks: 2 });
+    await expect(completedTab).toBeFocused();
     await expect(completedTab).toHaveAttribute("aria-selected", "true");
     await deleteButton.click();
     await expect(page.locator("#delete-dialog")).toBeVisible();

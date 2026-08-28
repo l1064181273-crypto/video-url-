@@ -252,6 +252,19 @@ filterTabs.addEventListener("click", (event) => {
   renderJobs(state.jobs, state.connection.status);
 });
 
+filterTabs.addEventListener("keydown", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement) || (event.key !== "Enter" && event.key !== " ")) {
+    return;
+  }
+  event.preventDefault();
+  if (event.repeat) {
+    return;
+  }
+  target.click();
+  target.focus();
+});
+
 jobList.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof Element)) {

@@ -83,6 +83,7 @@ class RecordEntry:
     descriptor: int
     metadata: os.stat_result
     retained: bool
+    commit_name: str | None = None
 
     def close(self) -> None:
         os.close(self.descriptor)
@@ -699,19 +700,85 @@ def _scan_record_entries(
     base_name: str,
     kind: str,
     port: int,
+    *,
+    allow_incomplete_commits: bool = False,
+    attempted_generations: dict[str, set[int]] | None = None,
 ) -> tuple[list[RecordEntry], list[RecordEntry]]:
     generation_prefix = f".{base_name}.generation-"
     claim_prefix = f".{base_name}.claim-"
     temporary_prefix = f".{base_name}.tmp-"
+    staged_prefix = f".{base_name}.staged-"
+    intent_prefix = f".{base_name}.intent-"
+    commit_prefix = f".{base_name}.commit-"
     names = os.listdir(parent_descriptor)
-    if any(name.startswith(temporary_prefix) for name in names):
-        raise ServiceError("service ownership record temporary is unverified")
-    public_names = [
-        name for name in names if name == base_name or name.startswith(generation_prefix)
-    ]
+    for name in names:
+        if not (name.startswith(temporary_prefix) or name.startswith(staged_prefix)):
+            continue
+        prefix = temporary_prefix if name.startswith(temporary_prefix) else staged_prefix
+        parts = name.removeprefix(prefix).split("-")
+        try:
+            metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except OSError as exc:
+            raise ServiceError("service ownership record temporary is unverified") from exc
+        if (
+            len(parts) != 3
+            or len(parts[0]) != 32
+            or any(character not in "0123456789abcdef" for character in parts[0])
+            or len(parts[1]) != 20
+            or not parts[1].isdigit()
+            or int(parts[1]) <= 0
+            or len(parts[2]) != 32
+            or any(character not in "0123456789abcdef" for character in parts[2])
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o777 != 0o600
+        ):
+            raise ServiceError("service ownership record temporary is unverified")
+    intent_names = [name for name in names if name.startswith(intent_prefix)]
+    for name in intent_names:
+        parts = name.removeprefix(intent_prefix).split("-")
+        if (
+            len(parts) != 3
+            or len(parts[0]) != 32
+            or any(character not in "0123456789abcdef" for character in parts[0])
+            or len(parts[1]) != 20
+            or not parts[1].isdigit()
+            or int(parts[1]) <= 0
+            or len(parts[2]) != 32
+            or any(character not in "0123456789abcdef" for character in parts[2])
+        ):
+            raise ServiceError(f"{kind} ownership record intent marker is invalid")
+        marker = _open_empty_record_marker(parent_descriptor, name)
+        if marker is None:
+            raise ServiceError(f"{kind} ownership record intent marker is unverified")
+        os.close(marker)
+    commit_names = [name for name in names if name.startswith(commit_prefix)]
+    public_names = [name for name in names if name.startswith(generation_prefix)]
+    try:
+        base_metadata = os.stat(
+            base_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        if exc.errno != errno.ENOENT:
+            raise ServiceError(f"{kind} ownership record is unverified") from exc
+    else:
+        ignore_compatibility_pointer = False
+        if stat.S_ISLNK(base_metadata.st_mode):
+            try:
+                target = os.readlink(base_name, dir_fd=parent_descriptor)
+            except OSError as exc:
+                raise ServiceError(f"{kind} ownership record is unverified") from exc
+            if target.startswith(staged_prefix) and target in names:
+                ignore_compatibility_pointer = True
+        if not ignore_compatibility_pointer:
+            public_names.append(base_name)
     claim_names = [name for name in names if name.startswith(claim_prefix)]
     records: list[RecordEntry] = []
     claims: list[RecordEntry] = []
+    invalid_commits: set[tuple[str, int]] = set()
     try:
         for name, retained in (
             *((name, False) for name in public_names),
@@ -737,6 +804,73 @@ def _scan_record_entries(
                     raise ServiceError(f"{kind} claimed ownership generation is invalid")
             entry = RecordEntry(generation, name, payload, descriptor, metadata, retained)
             (claims if retained else records).append(entry)
+        for commit_name in commit_names:
+            parts = commit_name.removeprefix(commit_prefix).split("-")
+            if (
+                len(parts) != 6
+                or len(parts[0]) != 32
+                or any(character not in "0123456789abcdef" for character in parts[0])
+                or len(parts[1]) != 20
+                or not parts[1].isdigit()
+                or int(parts[1]) <= 0
+                or any(
+                    not value or any(character not in "0123456789abcdef" for character in value)
+                    for value in parts[2:4]
+                )
+                or parts[4] != "staged"
+                or len(parts[5]) != 32
+                or any(character not in "0123456789abcdef" for character in parts[5])
+            ):
+                raise ServiceError(f"{kind} ownership record commit marker is invalid")
+            marker = _open_empty_record_marker(parent_descriptor, commit_name)
+            if marker is None:
+                raise ServiceError(f"{kind} ownership record commit marker is unverified")
+            os.close(marker)
+            (
+                nonce,
+                encoded_generation,
+                encoded_device,
+                encoded_inode,
+                _target_kind,
+                attempt,
+            ) = parts
+            generation = int(encoded_generation)
+            if attempted_generations is not None:
+                attempted_generations.setdefault(nonce, set()).add(generation)
+            target_name = f"{staged_prefix}{nonce}-{encoded_generation}-{attempt}"
+            opened = _open_record_at(parent_descriptor, target_name, kind, port)
+            if opened is None:
+                invalid_commits.add((nonce, generation))
+                continue
+            payload, descriptor, metadata = opened
+            if (
+                payload["nonce"] != nonce
+                or int(payload.get("record_generation", 1)) != generation
+                or metadata.st_dev != int(encoded_device, 16)
+                or metadata.st_ino != int(encoded_inode, 16)
+            ):
+                os.close(descriptor)
+                invalid_commits.add((nonce, generation))
+                continue
+            records.append(
+                RecordEntry(
+                    generation,
+                    target_name,
+                    payload,
+                    descriptor,
+                    metadata,
+                    False,
+                    commit_name,
+                )
+            )
+        valid_commits = {
+            (str(entry.payload["nonce"]), entry.generation)
+            for entry in records
+            if entry.commit_name is not None
+        }
+        unresolved_commits = invalid_commits - valid_commits
+        if unresolved_commits and not allow_incomplete_commits:
+            raise ServiceError(f"{kind} committed ownership record is unverified")
         seen: set[tuple[str, int]] = set()
         for entry in [*records, *claims]:
             key = (str(entry.payload["nonce"]), entry.generation)
@@ -749,6 +883,98 @@ def _scan_record_entries(
             with suppress(OSError):
                 entry.close()
         raise
+
+
+def _open_empty_record_marker(parent_descriptor: int, name: str) -> int | None:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=parent_descriptor,
+        )
+    except OSError:
+        return None
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or metadata.st_mode & 0o777 != 0o600
+        or metadata.st_size != 0
+    ):
+        os.close(descriptor)
+        return None
+    return descriptor
+
+
+def _ensure_record_compatibility_pointer(
+    parent_descriptor: int,
+    base_name: str,
+    target_name: str,
+    payload: dict[str, Any],
+) -> None:
+    try:
+        metadata = os.stat(
+            base_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        try:
+            os.symlink(target_name, base_name, dir_fd=parent_descriptor)
+        except FileExistsError as exc:
+            raise ServiceError("service ownership compatibility name became occupied") from exc
+    else:
+        if not stat.S_ISLNK(metadata.st_mode):
+            raise ServiceError("service ownership compatibility name is occupied")
+        try:
+            observed_target = os.readlink(base_name, dir_fd=parent_descriptor)
+        except OSError as exc:
+            raise ServiceError("service ownership compatibility pointer is unverified") from exc
+        if observed_target != target_name:
+            staged_prefix = f".{base_name}.staged-"
+            target_parts = observed_target.removeprefix(staged_prefix).split("-")
+            generation = payload.get("record_generation")
+            if (
+                Path(observed_target).name != observed_target
+                or not observed_target.startswith(staged_prefix)
+                or len(target_parts) != 3
+                or target_parts[0] != payload["nonce"]
+                or type(generation) is not int
+                or target_parts[1] != f"{generation:020d}"
+                or len(target_parts[2]) != 32
+                or any(character not in "0123456789abcdef" for character in target_parts[2])
+            ):
+                raise ServiceError("service ownership compatibility pointer changed")
+            opened = _open_record_at(
+                parent_descriptor,
+                observed_target,
+                str(payload["kind"]),
+                int(payload["port"]),
+            )
+            if opened is None:
+                raise ServiceError("service ownership compatibility pointer is unverified")
+            observed_payload, observed_descriptor, _observed_metadata = opened
+            try:
+                if observed_payload != payload:
+                    raise ServiceError("service ownership compatibility pointer changed")
+            finally:
+                os.close(observed_descriptor)
+            target_name = observed_target
+    try:
+        final_metadata = os.stat(
+            base_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        final_target = os.readlink(base_name, dir_fd=parent_descriptor)
+    except OSError as exc:
+        raise ServiceError("service ownership compatibility pointer is unverified") from exc
+    if not stat.S_ISLNK(final_metadata.st_mode) or final_target != target_name:
+        raise ServiceError("service ownership compatibility pointer changed")
 
 
 def _close_record_entries(entries: list[RecordEntry], *, except_fd: int = -1) -> None:
@@ -1126,6 +1352,15 @@ def _record_boundary(_name: str) -> None:
     return
 
 
+def _write_all(descriptor: int, value: bytes | memoryview) -> None:
+    remaining = memoryview(value)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise ServiceError("service ownership record write made no progress")
+        remaining = remaining[written:]
+
+
 def _write_record(
     path: Path,
     payload: dict[str, Any],
@@ -1145,24 +1380,64 @@ def _write_record(
         raise
     entries: list[RecordEntry] = []
     try:
+        attempted_generations: dict[str, set[int]] = {}
         records, claims = _scan_record_entries(
             owned_parent_descriptor,
             path.name,
             str(payload["kind"]),
             int(payload["port"]),
+            allow_incomplete_commits=True,
+            attempted_generations=attempted_generations,
         )
         entries = [*records, *claims]
         generation = payload.get("record_generation")
         if type(generation) is not int or generation <= 0:
             raise ServiceError("service ownership record generation is invalid")
         nonce = str(payload["nonce"])
+        highest_attempted_generation = max(
+            attempted_generations.get(nonce, set()),
+            default=0,
+        )
+        exact = [
+            entry
+            for entry in records
+            if entry.payload["nonce"] == nonce and entry.generation == generation
+        ]
+        if exact:
+            newest_generation = max(
+                [entry.generation for entry in entries if entry.payload["nonce"] == nonce]
+                + [highest_attempted_generation]
+            )
+            if len(exact) == 1 and exact[0].payload == payload and generation == newest_generation:
+                os.fsync(exact[0].descriptor)
+                if exact[0].commit_name is not None:
+                    marker = _open_empty_record_marker(
+                        owned_parent_descriptor,
+                        exact[0].commit_name,
+                    )
+                    if marker is None:
+                        raise ServiceError("service ownership record commit marker is unverified")
+                    try:
+                        os.fsync(marker)
+                    finally:
+                        os.close(marker)
+                    if generation == 1:
+                        _ensure_record_compatibility_pointer(
+                            owned_parent_descriptor,
+                            path.name,
+                            exact[0].name,
+                            payload,
+                        )
+                os.fsync(owned_parent_descriptor)
+                return
+            raise ServiceError("service ownership record generation changed")
         matching = [entry for entry in entries if entry.payload["nonce"] == nonce]
         if matching:
             newest = max(matching, key=lambda entry: entry.generation)
-            if generation != newest.generation + 1:
+            if generation != newest.generation + 1 or highest_attempted_generation > generation:
                 raise ServiceError("service ownership record generation changed")
         else:
-            if generation != 1:
+            if generation != 1 or highest_attempted_generation > generation:
                 raise ServiceError("service ownership record publication is blocked")
             for entry in entries:
                 if _verified_record_members(entry.payload) != ():
@@ -1188,12 +1463,9 @@ def _write_record(
                     raise ServiceError("service ownership record changed before publication")
             finally:
                 os.close(reopened_descriptor)
-        target_name = (
-            path.name
-            if not entries and _entry_is_absent(owned_parent_descriptor, path.name)
-            else f".{path.name}.generation-{nonce}-{generation:020d}"
-        )
-        _record_boundary("write:before_destination_publish")
+        attempt = uuid.uuid4().hex
+        target_kind = "staged"
+        target_name = f".{path.name}.staged-{nonce}-{generation:020d}-{attempt}"
         try:
             descriptor = os.open(
                 target_name,
@@ -1209,33 +1481,109 @@ def _write_record(
         except FileExistsError as exc:
             raise ServiceError("service ownership record publication is blocked") from exc
         try:
-            published_metadata = os.fstat(descriptor)
-            view = memoryview(encoded)
-            while view:
-                written = os.write(descriptor, view)
-                view = view[written:]
+            os.fchmod(descriptor, 0o600)
+            staged_metadata = os.fstat(descriptor)
+            _record_boundary("write:after_staging_create")
+            split = max(1, len(encoded) // 2)
+            _write_all(descriptor, encoded[:split])
+            _record_boundary("write:after_partial_write")
+            _write_all(descriptor, encoded[split:])
             os.fsync(descriptor)
+            _record_boundary("write:after_file_fsync")
+            staged = _open_record_at(
+                owned_parent_descriptor,
+                target_name,
+                str(payload["kind"]),
+                int(payload["port"]),
+            )
+            if staged is None:
+                raise ServiceError("service ownership record staging is unverified")
+            staged_payload, staged_descriptor, staged_final_metadata = staged
+            try:
+                if (
+                    staged_payload != payload
+                    or staged_final_metadata.st_dev != staged_metadata.st_dev
+                    or staged_final_metadata.st_ino != staged_metadata.st_ino
+                ):
+                    raise ServiceError("service ownership record staging changed")
+            finally:
+                os.close(staged_descriptor)
+            os.fsync(owned_parent_descriptor)
+            _record_boundary("write:after_staging_parent_fsync")
+            _record_boundary("write:before_destination_publish")
+            staged = _open_record_at(
+                owned_parent_descriptor,
+                target_name,
+                str(payload["kind"]),
+                int(payload["port"]),
+            )
+            if staged is None:
+                raise ServiceError("service ownership record staging changed")
+            final_payload, final_descriptor, final_metadata = staged
+            try:
+                if (
+                    final_payload != payload
+                    or final_metadata.st_dev != staged_metadata.st_dev
+                    or final_metadata.st_ino != staged_metadata.st_ino
+                ):
+                    raise ServiceError("service ownership record staging changed")
+            finally:
+                os.close(final_descriptor)
+            _record_boundary("write:after_final_staging_check")
+            commit_name = (
+                f".{path.name}.commit-{nonce}-{generation:020d}-"
+                f"{staged_metadata.st_dev:x}-{staged_metadata.st_ino:x}-"
+                f"{target_kind}-{attempt}"
+            )
+            try:
+                marker_descriptor = os.open(
+                    commit_name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                    0o600,
+                    dir_fd=owned_parent_descriptor,
+                )
+            except FileExistsError as exc:
+                raise ServiceError("service ownership record publication is blocked") from exc
+            try:
+                os.fchmod(marker_descriptor, 0o600)
+                os.fsync(marker_descriptor)
+            finally:
+                os.close(marker_descriptor)
+            if not entries:
+                _ensure_record_compatibility_pointer(
+                    owned_parent_descriptor,
+                    path.name,
+                    target_name,
+                    payload,
+                )
+            _record_boundary("write:after_destination_publish")
+            os.fsync(owned_parent_descriptor)
+            _record_boundary("write:after_destination_parent_fsync")
+            published = _open_record_at(
+                owned_parent_descriptor,
+                target_name,
+                str(payload["kind"]),
+                int(payload["port"]),
+            )
+            if published is None:
+                raise ServiceError("service ownership record publication is unverified")
+            published_payload, published_descriptor, published_final_metadata = published
+            try:
+                if (
+                    published_payload != payload
+                    or published_final_metadata.st_dev != staged_metadata.st_dev
+                    or published_final_metadata.st_ino != staged_metadata.st_ino
+                ):
+                    raise ServiceError("service ownership record publication changed")
+            finally:
+                os.close(published_descriptor)
         finally:
             os.close(descriptor)
-        os.fsync(owned_parent_descriptor)
-        published = _open_record_at(
-            owned_parent_descriptor,
-            target_name,
-            str(payload["kind"]),
-            int(payload["port"]),
-        )
-        if published is None:
-            raise ServiceError("service ownership record publication is unverified")
-        published_payload, published_descriptor, published_final_metadata = published
-        try:
-            if (
-                published_payload != payload
-                or published_final_metadata.st_dev != published_metadata.st_dev
-                or published_final_metadata.st_ino != published_metadata.st_ino
-            ):
-                raise ServiceError("service ownership record publication changed")
-        finally:
-            os.close(published_descriptor)
     finally:
         _close_record_entries(entries)
         os.close(lock_descriptor)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import signal
 import socket
+import stat
 import sys
 import threading
 from contextlib import suppress
@@ -945,6 +947,412 @@ def test_record_writer_never_overwrites_unverified_public_entry(tmp_path: Path) 
     assert record.read_text(encoding="utf-8") == "foreign-record\n"
 
 
+def test_record_writer_never_publishes_staging_name_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    process_state._write_record(record, _ownership_payload(tmp_path, generation=1))
+    payload = _ownership_payload(tmp_path, generation=2)
+    reached_publish = threading.Barrier(2)
+    resume = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def synchronized_write(name: str) -> None:
+        if name == "write:after_final_staging_check":
+            reached_publish.wait(timeout=5)
+            resume.wait(timeout=5)
+
+    monkeypatch.setattr(process_state, "_record_boundary", synchronized_write)
+
+    def write() -> None:
+        try:
+            process_state._write_record(record, payload)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=write)
+    worker.start()
+    reached_publish.wait(timeout=5)
+    staged = [
+        *runtime.glob(".backend.pid.tmp-*-00000000000000000002-*"),
+        *runtime.glob(".backend.pid.staged-*-00000000000000000002-*"),
+    ]
+    assert len(staged) == 1
+    staging_name = staged[0]
+    displaced = runtime / "displaced-owned-staging"
+    staging_name.rename(displaced)
+    staging_name.write_text("foreign-staging\n", encoding="utf-8")
+    staging_name.chmod(0o600)
+    foreign_before = staging_name.stat()
+    resume.wait(timeout=5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ServiceError)
+    foreign_after = staging_name.stat()
+    assert (foreign_after.st_dev, foreign_after.st_ino) == (
+        foreign_before.st_dev,
+        foreign_before.st_ino,
+    )
+    assert staging_name.read_text(encoding="utf-8") == "foreign-staging\n"
+    assert process_state._read_record_payload(record, "backend", 8765) is None
+
+    monkeypatch.setattr(process_state, "_record_boundary", lambda _name: None)
+    process_state._write_record(record, payload)
+
+    selected = process_state._read_record_payload(record, "backend", 8765)
+    assert selected is not None
+    assert selected["record_generation"] == 2
+    assert staging_name.read_text(encoding="utf-8") == "foreign-staging\n"
+
+
+def test_first_record_publish_rejects_foreign_compatibility_name_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    payload = _ownership_payload(tmp_path, generation=1)
+    reached_publish = threading.Barrier(2)
+    resume = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def synchronized_write(name: str) -> None:
+        if name == "write:after_final_staging_check":
+            reached_publish.wait(timeout=5)
+            resume.wait(timeout=5)
+
+    monkeypatch.setattr(process_state, "_record_boundary", synchronized_write)
+
+    def write() -> None:
+        try:
+            process_state._write_record(record, payload)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=write)
+    worker.start()
+    reached_publish.wait(timeout=5)
+    record.write_text("foreign-record\n", encoding="utf-8")
+    record.chmod(0o600)
+    foreign_before = record.stat()
+    resume.wait(timeout=5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ServiceError)
+    foreign_after = record.stat()
+    assert (foreign_after.st_dev, foreign_after.st_ino) == (
+        foreign_before.st_dev,
+        foreign_before.st_ino,
+    )
+    assert record.read_text(encoding="utf-8") == "foreign-record\n"
+
+    record.unlink()
+    monkeypatch.setattr(process_state, "_record_boundary", lambda _name: None)
+    process_state._write_record(record, payload)
+
+    assert record.is_symlink()
+    selected = process_state._read_record_payload(record, "backend", 8765)
+    assert selected is not None
+    assert selected["record_generation"] == 1
+
+
+def test_first_record_retry_accepts_matching_orphan_compatibility_pointer(
+    tmp_path: Path,
+) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    payload = _ownership_payload(tmp_path, generation=1)
+    orphan_name = f".backend.pid.staged-{payload['nonce']}-{1:020d}-{'c' * 32}"
+    orphan = runtime / orphan_name
+    orphan.write_text(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    orphan.chmod(0o600)
+    record.symlink_to(orphan_name)
+
+    process_state._write_record(record, payload)
+
+    assert record.is_symlink()
+    assert os.readlink(record) == orphan_name
+    selected = process_state._read_record_payload(record, "backend", 8765)
+    assert selected is not None
+    assert selected["record_generation"] == 1
+
+
+def test_first_record_retry_rejects_orphan_pointer_name_with_wrong_generation(
+    tmp_path: Path,
+) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    payload = _ownership_payload(tmp_path, generation=1)
+    orphan_name = f".backend.pid.staged-{'d' * 32}-{2:020d}-{'c' * 32}"
+    orphan = runtime / orphan_name
+    orphan.write_text(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    orphan.chmod(0o600)
+    record.symlink_to(orphan_name)
+
+    with pytest.raises(ServiceError, match="compatibility pointer changed"):
+        process_state._write_record(record, payload)
+
+    assert record.is_symlink()
+    assert os.readlink(record) == orphan_name
+
+
+def test_orphan_intent_does_not_hide_legacy_record_or_block_retry(tmp_path: Path) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    generation_one = _ownership_payload(tmp_path, generation=1)
+    generation_two = _ownership_payload(tmp_path, generation=2)
+    record.write_text(json.dumps(generation_one), encoding="utf-8")
+    record.chmod(0o600)
+    attempt = "d" * 32
+    intent = runtime / (f".backend.pid.intent-{generation_one['nonce']}-{2:020d}-{attempt}")
+    intent.touch(mode=0o600)
+
+    process_state._write_record(record, generation_two)
+
+    selected = process_state._read_record_payload(record, "backend", 8765)
+    assert selected is not None
+    assert selected["record_generation"] == 2
+
+
+def test_new_record_protocol_does_not_create_intent_markers(tmp_path: Path) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+
+    process_state._write_record(record, _ownership_payload(tmp_path, generation=1))
+    process_state._write_record(record, _ownership_payload(tmp_path, generation=2))
+
+    assert not list(runtime.glob(".backend.pid.intent-*"))
+    assert len(list(runtime.glob(".backend.pid.staged-*"))) == 2
+    assert len(list(runtime.glob(".backend.pid.commit-*"))) == 2
+
+
+def test_record_writer_rejects_zero_progress_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    payload = _ownership_payload(tmp_path)
+    original_write = os.write
+    injected = False
+
+    def zero_once(descriptor: int, data: bytes | memoryview) -> int:
+        nonlocal injected
+        if not injected:
+            injected = True
+            return 0
+        return original_write(descriptor, data)
+
+    monkeypatch.setattr(process_state.os, "write", zero_once)
+
+    with pytest.raises(ServiceError, match="no progress"):
+        process_state._write_record(record, payload)
+
+    assert process_state._read_record_payload(record, "backend", 8765) is None
+
+
+def test_record_writer_rejects_stale_exact_generation_replay(tmp_path: Path) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    generation_one = _ownership_payload(tmp_path, generation=1)
+    process_state._write_record(record, generation_one)
+    process_state._write_record(record, _ownership_payload(tmp_path, generation=2))
+
+    with pytest.raises(ServiceError, match="generation"):
+        process_state._write_record(record, generation_one)
+
+
+def test_record_writer_exact_retry_repeats_parent_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    record = runtime / "backend.pid"
+    payload = _ownership_payload(tmp_path)
+
+    def interrupt_after_publish(name: str) -> None:
+        if name == "write:after_destination_publish":
+            raise OSError("injected post-publish interruption")
+
+    with monkeypatch.context() as interruption:
+        interruption.setattr(
+            process_state,
+            "_record_boundary",
+            interrupt_after_publish,
+        )
+        with pytest.raises(OSError, match="post-publish"):
+            process_state._write_record(record, payload)
+
+    original_fsync = os.fsync
+    parent_fsyncs = 0
+
+    def counting_fsync(descriptor: int) -> None:
+        nonlocal parent_fsyncs
+        metadata = os.fstat(descriptor)
+        runtime_metadata = runtime.stat()
+        if (
+            stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_dev == runtime_metadata.st_dev
+            and metadata.st_ino == runtime_metadata.st_ino
+        ):
+            parent_fsyncs += 1
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(process_state.os, "fsync", counting_fsync)
+    process_state._write_record(record, payload)
+
+    assert parent_fsyncs >= 1
+
+
+@pytest.mark.parametrize("generation", [1, 2])
+@pytest.mark.parametrize("failure", ["partial_write", "file_fsync"])
+def test_record_writer_failure_never_exposes_partial_generation_and_retry_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    generation: int,
+    failure: str,
+) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    if generation == 2:
+        process_state._write_record(record, _ownership_payload(tmp_path, generation=1))
+    payload = _ownership_payload(tmp_path, generation=generation)
+    original_write = os.write
+    original_fsync = os.fsync
+    injected = False
+
+    def failing_write(descriptor: int, data: bytes | memoryview) -> int:
+        nonlocal injected
+        if not injected:
+            injected = True
+            original_write(descriptor, data[: max(1, len(data) // 2)])
+            raise OSError("injected partial record write")
+        return original_write(descriptor, data)
+
+    def failing_fsync(descriptor: int) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            raise OSError("injected record fsync failure")
+        original_fsync(descriptor)
+
+    with monkeypatch.context() as failure_patch:
+        if failure == "partial_write":
+            failure_patch.setattr(process_state.os, "write", failing_write)
+        else:
+            failure_patch.setattr(process_state.os, "fsync", failing_fsync)
+        with pytest.raises(OSError, match="injected"):
+            process_state._write_record(record, payload)
+
+    complete = [
+        record,
+        *record.parent.glob(".backend.pid.generation-*"),
+    ]
+    valid_generations = [
+        path
+        for path in complete
+        if path.exists() and process_state._read_record_payload(path, "backend", 8765) is not None
+    ]
+    assert len(valid_generations) == generation - 1
+    assert [
+        *record.parent.glob(".backend.pid.intent-*"),
+        *record.parent.glob(".backend.pid.staged-*"),
+    ]
+
+    process_state._write_record(record, payload)
+
+    selected = process_state._read_record_payload(record, "backend", 8765)
+    assert selected is not None
+    assert selected["record_generation"] == generation
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires fork and macOS record runtime")
+@pytest.mark.parametrize("generation", [1, 2])
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "write:after_staging_create",
+        "write:after_partial_write",
+        "write:after_file_fsync",
+        "write:after_staging_parent_fsync",
+        "write:after_final_staging_check",
+        "write:after_destination_publish",
+        "write:after_destination_parent_fsync",
+    ],
+)
+def test_record_publication_sigkill_boundaries_allow_safe_retry(
+    tmp_path: Path,
+    generation: int,
+    boundary: str,
+) -> None:
+    operations = _system_operations(tmp_path)
+    record = operations.data_root / "runtime/backend.pid"
+    if generation == 2:
+        process_state._write_record(record, _ownership_payload(tmp_path, generation=1))
+    payload = _ownership_payload(tmp_path, generation=generation)
+    marker_read, marker_write = os.pipe()
+    gate_read, gate_write = os.pipe()
+    child = os.fork()
+    if child == 0:
+        try:
+            os.close(marker_read)
+            os.close(gate_write)
+
+            def failpoint(name: str) -> None:
+                if name == boundary:
+                    os.write(marker_write, b"B")
+                    os.read(gate_read, 1)
+
+            process_state._record_boundary = failpoint
+            process_state._write_record(record, payload)
+        finally:
+            os._exit(0)
+
+    os.close(marker_write)
+    os.close(gate_read)
+    child_snapshot = process_state._snapshot(child)
+    try:
+        assert child_snapshot is not None
+        readable, _, _ = select.select([marker_read], [], [], 10)
+        assert readable and os.read(marker_read, 1) == b"B"
+        assert process_state._signal_snapshot(child_snapshot, signal.SIGKILL)
+        found, status = os.waitpid(child, 0)
+        assert found == child
+        assert os.waitstatus_to_exitcode(status) == -signal.SIGKILL
+
+        process_state._write_record(record, payload)
+
+        selected = process_state._read_record_payload(record, "backend", 8765)
+        assert selected is not None
+        assert selected["record_generation"] == generation
+    finally:
+        os.close(marker_read)
+        os.close(gate_write)
+        if child_snapshot is not None and process_state._token_is_live(child_snapshot):
+            process_state._signal_snapshot(child_snapshot, signal.SIGKILL)
+            with suppress(ChildProcessError):
+                os.waitpid(child, 0)
+
+
 def test_public_record_generation_must_exceed_retained_same_nonce(
     tmp_path: Path,
 ) -> None:
@@ -1048,6 +1456,42 @@ def test_device_record_open_is_nonblocking_and_rejected(kind: str, port: int) ->
         os.close(parent)
 
 
+@pytest.mark.parametrize("marker_kind", ["intent", "commit"])
+@pytest.mark.parametrize("entry_kind", ["fifo", "directory", "symlink"])
+def test_special_ownership_marker_is_bounded_unsafe(
+    tmp_path: Path,
+    marker_kind: str,
+    entry_kind: str,
+) -> None:
+    operations = _system_operations(tmp_path)
+    runtime = operations.data_root / "runtime"
+    nonce = "a" * 32
+    attempt = "b" * 32
+    marker = (
+        runtime / f".backend.pid.intent-{nonce}-{1:020d}-{attempt}"
+        if marker_kind == "intent"
+        else runtime / f".backend.pid.commit-{nonce}-{1:020d}-1-1-staged-{attempt}"
+    )
+    if entry_kind == "fifo":
+        os.mkfifo(marker, 0o600)
+    elif entry_kind == "directory":
+        marker.mkdir()
+    elif entry_kind == "symlink":
+        marker.symlink_to(tmp_path / "missing-marker")
+    else:
+        raise AssertionError("unknown special marker kind")
+
+    result: list[str] = []
+    worker = threading.Thread(
+        target=lambda: result.append(operations.state("backend")),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert result == ["unsafe"]
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")
 def test_retained_record_claims_allow_a_new_service_generation(tmp_path: Path) -> None:
     with socket.socket() as probe:
@@ -1065,9 +1509,9 @@ def test_retained_record_claims_allow_a_new_service_generation(tmp_path: Path) -
     finally:
         operations.stop("backend")
 
-    generations = list((operations.data_root / "runtime").glob(".backend.pid.generation-*"))
+    generations = list((operations.data_root / "runtime").glob(".backend.pid.commit-*"))
     assert record.is_file()
-    assert len(generations) >= 1
+    assert len(generations) >= 2
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS audit tokens are required")

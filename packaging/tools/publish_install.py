@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -86,34 +87,152 @@ def _fsync_tree(root: Path) -> None:
         _fsync_directory(current_path)
 
 
-def _rename_directory_exclusive(source: Path, destination: Path) -> None:
+def _write_all(descriptor: int, value: bytes | memoryview) -> None:
+    remaining = memoryview(value)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise PublishError("publication marker write made no progress")
+        remaining = remaining[written:]
+
+
+def _open_directory_descriptor(path: Path) -> int:
+    if not path.is_absolute() or ".." in path.parts:
+        raise PublishError("publication directory path is unsafe")
+    descriptor = os.open(
+        "/",
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
     try:
-        system = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-        renameatx_np = system.renameatx_np
-    except (AttributeError, OSError) as exc:
-        raise PublishError("exclusive directory rename is unavailable") from exc
-    renameatx_np.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameatx_np.restype = ctypes.c_int
+        for component in path.parts[1:]:
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _rename_open_publication_exclusive(
+    descriptor: int,
+    destination: Path,
+    component: str,
+    *,
+    source_parent_levels: int = 1,
+) -> None:
+    if sys.platform != "darwin":
+        raise PublishError("inode-bound publication rename is unavailable")
+    metadata = os.fstat(descriptor)
+    # Darwin exposes an FD-held vnode through a stable file-ID path.
+    source = Path("/.vol") / str(metadata.st_dev) / str(metadata.st_ino)
+    try:
+        source_metadata = source.lstat()
+    except OSError as exc:
+        raise PublishError("publication inode path is unavailable") from exc
+    expected_type = (
+        stat.S_ISLNK
+        if component == "current"
+        else stat.S_ISREG
+        if component == "file"
+        else stat.S_ISDIR
+    )
     if (
-        renameatx_np(
-            -2,
-            os.fsencode(source),
-            -2,
-            os.fsencode(destination),
-            0x00000004,
-        )
-        != 0
+        source_metadata.st_dev != metadata.st_dev
+        or source_metadata.st_ino != metadata.st_ino
+        or not expected_type(source_metadata.st_mode)
     ):
-        error = ctypes.get_errno()
-        if error == errno.EEXIST:
-            raise PublishError("extension next path became occupied")
-        raise OSError(error, os.strerror(error), destination)
+        raise PublishError("publication inode path changed")
+    try:
+        encoded_path = fcntl.fcntl(
+            descriptor,
+            fcntl.F_GETPATH,
+            b"\0" * 1024,
+        ).split(b"\0", 1)[0]
+        source_path = Path(os.fsdecode(encoded_path))
+    except (OSError, ValueError) as exc:
+        raise PublishError("publication source path is unavailable") from exc
+    if not source_path.is_absolute() or source_parent_levels <= 0:
+        raise PublishError("publication source path is unsafe")
+    source_parent = source_path
+    for _ in range(source_parent_levels):
+        source_parent = source_parent.parent
+    parent_descriptor = _open_directory_descriptor(source_parent)
+    try:
+        relative = source_path.relative_to(source_parent)
+        verification_descriptor = os.dup(parent_descriptor)
+        try:
+            try:
+                for part in relative.parts[:-1]:
+                    next_descriptor = os.open(
+                        part,
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=verification_descriptor,
+                    )
+                    os.close(verification_descriptor)
+                    verification_descriptor = next_descriptor
+                observed = os.stat(
+                    relative.parts[-1],
+                    dir_fd=verification_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise PublishError("publication source parent changed") from exc
+        finally:
+            os.close(verification_descriptor)
+        if observed.st_dev != metadata.st_dev or observed.st_ino != metadata.st_ino:
+            raise PublishError("publication source parent changed")
+        destination_parent_descriptor = _open_directory_descriptor(destination.parent)
+        try:
+            source_parent_metadata = os.fstat(parent_descriptor)
+            destination_parent_metadata = os.fstat(destination_parent_descriptor)
+            if (
+                destination_parent_metadata.st_dev != source_parent_metadata.st_dev
+                or destination_parent_metadata.st_ino != source_parent_metadata.st_ino
+            ):
+                raise PublishError("publication destination parent changed")
+        finally:
+            os.close(destination_parent_descriptor)
+        try:
+            system = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            renameatx_np = system.renameatx_np
+        except (AttributeError, OSError) as exc:
+            raise PublishError("exclusive publication rename is unavailable") from exc
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        if (
+            renameatx_np(
+                -2,
+                os.fsencode(source),
+                parent_descriptor,
+                os.fsencode(destination.name),
+                0x00000004,
+            )
+            != 0
+        ):
+            error = ctypes.get_errno()
+            if error == errno.EEXIST:
+                raise PublishError("publication destination became occupied")
+            raise OSError(error, os.strerror(error), destination)
+        os.fsync(parent_descriptor)
+    finally:
+        os.close(parent_descriptor)
 
 
 def tree_identity(path: Path) -> dict[str, str]:
@@ -241,6 +360,7 @@ class FirstInstallPublisher:
         payload = self.prepare_payload()
         self.journal.write_progress(payload)
         handle: object | None = None
+        durably_activated = False
         try:
             payload = self._switch("current", payload)
             payload = self._switch("extension", payload)
@@ -255,6 +375,8 @@ class FirstInstallPublisher:
             }
             self.journal.write_critical(payload)
             self.journal.verify_critical("COMMITTED")
+            payload = self._switch("current", payload)
+            payload = self._switch("extension", payload)
             self.services.activate(handle)
             if not self.services.healthy():
                 raise PublishError("activated service health failed")
@@ -266,15 +388,44 @@ class FirstInstallPublisher:
             }
             self._point("cleanup", "before_intent")
             self.journal.write_critical(payload)
+            durably_activated = True
             self._point("cleanup", "after_intent")
             self._cleanup_previous(payload)
             self.services.copy_token(self.data_root / "config/api-token")
-        except Exception:
-            if self.journal.committed_direction() == "rollback":
-                if handle is not None:
+        except Exception as publish_error:
+            recovery_errors: list[Exception] = []
+            if handle is not None and not durably_activated:
+                try:
+                    latest = self.journal.read_latest()
+                except JournalError:
+                    latest = None
+                durably_activated = (
+                    latest is not None
+                    and latest.payload["transaction_id"] == payload["transaction_id"]
+                    and latest.payload["state"] == "ACTIVATED"
+                    and latest.payload["decision"] == "activated"
+                )
+            if handle is not None and not durably_activated:
+                try:
                     self.services.stop_candidate()
-                self.converge_payload(payload, committed=False)
-                self._finalize_rollback(payload)
+                except Exception as cleanup_error:
+                    recovery_errors.append(cleanup_error)
+            direction: str | None = None
+            try:
+                direction = self.journal.committed_direction()
+            except Exception as direction_error:
+                recovery_errors.append(direction_error)
+            if direction == "rollback":
+                try:
+                    self.converge_payload(payload, committed=False)
+                    self._finalize_rollback(payload)
+                except Exception as recovery_error:
+                    recovery_errors.append(recovery_error)
+            if recovery_errors:
+                raise ExceptionGroup(
+                    "publication and recovery failed",
+                    [publish_error, *recovery_errors],
+                ) from publish_error
             raise
 
     def reconcile(self, *, lock_held: bool = False) -> None:
@@ -294,9 +445,33 @@ class FirstInstallPublisher:
         except JournalError as exc:
             raise PublishError(str(exc)) from exc
         if not committed:
-            self.services.stop_candidate()
-            self.converge_payload(latest.payload, committed=False)
-            self._finalize_rollback(latest.payload)
+            already_rolled_back = latest.payload["state"] == "ROLLED_BACK"
+            if already_rolled_back:
+                try:
+                    self.journal.verify_critical("ROLLED_BACK")
+                except JournalError:
+                    try:
+                        self.journal.repair_critical("ROLLED_BACK")
+                    except JournalError as exc:
+                        raise PublishError(str(exc)) from exc
+            rollback_errors: list[Exception] = []
+            try:
+                self.services.stop_candidate()
+            except Exception as stop_error:
+                rollback_errors.append(stop_error)
+            try:
+                self.converge_payload(latest.payload, committed=False)
+            except Exception as converge_error:
+                rollback_errors.append(converge_error)
+            if not rollback_errors and not already_rolled_back:
+                try:
+                    self._finalize_rollback(latest.payload)
+                except Exception as finalize_error:
+                    rollback_errors.append(finalize_error)
+            if len(rollback_errors) == 1:
+                raise rollback_errors[0]
+            if len(rollback_errors) > 1:
+                raise ExceptionGroup("rollback reconciliation failed", rollback_errors)
             return
 
         state = str(latest.payload["state"])
@@ -310,10 +485,25 @@ class FirstInstallPublisher:
                 raise PublishError(str(exc)) from exc
         self.converge_payload(latest.payload, committed=True)
         if critical_state == "COMMITTED":
-            handle = self.services.start_precommit()
-            self.services.activate(handle)
-            if not self.services.healthy():
-                raise PublishError("recovered service health failed")
+            handle: object | None = None
+            try:
+                handle = self.services.start_precommit()
+                self.services.activate(handle)
+                if not self.services.healthy():
+                    raise PublishError("recovered service health failed")
+            except Exception as activation_error:
+                cleanup_errors: list[Exception] = []
+                if handle is not None:
+                    try:
+                        self.services.stop_candidate()
+                    except Exception as cleanup_error:
+                        cleanup_errors.append(cleanup_error)
+                if cleanup_errors:
+                    raise ExceptionGroup(
+                        "recovered activation and cleanup failed",
+                        [activation_error, *cleanup_errors],
+                    ) from activation_error
+                raise
             activated = {
                 **latest.payload,
                 "state": "ACTIVATED",
@@ -416,7 +606,9 @@ class FirstInstallPublisher:
         payload = self._resume_recovery(payload)
         payload = self._reconcile_extension_candidate(payload)
         payload = self._converge_component("current", payload, committed)
-        return self._converge_component("extension", payload, committed)
+        payload = self._converge_component("extension", payload, committed)
+        self._verify_converged_identities(payload, committed=committed)
+        return payload
 
     def copy_tree(self, source: Path, destination: Path, *, sync: bool = True) -> None:
         if destination.exists() or destination.is_symlink():
@@ -440,6 +632,7 @@ class FirstInstallPublisher:
 
     def _switch(self, component: str, payload: dict[str, Any]) -> dict[str, Any]:
         live, next_path, previous = self._paths(component)
+        self._point(component, "before_switch")
         switching = "CURRENT_SWITCHING" if component == "current" else "EXTENSION_SWITCHING"
         switched = "CURRENT_SWITCHED" if component == "current" else "EXTENSION_SWITCHED"
         if path_identity(live, component) == payload["identities"][component]["new"]:
@@ -447,14 +640,14 @@ class FirstInstallPublisher:
                 raise PublishError("next publication path is occupied")
             return self._progress(
                 payload,
-                state=switched,
+                state=None if payload["state"] in {"COMMITTED", "ACTIVATED"} else switched,
                 component=component,
                 substate="identity_verified",
             )
         self._point(component, "before_intent")
         payload = self._progress(
             payload,
-            state=switching,
+            state=None if payload["state"] in {"COMMITTED", "ACTIVATED"} else switching,
             component=component,
             substate="intent_written",
         )
@@ -477,7 +670,22 @@ class FirstInstallPublisher:
         if live.exists() or live.is_symlink():
             if previous.exists() or previous.is_symlink():
                 raise PublishError("previous publication path is occupied")
-            live.rename(previous)
+            expected_old = payload["identities"][component]["old"]
+            descriptor = self._open_verified_publication_identity(
+                live,
+                component,
+                expected_old,
+            )
+            try:
+                _rename_open_publication_exclusive(
+                    descriptor,
+                    previous,
+                    component,
+                )
+            finally:
+                os.close(descriptor)
+            if path_identity(live, component) != {"kind": "absent"}:
+                raise PublishError("publication source was replaced during switch")
         payload = self._progress(
             payload,
             component=component,
@@ -494,7 +702,21 @@ class FirstInstallPublisher:
         self._point(component, "after_old_parent_fsync")
 
         self._point(component, "before_live_rename")
-        next_path.rename(live)
+        descriptor = self._open_verified_publication_identity(
+            next_path,
+            component,
+            payload["identities"][component]["new"],
+        )
+        try:
+            _rename_open_publication_exclusive(
+                descriptor,
+                live,
+                component,
+            )
+        finally:
+            os.close(descriptor)
+        if path_identity(next_path, component) != {"kind": "absent"}:
+            raise PublishError("publication next source was replaced during switch")
         payload = self._progress(
             payload,
             component=component,
@@ -513,7 +735,7 @@ class FirstInstallPublisher:
             raise PublishError("published identity did not verify")
         return self._progress(
             payload,
-            state=switched,
+            state=None if payload["state"] in {"COMMITTED", "ACTIVATED"} else switched,
             component=component,
             substate="identity_verified",
         )
@@ -578,21 +800,51 @@ class FirstInstallPublisher:
         if self.extension_next.exists() or self.extension_next.is_symlink():
             raise PublishError("extension next path is already occupied")
         bootstrap = self._extension_bootstrap_path(payload)
+        if bootstrap.exists() or bootstrap.is_symlink():
+            raise PublishError("extension staging bootstrap became occupied")
+        owner_staging = self.data_root / (
+            f".extension.owner-staging-{payload['transaction_id']}-{uuid.uuid4().hex}"
+        )
         try:
-            bootstrap.mkdir(mode=0o700)
+            owner_staging.mkdir(mode=0o700)
         except FileExistsError as exc:
-            raise PublishError("extension staging bootstrap became occupied") from exc
-        self._write_extension_candidate_owner(bootstrap, payload)
-        _fsync_directory(bootstrap.parent)
-        self._point("extension-candidate", "before_create")
+            raise PublishError("extension owner staging became occupied") from exc
+        self._write_extension_candidate_owner(owner_staging, payload)
+        descriptor = self._open_owned_extension_candidate_at(
+            owner_staging,
+            ".owner.json",
+            payload,
+        )
         try:
-            _rename_directory_exclusive(bootstrap, candidate)
-        except Exception:
-            self._remove_owned_extension_candidate_at(bootstrap, payload)
-            raise
+            _rename_open_publication_exclusive(
+                descriptor,
+                bootstrap,
+                "extension",
+            )
+        finally:
+            os.close(descriptor)
+        if owner_staging.exists() or owner_staging.is_symlink():
+            raise PublishError("extension owner staging source was replaced")
+        _fsync_directory(self.data_root)
+        self._point("extension-candidate", "before_create")
+        descriptor = self._open_owned_extension_candidate_at(
+            bootstrap,
+            ".owner.json",
+            payload,
+        )
+        try:
+            _rename_open_publication_exclusive(
+                descriptor,
+                candidate,
+                "extension",
+            )
+        finally:
+            os.close(descriptor)
+        if bootstrap.exists() or bootstrap.is_symlink():
+            raise PublishError("extension bootstrap source was replaced")
         _fsync_directory(candidate.parent)
-        observed = set(self.data_root.glob("extension.next.candidate-*"))
-        if observed != {candidate}:
+        current, _historical = self._extension_candidate_namespace(payload)
+        if current != {candidate}:
             raise PublishError("extension staging namespace changed during claim")
         source = self.release_root / "extension"
         if tree_identity(source) != payload["identities"]["extension"]["new"]:
@@ -629,85 +881,255 @@ class FirstInstallPublisher:
         _fsync_directory(candidate)
         if not self._extension_candidate_is_owned(payload):
             raise PublishError("extension staging candidate ownership changed")
-        _rename_directory_exclusive(staged_payload, self.extension_next)
+        descriptor = self._open_verified_publication_identity(
+            staged_payload,
+            "extension",
+            payload["identities"]["extension"]["new"],
+        )
+        try:
+            _rename_open_publication_exclusive(
+                descriptor,
+                self.extension_next,
+                "extension",
+                source_parent_levels=2,
+            )
+        finally:
+            os.close(descriptor)
+        if staged_payload.exists() or staged_payload.is_symlink():
+            raise PublishError("extension payload source was replaced")
 
     def _write_extension_candidate_owner(
         self,
         candidate: Path,
         payload: dict[str, Any],
+        *,
+        candidate_descriptor: int | None = None,
     ) -> None:
-        candidate_descriptor = os.open(
-            candidate,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        owned_candidate_descriptor = (
+            os.open(
+                candidate,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            if candidate_descriptor is None
+            else os.dup(candidate_descriptor)
         )
         try:
-            candidate_metadata = os.fstat(candidate_descriptor)
-            marker = {
-                "schema_version": 1,
-                "transaction_nonce": str(payload["transaction_id"]),
-                "device": candidate_metadata.st_dev,
-                "inode": candidate_metadata.st_ino,
-            }
-            encoded = (
-                json.dumps(marker, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
-            ).encode("ascii")
+            candidate_metadata = os.fstat(owned_candidate_descriptor)
+            encoded = self._extension_candidate_owner_bytes(payload, candidate_metadata)
+            staged_name = f".owner.json.staged-{uuid.uuid4().hex}"
             owner_descriptor = os.open(
-                ".owner.json",
+                staged_name,
                 os.O_WRONLY
                 | os.O_CREAT
                 | os.O_EXCL
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
-                dir_fd=candidate_descriptor,
+                dir_fd=owned_candidate_descriptor,
             )
             try:
-                view = memoryview(encoded)
-                while view:
-                    written = os.write(owner_descriptor, view)
-                    view = view[written:]
+                os.fchmod(owner_descriptor, 0o600)
+                _write_all(owner_descriptor, encoded)
                 os.fsync(owner_descriptor)
+                verifier = os.open(
+                    staged_name,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=owned_candidate_descriptor,
+                )
+                try:
+                    verifier_metadata = os.fstat(verifier)
+                    owner_metadata = os.fstat(owner_descriptor)
+                    if (
+                        not stat.S_ISREG(verifier_metadata.st_mode)
+                        or verifier_metadata.st_uid != os.geteuid()
+                        or verifier_metadata.st_nlink != 1
+                        or verifier_metadata.st_mode & 0o777 != 0o600
+                        or verifier_metadata.st_dev != owner_metadata.st_dev
+                        or verifier_metadata.st_ino != owner_metadata.st_ino
+                        or os.read(verifier, len(encoded) + 1) != encoded
+                    ):
+                        raise PublishError("extension staging owner marker is unverified")
+                finally:
+                    os.close(verifier)
+                _rename_open_publication_exclusive(
+                    owner_descriptor,
+                    candidate / ".owner.json",
+                    "file",
+                )
             finally:
                 os.close(owner_descriptor)
-            os.fsync(candidate_descriptor)
+            os.fsync(owned_candidate_descriptor)
         finally:
-            os.close(candidate_descriptor)
+            os.close(owned_candidate_descriptor)
+
+    @staticmethod
+    def _extension_candidate_owner_bytes(
+        payload: dict[str, Any],
+        candidate_metadata: os.stat_result,
+    ) -> bytes:
+        marker = {
+            "schema_version": 1,
+            "transaction_nonce": str(payload["transaction_id"]),
+            "device": candidate_metadata.st_dev,
+            "inode": candidate_metadata.st_ino,
+        }
+        return (
+            json.dumps(marker, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("ascii")
+
+    @staticmethod
+    def _extension_candidate_owner_proof_bytes(
+        candidate_metadata: os.stat_result,
+    ) -> bytes:
+        encoded = json.dumps(
+            {
+                "device": candidate_metadata.st_dev,
+                "inode": candidate_metadata.st_ino,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return encoded[:-1] + b","
 
     def _reconcile_extension_candidate(self, payload: dict[str, Any]) -> dict[str, Any]:
-        candidate, _owner = self._extension_candidate_paths(payload)
-        bootstrap = self._extension_bootstrap_path(payload)
-        tombstone = self._extension_tombstone_path(payload)
-        deletion = self._extension_deletion_path(payload)
-        self._validate_retained_extension_quarantines()
-        expected = {candidate}
-        observed = set(self.data_root.glob("extension.next.candidate-*"))
-        observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
-        observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
-        if (
-            observed - expected
-            or observed_bootstraps - {bootstrap}
-            or observed_tombstones - {tombstone}
-        ):
-            raise PublishError("unknown extension staging candidate exists")
-        owned_paths = [
-            path for path in (candidate, bootstrap, tombstone) if path.exists() or path.is_symlink()
-        ]
-        if deletion.exists() or deletion.is_symlink():
-            if owned_paths:
+        self._recover_current_extension_bootstrap_owner(payload)
+        current, _historical = self._extension_candidate_namespace(payload)
+        if current:
+            if len(current) != 1:
                 raise PublishError("extension staging candidate ownership is ambiguous")
-            return payload
-        if owned_paths:
-            if len(owned_paths) != 1 or not self._extension_candidate_is_owned(
-                payload,
-                candidate=owned_paths[0],
-            ):
-                raise PublishError("extension staging candidate ownership is unverified")
             return self._durable_recovery_action(
                 payload,
                 "extension",
                 "remove_candidate",
             )
         return payload
+
+    def _recover_current_extension_bootstrap_owner(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        bootstrap = self._extension_bootstrap_path(payload)
+        if not bootstrap.exists() and not bootstrap.is_symlink():
+            return
+        if self._extension_candidate_is_owned(payload, candidate=bootstrap):
+            return
+        descriptor = os.open(
+            bootstrap,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            path_metadata = os.stat(bootstrap, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o077
+                or metadata.st_dev != path_metadata.st_dev
+                or metadata.st_ino != path_metadata.st_ino
+            ):
+                raise PublishError("extension bootstrap identity changed")
+            names = os.listdir(descriptor)
+            if not names:
+                raise PublishError("extension bootstrap owner proof is unavailable")
+            expected_owner = self._extension_candidate_owner_bytes(payload, metadata)
+            required_proof = self._extension_candidate_owner_proof_bytes(metadata)
+            if not expected_owner.startswith(required_proof):
+                raise PublishError("extension bootstrap owner staging is unsafe")
+            for name in names:
+                if not name.startswith(".owner.json.staged-"):
+                    raise PublishError("extension bootstrap contains unverified content")
+                attempt = name.removeprefix(".owner.json.staged-")
+                entry_descriptor = -1
+                reopened_descriptor = -1
+                try:
+                    entry_descriptor = os.open(
+                        name,
+                        os.O_RDONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_NONBLOCK", 0),
+                        dir_fd=descriptor,
+                    )
+                    entry_metadata = os.fstat(entry_descriptor)
+                    if (
+                        len(attempt) != 32
+                        or any(character not in "0123456789abcdef" for character in attempt)
+                        or not stat.S_ISREG(entry_metadata.st_mode)
+                        or entry_metadata.st_uid != os.geteuid()
+                        or entry_metadata.st_nlink != 1
+                        or entry_metadata.st_mode & 0o777 != 0o600
+                        or entry_metadata.st_size > len(expected_owner)
+                    ):
+                        raise PublishError("extension bootstrap owner staging is unsafe")
+                    entry = os.read(entry_descriptor, len(expected_owner) + 1)
+                    final_metadata = os.fstat(entry_descriptor)
+                    reopened_descriptor = os.open(
+                        name,
+                        os.O_RDONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_NONBLOCK", 0),
+                        dir_fd=descriptor,
+                    )
+                    reopened_metadata = os.fstat(reopened_descriptor)
+                    repeated = os.read(reopened_descriptor, len(expected_owner) + 1)
+                    verified_metadata = os.fstat(reopened_descriptor)
+                    named_metadata = os.stat(
+                        name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                    if (
+                        entry_metadata.st_size != len(entry)
+                        or final_metadata.st_dev != entry_metadata.st_dev
+                        or final_metadata.st_ino != entry_metadata.st_ino
+                        or final_metadata.st_size != entry_metadata.st_size
+                        or final_metadata.st_mtime_ns != entry_metadata.st_mtime_ns
+                        or final_metadata.st_ctime_ns != entry_metadata.st_ctime_ns
+                        or reopened_metadata.st_dev != entry_metadata.st_dev
+                        or reopened_metadata.st_ino != entry_metadata.st_ino
+                        or reopened_metadata.st_size != entry_metadata.st_size
+                        or reopened_metadata.st_mtime_ns != entry_metadata.st_mtime_ns
+                        or reopened_metadata.st_ctime_ns != entry_metadata.st_ctime_ns
+                        or repeated != entry
+                        or verified_metadata.st_dev != entry_metadata.st_dev
+                        or verified_metadata.st_ino != entry_metadata.st_ino
+                        or verified_metadata.st_mode != entry_metadata.st_mode
+                        or verified_metadata.st_uid != entry_metadata.st_uid
+                        or verified_metadata.st_nlink != entry_metadata.st_nlink
+                        or verified_metadata.st_size != entry_metadata.st_size
+                        or verified_metadata.st_mtime_ns != entry_metadata.st_mtime_ns
+                        or verified_metadata.st_ctime_ns != entry_metadata.st_ctime_ns
+                        or named_metadata.st_dev != entry_metadata.st_dev
+                        or named_metadata.st_ino != entry_metadata.st_ino
+                        or named_metadata.st_mode != entry_metadata.st_mode
+                        or named_metadata.st_uid != entry_metadata.st_uid
+                        or named_metadata.st_nlink != entry_metadata.st_nlink
+                        or named_metadata.st_size != entry_metadata.st_size
+                        or named_metadata.st_mtime_ns != entry_metadata.st_mtime_ns
+                        or named_metadata.st_ctime_ns != entry_metadata.st_ctime_ns
+                        or len(entry) < len(required_proof)
+                        or not expected_owner.startswith(entry)
+                    ):
+                        raise PublishError("extension bootstrap owner staging is unsafe")
+                except OSError as exc:
+                    raise PublishError("extension bootstrap owner staging is unsafe") from exc
+                finally:
+                    if reopened_descriptor >= 0:
+                        os.close(reopened_descriptor)
+                    if entry_descriptor >= 0:
+                        os.close(entry_descriptor)
+            self._write_extension_candidate_owner(
+                bootstrap,
+                payload,
+                candidate_descriptor=descriptor,
+            )
+        finally:
+            os.close(descriptor)
 
     def _extension_candidate_paths(self, payload: dict[str, Any]) -> tuple[Path, Path]:
         transaction_id = str(payload["transaction_id"])
@@ -749,17 +1171,29 @@ class FirstInstallPublisher:
                 retained_paths.add(retained)
         return retained_paths
 
+    def _extension_candidate_namespace(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[set[Path], set[Path]]:
+        validated = self._validate_retained_extension_quarantines()
+        transaction_id = str(payload["transaction_id"])
+        current_names = {
+            f"extension.next.candidate-{transaction_id}",
+            f".extension.next.bootstrap-{transaction_id}",
+            f".extension.next.tombstone-{transaction_id}",
+            f".extension.next.deleting-{transaction_id}",
+        }
+        current = {
+            path
+            for path in validated
+            if path.name in current_names
+            and not self._extension_candidate_is_retained(payload, candidate=path)
+        }
+        return current, validated - current
+
     def _validate_extension_candidate_namespace(self, payload: dict[str, Any]) -> None:
-        candidate, _owner = self._extension_candidate_paths(payload)
-        retained = self._validate_retained_extension_quarantines()
-        observed = set(self.data_root.glob("extension.next.candidate-*"))
-        observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
-        observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
-        if (
-            (observed | observed_bootstraps | observed_tombstones) - retained
-            or candidate.exists()
-            or candidate.is_symlink()
-        ):
+        current, _historical = self._extension_candidate_namespace(payload)
+        if current:
             raise PublishError("extension staging namespace is occupied")
 
     def _extension_candidate_is_owned(
@@ -778,6 +1212,54 @@ class FirstInstallPublisher:
             return False
         os.close(descriptor)
         return True
+
+    def _extension_candidate_is_retained(
+        self,
+        payload: dict[str, Any],
+        *,
+        candidate: Path,
+    ) -> bool:
+        descriptor = self._open_owned_extension_candidate_at(
+            candidate,
+            ".owner.json",
+            payload,
+        )
+        try:
+            try:
+                marker_descriptor = os.open(
+                    ".retained",
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise PublishError("extension retained marker is unsafe") from exc
+            try:
+                metadata = os.fstat(marker_descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or metadata.st_nlink != 1
+                    or metadata.st_mode & 0o777 != 0o600
+                    or metadata.st_size != 0
+                ):
+                    raise PublishError("extension retained marker is unsafe")
+                os.fsync(marker_descriptor)
+            finally:
+                os.close(marker_descriptor)
+            os.fsync(descriptor)
+            parent_descriptor = _open_directory_descriptor(candidate.parent)
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+            return True
+        finally:
+            os.close(descriptor)
 
     def _open_owned_extension_candidate_at(
         self,
@@ -818,7 +1300,10 @@ class FirstInstallPublisher:
                 encoded = os.read(owner_descriptor, 1025)
             finally:
                 os.close(owner_descriptor)
-            marker = json.loads(encoded)
+            try:
+                marker = json.loads(encoded)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise PublishError("extension staging owner marker is unsafe") from exc
             if (
                 not isinstance(marker, dict)
                 or set(marker) != {"schema_version", "transaction_nonce", "device", "inode"}
@@ -837,32 +1322,18 @@ class FirstInstallPublisher:
 
     def _remove_extension_candidate_owner(self, payload: dict[str, Any]) -> None:
         candidate, _owner = self._extension_candidate_paths(payload)
-        observed = set(self.data_root.glob("extension.next.candidate-*"))
-        if observed - {candidate}:
-            raise PublishError("unknown extension staging candidate exists")
+        current, _historical = self._extension_candidate_namespace(payload)
+        if current != {candidate}:
+            raise PublishError("extension staging candidate ownership is ambiguous")
         self._remove_owned_extension_candidate(payload)
 
     def _remove_owned_extension_candidate(self, payload: dict[str, Any]) -> None:
-        candidate, _owner = self._extension_candidate_paths(payload)
-        bootstrap = self._extension_bootstrap_path(payload)
-        tombstone = self._extension_tombstone_path(payload)
-        deletion = self._extension_deletion_path(payload)
-        retained = self._validate_retained_extension_quarantines()
-        observed = set(self.data_root.glob("extension.next.candidate-*"))
-        observed_bootstraps = set(self.data_root.glob(".extension.next.bootstrap-*"))
-        observed_tombstones = set(self.data_root.glob(".extension.next.tombstone-*"))
-        if observed - retained or observed_bootstraps - retained or observed_tombstones - retained:
-            raise PublishError("unknown extension staging candidate exists")
-        existing = [
-            path
-            for path in (candidate, bootstrap, tombstone, deletion)
-            if path.exists() or path.is_symlink()
-        ]
-        if not existing:
+        current, _historical = self._extension_candidate_namespace(payload)
+        if not current:
             return
-        if len(existing) != 1:
+        if len(current) != 1:
             raise PublishError("extension staging candidate ownership is ambiguous")
-        self._remove_owned_extension_candidate_at(existing[0], payload)
+        self._remove_owned_extension_candidate_at(next(iter(current)), payload)
 
     def _remove_owned_extension_candidate_at(
         self,
@@ -914,6 +1385,29 @@ class FirstInstallPublisher:
                     raise PublishError("extension staging ownership changed during retained claim")
             finally:
                 os.close(retained_descriptor)
+            try:
+                marker_descriptor = os.open(
+                    ".retained",
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                    0o600,
+                    dir_fd=descriptor,
+                )
+            except FileExistsError:
+                if not self._extension_candidate_is_retained(payload, candidate=candidate):
+                    raise PublishError("extension retained marker is unsafe") from None
+            else:
+                try:
+                    os.fchmod(marker_descriptor, 0o600)
+                    os.fsync(marker_descriptor)
+                finally:
+                    os.close(marker_descriptor)
+            os.fsync(descriptor)
+            os.fsync(parent_descriptor)
         finally:
             os.close(parent_descriptor)
             os.close(descriptor)
@@ -1004,7 +1498,21 @@ class FirstInstallPublisher:
                 raise PublishError("recovery rename destination is occupied")
             if source_identity == {"kind": "absent"}:
                 raise PublishError("recovery rename source is unavailable")
-            source.rename(live)
+            descriptor = self._open_verified_publication_identity(
+                source,
+                component,
+                source_identity,
+            )
+            try:
+                _rename_open_publication_exclusive(
+                    descriptor,
+                    live,
+                    component,
+                )
+            finally:
+                os.close(descriptor)
+            if path_identity(source, component) != {"kind": "absent"}:
+                raise PublishError("recovery source was replaced during rename")
             return
         if action == "rebuild_live":
             expected = identities["new"]
@@ -1045,25 +1553,133 @@ class FirstInstallPublisher:
         known: tuple[dict[str, str], ...],
         payload: dict[str, Any],
     ) -> None:
+        retained = path.parent / (
+            f".publication.retained-{component}-{path.name}-{payload['transaction_id']}"
+        )
         identity = path_identity(path, component)
         if identity == {"kind": "absent"}:
+            retained_identity = path_identity(retained, component)
+            if retained_identity != {"kind": "absent"} and retained_identity not in known:
+                raise PublishError("publication retained identity is unverified")
             return
         if identity not in known:
             raise PublishError("refusing to remove an unknown publication identity")
-        before = path.lstat()
+        if path_identity(retained, component) != {"kind": "absent"}:
+            raise PublishError("publication retained destination is occupied")
+        descriptor = self._open_publication_identity(path, component)
+        before = os.fstat(descriptor)
         self._point(f"retained:{component}", "before_source_check")
-        _fsync_directory(path.parent)
-        self._point(f"retained:{component}", "after_source_check")
         try:
-            after = path.lstat()
+            reopened = self._open_publication_identity(path, component)
+            try:
+                after = os.fstat(reopened)
+                if (
+                    after.st_dev != before.st_dev
+                    or after.st_ino != before.st_ino
+                    or path_identity(path, component) != identity
+                ):
+                    raise PublishError("publication identity changed during retained claim")
+            finally:
+                os.close(reopened)
+            self._point(f"retained:{component}", "after_source_check")
+            final = self._open_publication_identity(path, component)
+            try:
+                final_metadata = os.fstat(final)
+                if (
+                    final_metadata.st_dev != before.st_dev
+                    or final_metadata.st_ino != before.st_ino
+                    or path_identity(path, component) != identity
+                ):
+                    raise PublishError("publication identity changed during retained claim")
+            finally:
+                os.close(final)
+            self._point(f"retained:{component}", "before_inode_rename")
+            _rename_open_publication_exclusive(
+                descriptor,
+                retained,
+                component,
+            )
+            claimed = self._open_publication_identity(retained, component)
+            try:
+                claimed_metadata = os.fstat(claimed)
+                if (
+                    claimed_metadata.st_dev != before.st_dev
+                    or claimed_metadata.st_ino != before.st_ino
+                    or path_identity(retained, component) != identity
+                ):
+                    raise PublishError("publication retained identity changed")
+            finally:
+                os.close(claimed)
+            if path_identity(path, component) != {"kind": "absent"}:
+                raise PublishError("publication source was replaced during retained claim")
+            _fsync_directory(path.parent)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _open_publication_identity(path: Path, component: str) -> int:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        if component == "current":
+            flags |= getattr(
+                os,
+                "O_SYMLINK",
+                0x00200000 if sys.platform == "darwin" else getattr(os, "O_PATH", 0),
+            )
+        else:
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
         except OSError as exc:
             raise PublishError("publication identity changed during retained claim") from exc
-        if (
-            after.st_dev != before.st_dev
-            or after.st_ino != before.st_ino
-            or path_identity(path, component) != identity
-        ):
-            raise PublishError("publication identity changed during retained claim")
+        metadata = os.fstat(descriptor)
+        expected_type = stat.S_ISLNK if component == "current" else stat.S_ISDIR
+        if not expected_type(metadata.st_mode):
+            os.close(descriptor)
+            raise PublishError("publication retained source type is invalid")
+        return descriptor
+
+    def _open_verified_publication_identity(
+        self,
+        path: Path,
+        component: str,
+        expected: dict[str, str],
+    ) -> int:
+        descriptor = self._open_publication_identity(path, component)
+        try:
+            metadata = os.fstat(descriptor)
+            if path_identity(path, component) != expected:
+                raise PublishError("publication source identity changed")
+            reopened = self._open_publication_identity(path, component)
+            try:
+                reopened_metadata = os.fstat(reopened)
+                if (
+                    reopened_metadata.st_dev != metadata.st_dev
+                    or reopened_metadata.st_ino != metadata.st_ino
+                ):
+                    raise PublishError("publication source inode changed")
+            finally:
+                os.close(reopened)
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def _verify_converged_identities(
+        self,
+        payload: dict[str, Any],
+        *,
+        committed: bool,
+    ) -> None:
+        for component in ("current", "extension"):
+            live, next_path, previous = self._paths(component)
+            desired = payload["identities"][component]["new" if committed else "old"]
+            if (
+                path_identity(live, component) != desired
+                or path_identity(next_path, component) != {"kind": "absent"}
+                or path_identity(previous, component) != {"kind": "absent"}
+            ):
+                direction = "commit" if committed else "rollback"
+                raise PublishError(f"{direction} identity barrier did not verify")
 
     def _cleanup_previous(self, payload: dict[str, Any]) -> None:
         latest = self.journal.read_latest()
@@ -1157,6 +1773,7 @@ class FirstInstallPublisher:
         latest = self.journal.read_latest()
         if latest is not None and latest.payload["transaction_id"] == payload["transaction_id"]:
             payload = latest.payload
+        self._verify_converged_identities(payload, committed=False)
         rolled_back = {
             **payload,
             "state": "ROLLED_BACK",
@@ -1183,7 +1800,10 @@ class FirstInstallPublisher:
             updated["state"] = state
         if component is not None and substate is not None:
             updated["substate"] = {**payload["substate"], component: substate}
-        self.journal.write_progress(updated)
+        if updated["state"] in {"COMMITTED", "ACTIVATED", "ROLLED_BACK"}:
+            self.journal.write_critical(updated)
+        else:
+            self.journal.write_progress(updated)
         return updated
 
     def _paths(self, component: str) -> tuple[Path, Path, Path]:
@@ -1207,7 +1827,7 @@ class SystemPublicationServices:
         return self._validate(phase, self.release_root)
 
     def start_precommit(self) -> object:
-        from process_state import ServiceError, SystemServiceOperations
+        from process_state import SystemServiceOperations
 
         if self._active_handle is not None and not self._active_handle.closed:
             raise PublishError("candidate services are already active")
@@ -1229,7 +1849,7 @@ class SystemPublicationServices:
             backend_identity = operations.launch("backend", activation_read)
             if not operations.backend_healthy():
                 raise PublishError("precommit backend health failed")
-        except (OSError, ServiceError, PublishError) as start_error:
+        except Exception as start_error:
             with suppress(OSError):
                 os.close(activation_write)
             cleanup_errors: list[Exception] = []
@@ -1285,26 +1905,34 @@ class SystemPublicationServices:
         handle = self._active_handle
         if handle is None or handle.closed:
             return
-        operations = SystemServiceOperations(self.data_root, self.release_root)
-        if handle.write_fd >= 0:
-            with suppress(OSError):
-                os.close(handle.write_fd)
-            handle.write_fd = -1
         cleanup_errors: list[Exception] = []
-        for kind, identity in (
-            ("backend", handle.backend_identity),
-            ("ollama", handle.ollama_identity),
-        ):
-            if identity is None:
-                continue
+        try:
+            if handle.write_fd >= 0:
+                with suppress(OSError):
+                    os.close(handle.write_fd)
+                handle.write_fd = -1
             try:
-                operations.stop_matching(kind, identity)
-            except Exception as cleanup_error:
-                cleanup_errors.append(cleanup_error)
-        if cleanup_errors:
+                operations = SystemServiceOperations(self.data_root, self.release_root)
+            except Exception as setup_error:
+                cleanup_errors.append(setup_error)
+            else:
+                for kind, identity in (
+                    ("backend", handle.backend_identity),
+                    ("ollama", handle.ollama_identity),
+                ):
+                    if identity is None:
+                        continue
+                    try:
+                        operations.stop_matching(kind, identity)
+                    except Exception as cleanup_error:
+                        cleanup_errors.append(cleanup_error)
+        finally:
+            handle.closed = True
+            self._active_handle = None
+        if len(cleanup_errors) == 1:
+            raise cleanup_errors[0]
+        if len(cleanup_errors) > 1:
             raise ExceptionGroup("candidate cleanup failed", cleanup_errors)
-        handle.closed = True
-        self._active_handle = None
 
     def copy_token(self, token_path: Path) -> None:
         completed = subprocess_run_pbcopy(token_path)
