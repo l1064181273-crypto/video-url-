@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+*.7z -text
+*.bin -text
+*.dll -text
+*.exe -text
+*.gguf -text
+*.gz -text
+*.jpg -text
+*.jpeg -text
+*.onnx -text
+*.png -text
+*.tar -text
+*.wav -text
+*.zip -text
