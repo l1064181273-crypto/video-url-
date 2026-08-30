@@ -167,6 +167,7 @@ def test_windows_dependency_manifest_is_fully_pinned() -> None:
     assert artifacts["uv"]["sha256"] == (
         "15bfd1423b7eaa7aae949922d4712ebaac2bb44a81af64ab59bbe007090cb0d0"
     )
+    assert artifacts["uv"]["expected_files"] == ["uv.exe", "uvx.exe"]
     assert artifacts["python"]["expected_files"] == [
         "python/python.exe",
         "python/python311.dll",

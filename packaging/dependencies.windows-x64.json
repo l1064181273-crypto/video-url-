@@ -14,8 +14,8 @@
       "license": "Apache-2.0 OR MIT",
       "license_url": "https://github.com/astral-sh/uv/blob/0.11.25/LICENSE-APACHE",
       "expected_files": [
-        "uv-x86_64-pc-windows-msvc/uv.exe",
-        "uv-x86_64-pc-windows-msvc/uvx.exe"
+        "uv.exe",
+        "uvx.exe"
       ]
     },
     {
