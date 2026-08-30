@@ -107,6 +107,21 @@ class ToolSupervisorLauncher:
             or not self.process_root.is_absolute()
         ):
             raise ValueError("tool supervisor configuration is unsafe")
+        if sys.platform == "win32":
+            return (
+                os.fspath(self.python_executable),
+                os.fspath(self.supervisor_path),
+                "--job-id",
+                ownership.job_id,
+                "--run-id",
+                ownership.run_id,
+                "--kind",
+                ownership.kind,
+                "--ownership-nonce",
+                uuid.uuid4().hex,
+                "--",
+                *command,
+            )
         return (
             os.fspath(self.python_executable),
             os.fspath(self.supervisor_path),
@@ -208,11 +223,13 @@ class SubprocessExecutor:
         control_read = control_write = ready_read = ready_write = -1
         launch_command = normalized
         pass_fds: tuple[int, ...] = ()
+        windows_supervised = sys.platform == "win32" and ownership is not None
         if ownership is not None:
             assert self.supervisor is not None
             try:
-                control_read, control_write = os.pipe()
-                ready_read, ready_write = os.pipe()
+                if not windows_supervised:
+                    control_read, control_write = os.pipe()
+                    ready_read, ready_write = os.pipe()
                 launch_command = self.supervisor.wrap(
                     normalized,
                     ownership,
@@ -226,19 +243,31 @@ class SubprocessExecutor:
                     if descriptor >= 0:
                         os.close(descriptor)
                 raise
-            pass_fds = (control_read, ready_write)
+            if not windows_supervised:
+                pass_fds = (control_read, ready_write)
         try:
             try:
-                process = subprocess.Popen(
-                    launch_command,
-                    cwd=os.fspath(cwd) if cwd is not None else None,
-                    env=dict(env) if env is not None else None,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
-                    pass_fds=pass_fds,
-                )
+                if sys.platform == "win32":
+                    process = subprocess.Popen(
+                        launch_command,
+                        cwd=os.fspath(cwd) if cwd is not None else None,
+                        env=dict(env) if env is not None else None,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                else:
+                    process = subprocess.Popen(
+                        launch_command,
+                        cwd=os.fspath(cwd) if cwd is not None else None,
+                        env=dict(env) if env is not None else None,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        start_new_session=True,
+                        pass_fds=pass_fds,
+                    )
             finally:
                 if control_read >= 0:
                     os.close(control_read)
@@ -255,13 +284,16 @@ class SubprocessExecutor:
                 stderr=str(exc),
                 returncode=None,
             ) from exc
-        try:
-            launch_pgid = os.getpgid(process.pid)
-        except ProcessLookupError:
+        if sys.platform == "win32":
             launch_pgid = process.pid
+        else:
+            try:
+                launch_pgid = os.getpgid(process.pid)
+            except ProcessLookupError:
+                launch_pgid = process.pid
         reported_pid = process.pid
         reported_pgid = launch_pgid
-        if ownership is not None:
+        if ownership is not None and not windows_supervised:
             try:
                 reported_pid, reported_pgid = self._read_supervisor_ready(process, ready_read)
             except BaseException:
@@ -414,6 +446,8 @@ class SubprocessExecutor:
         captured: tuple[bytes, bytes] | None = None,
         supervised: bool = False,
     ) -> tuple[bytes, bytes, signal.Signals | None]:
+        if sys.platform == "win32":
+            return self._cleanup_windows_process(process, captured=captured)
         if not self._group_exists(pgid):
             if captured is not None:
                 return captured[0], captured[1], None
@@ -459,6 +493,39 @@ class SubprocessExecutor:
                 returncode=process.returncode,
             )
         return captured[0], captured[1], stopped_by
+
+    def _cleanup_windows_process(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        captured: tuple[bytes, bytes] | None,
+    ) -> tuple[bytes, bytes, signal.Signals | None]:
+        if process.poll() is not None:
+            if captured is not None:
+                return captured[0], captured[1], None
+            stdout, stderr = process.communicate(timeout=self.kill_wait)
+            return stdout, stderr, None
+
+        stopped_by = signal.SIGTERM
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=self.terminate_grace)
+        except subprocess.TimeoutExpired:
+            stopped_by = signal.SIGKILL
+            process.kill()
+            try:
+                stdout, stderr = process.communicate(timeout=self.kill_wait)
+            except subprocess.TimeoutExpired as exc:
+                raise ProcessGroupCleanupError(
+                    "Windows process did not exit after termination",
+                    pid=process.pid,
+                    pgid=process.pid,
+                    stdout="",
+                    stderr="",
+                    termination_signal=stopped_by,
+                    returncode=process.returncode,
+                ) from exc
+        return stdout, stderr, stopped_by
 
     def _wait_for_group_exit(self, pgid: int, deadline: float) -> None:
         while self._group_exists(pgid) and time.monotonic() < deadline:

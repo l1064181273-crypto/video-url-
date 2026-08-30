@@ -201,7 +201,12 @@ class FileActivationBarrier:
                 or named_before.st_size != len(self.token) + 1
             ):
                 return False
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
             descriptor = os.open(self.path, flags)
             try:
                 opened_before = os.fstat(descriptor)

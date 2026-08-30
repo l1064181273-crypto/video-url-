@@ -144,12 +144,7 @@ class LifecycleLock:
         self._prepare_lifecycle_root()
         if path_is_link_like(self.lock_path):
             raise LockUnsafeError("lifecycle lock cannot be a symlink")
-        flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:

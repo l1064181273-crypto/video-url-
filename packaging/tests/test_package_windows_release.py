@@ -45,6 +45,7 @@ def test_windows_zip_is_reproducible_and_contains_only_windows_runtime(
             f"{root}/packaging/dependencies.json",
             f"{root}/packaging/tools/windows_publish_install.py",
             f"{root}/packaging/tools/windows_lifecycle.py",
+            f"{root}/packaging/tools/windows_tool_supervisor.py",
             f"{root}/extension/manifest.json",
         }
         assert required <= set(names)

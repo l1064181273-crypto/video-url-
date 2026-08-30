@@ -15,11 +15,11 @@ def test_instance_lock_is_exclusive_and_reusable_after_release(tmp_path: Path) -
 
     owner.acquire()
     assert owner.acquired
-    assert path.read_bytes() == f"pid={os.getpid()}\n".encode("ascii")
     with pytest.raises(InstanceAlreadyRunningError, match="already running"):
         contender.acquire()
 
     owner.release()
+    assert path.read_bytes() == f"pid={os.getpid()}\n".encode("ascii")
     owner.release()
     contender.acquire()
     assert contender.acquired

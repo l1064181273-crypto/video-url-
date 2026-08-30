@@ -13,8 +13,15 @@ from lvt.core.processes import (
     CancellationToken,
     ProcessCancelledError,
     ProcessExecutionError,
+    ProcessOwnership,
     ProcessTimeoutError,
     SubprocessExecutor,
+    ToolSupervisorLauncher,
+)
+
+POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="asserts POSIX process-group and signal semantics",
 )
 
 
@@ -134,6 +141,7 @@ def test_process_executor_raises_for_nonzero_exit() -> None:
     assert not _process_exists(raised.value.pid)
 
 
+@POSIX_ONLY
 def test_timeout_sends_term_and_reaps_process(tmp_path: Path) -> None:
     marker = tmp_path / "term.txt"
     script = """
@@ -156,6 +164,7 @@ while True:
     assert not _process_exists(raised.value.pid)
 
 
+@POSIX_ONLY
 def test_ignored_term_is_killed_and_reaped() -> None:
     script = """
 import signal, time
@@ -172,6 +181,7 @@ while True:
     assert not _process_exists(raised.value.pid)
 
 
+@POSIX_ONLY
 def test_cancellation_terminates_process_group_and_child(tmp_path: Path) -> None:
     pid_file = tmp_path / "pids.txt"
     script = """
@@ -204,6 +214,7 @@ while True:
     _wait_until(lambda: not _process_exists(child_pid))
 
 
+@POSIX_ONLY
 def test_timeout_cleans_child_after_process_group_leader_exits(tmp_path: Path) -> None:
     pid_file = tmp_path / "orphan-child.txt"
     script = """
@@ -220,6 +231,7 @@ open(sys.argv[1], "w").write(str(child.pid))
     _wait_until(lambda: not _process_exists(child_pid))
 
 
+@POSIX_ONLY
 def test_successful_leader_cleans_closed_pipe_child_before_return(
     tmp_path: Path,
 ) -> None:
@@ -237,6 +249,7 @@ def test_successful_leader_cleans_closed_pipe_child_before_return(
             _kill_group(_saved_pgid(result))
 
 
+@POSIX_ONLY
 def test_nonzero_leader_cleans_closed_pipe_child_before_error(
     tmp_path: Path,
 ) -> None:
@@ -256,6 +269,7 @@ def test_nonzero_leader_cleans_closed_pipe_child_before_error(
             _kill_group(_saved_pgid(captured))
 
 
+@POSIX_ONLY
 def test_successful_leader_kills_closed_pipe_child_that_ignores_term(
     tmp_path: Path,
 ) -> None:
@@ -276,6 +290,7 @@ def test_successful_leader_kills_closed_pipe_child_that_ignores_term(
             _kill_group(_saved_pgid(result))
 
 
+@POSIX_ONLY
 def test_successful_leader_cleans_closed_pipe_child_and_grandchild(
     tmp_path: Path,
 ) -> None:
@@ -313,3 +328,39 @@ os.write(2, b'y' * size)
 
     assert len(result.stdout) == size
     assert len(result.stderr) == size
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows Job Objects")
+def test_windows_supervisor_timeout_kills_child_tree(tmp_path: Path) -> None:
+    pid_file = tmp_path / "windows-job-pids.txt"
+    script = """
+import os, pathlib, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+pathlib.Path(sys.argv[1]).write_text(f"{os.getpid()} {child.pid}", encoding="ascii")
+while True:
+    time.sleep(0.01)
+"""
+    repository_root = Path(__file__).resolve().parents[3]
+    executor = SubprocessExecutor(
+        poll_interval=0.01,
+        terminate_grace=0.5,
+        supervisor=ToolSupervisorLauncher(
+            supervisor_path=repository_root / "packaging" / "tools" / "windows_tool_supervisor.py",
+            process_root=tmp_path,
+        ),
+    )
+
+    with pytest.raises(ProcessTimeoutError):
+        executor.run(
+            _python(script, str(pid_file)),
+            timeout=0.25,
+            ownership=ProcessOwnership(
+                job_id="11111111-1111-4111-8111-111111111111",
+                run_id="22222222-2222-4222-8222-222222222222",
+                kind="test-tool",
+            ),
+        )
+
+    parent_pid, child_pid = [int(value) for value in pid_file.read_text("ascii").split()]
+    _wait_until(lambda: not _process_exists(parent_pid))
+    _wait_until(lambda: not _process_exists(child_pid))

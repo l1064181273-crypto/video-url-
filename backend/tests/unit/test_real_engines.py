@@ -173,8 +173,8 @@ def test_downloader_routes_ytdlp_ffmpeg_and_ffprobe_through_one_executor(
     assert result.title == "Downloaded title"
     assert result.duration_ms == 1_000
     assert any("yt_dlp" in command for command in commands)
-    assert any(command[0] == "/tools/ffmpeg" and "-i" in command for command in commands)
-    assert any(command[0] == "/tools/ffprobe" for command in commands)
+    assert any(command[0] == str(Path("/tools/ffmpeg")) and "-i" in command for command in commands)
+    assert any(command[0] == str(Path("/tools/ffprobe")) for command in commands)
 
 
 def test_installed_media_attaches_job_run_and_kind_ownership(tmp_path: Path) -> None:

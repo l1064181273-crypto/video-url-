@@ -23,7 +23,7 @@ def test_file_activation_barrier_waits_for_exact_nonce(tmp_path: Path) -> None:
     time.sleep(0.05)
     assert not barrier.activated
     staged = tmp_path / "activation.staged"
-    staged.write_text("a" * 32 + "\n", encoding="ascii")
+    staged.write_bytes(("a" * 32 + "\n").encode("ascii"))
     staged.replace(path)
     _wait_closed(barrier)
 
@@ -33,7 +33,7 @@ def test_file_activation_barrier_waits_for_exact_nonce(tmp_path: Path) -> None:
 
 def test_file_activation_barrier_rejects_wrong_content(tmp_path: Path) -> None:
     path = tmp_path / "activation"
-    path.write_text("b" * 32 + "\n", encoding="ascii")
+    path.write_bytes(("b" * 32 + "\n").encode("ascii"))
     barrier = FileActivationBarrier(path, "a" * 32)
     barrier.start()
     _wait_closed(barrier)
@@ -44,7 +44,7 @@ def test_file_activation_barrier_rejects_wrong_content(tmp_path: Path) -> None:
 
 def test_file_activation_barrier_rejects_symlink(tmp_path: Path) -> None:
     target = tmp_path / "target"
-    target.write_text("a" * 32 + "\n", encoding="ascii")
+    target.write_bytes(("a" * 32 + "\n").encode("ascii"))
     path = tmp_path / "activation"
     path.symlink_to(target)
     barrier = FileActivationBarrier(path, "a" * 32)
@@ -59,9 +59,9 @@ def test_file_activation_barrier_detects_name_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "activation"
-    path.write_text("a" * 32 + "\n", encoding="ascii")
+    path.write_bytes(("a" * 32 + "\n").encode("ascii"))
     replacement = tmp_path / "replacement"
-    replacement.write_text("a" * 32 + "\n", encoding="ascii")
+    replacement.write_bytes(("a" * 32 + "\n").encode("ascii"))
     original_read = os.read
     replaced = False
 

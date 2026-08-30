@@ -51,6 +51,7 @@ def _discover_installed(app_root: Path, ffmpeg_dir: Path, install_state: Path) -
         ffmpeg_dir=ffmpeg_dir,
         app_root=app_root,
         install_state=install_state,
+        runtime_platform=RuntimePlatform.MACOS,
     )
 
 

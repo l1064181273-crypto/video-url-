@@ -10,6 +10,13 @@ from typing import Protocol
 CREATE_SUSPENDED = 0x00000004
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
 CREATE_NO_WINDOW = 0x08000000
+STARTF_USESTDHANDLES = 0x00000100
+STD_INPUT_HANDLE = -10
+STD_OUTPUT_HANDLE = -11
+STD_ERROR_HANDLE = -12
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 258
+STILL_ACTIVE = 259
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_TERMINATE = 0x0008
@@ -263,6 +270,13 @@ class NativeWindowsJobApi:
     ) -> tuple[object, object, int]:
         startup = _StartupInfoW()
         startup.cb = ctypes.sizeof(startup)
+        get_standard_handle = self.kernel32.GetStdHandle
+        get_standard_handle.argtypes = [ctypes.c_int32]
+        get_standard_handle.restype = ctypes.c_void_p
+        startup.dwFlags = STARTF_USESTDHANDLES
+        startup.hStdInput = get_standard_handle(STD_INPUT_HANDLE)
+        startup.hStdOutput = get_standard_handle(STD_OUTPUT_HANDLE)
+        startup.hStdError = get_standard_handle(STD_ERROR_HANDLE)
         process = _ProcessInformation()
         command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
         environment_block = "\0".join(
@@ -289,7 +303,7 @@ class NativeWindowsJobApi:
             command_line,
             None,
             None,
-            0,
+            1,
             CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
             environment_buffer,
             cwd,
@@ -326,6 +340,28 @@ class NativeWindowsJobApi:
         function.restype = ctypes.c_int
         if not function(self._handle(job), exit_code):
             self._raise_last_error("TerminateJobObject failed")
+
+    def wait_process(self, process: object, timeout_ms: int) -> bool:
+        function = self.kernel32.WaitForSingleObject
+        function.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        function.restype = ctypes.c_uint32
+        result = int(function(self._handle(process), timeout_ms))
+        if result == WAIT_OBJECT_0:
+            return True
+        if result == WAIT_TIMEOUT:
+            return False
+        self._raise_last_error("WaitForSingleObject failed")
+
+    def process_exit_code(self, process: object) -> int:
+        exit_code = ctypes.c_uint32()
+        function = self.kernel32.GetExitCodeProcess
+        function.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        function.restype = ctypes.c_int
+        if not function(self._handle(process), ctypes.byref(exit_code)):
+            self._raise_last_error("GetExitCodeProcess failed")
+        if exit_code.value == STILL_ACTIVE:
+            raise WindowsJobError("process is still active")
+        return int(exit_code.value)
 
     def close_handle(self, handle: object) -> None:
         function = self.kernel32.CloseHandle

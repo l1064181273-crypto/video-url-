@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import threading
@@ -718,7 +719,8 @@ def test_local_probes_never_call_download_or_engine_entrypoints(
     monkeypatch.setattr("static_ffmpeg.add_paths", forbidden)
     monkeypatch.setattr("huggingface_hub.hf_hub_download", forbidden)
     monkeypatch.setattr("huggingface_hub.snapshot_download", forbidden)
-    monkeypatch.setattr("mlx_whisper.transcribe", forbidden)
+    if importlib.util.find_spec("mlx_whisper") is not None:
+        monkeypatch.setattr("mlx_whisper.transcribe", forbidden)
     monkeypatch.setattr("lvt.engines.mlx_whisper.MLXWhisperASREngine.__init__", forbidden)
     monkeypatch.setattr(
         "lvt.engines.sherpa_diarization.SherpaOnnxDiarizationEngine.__init__",

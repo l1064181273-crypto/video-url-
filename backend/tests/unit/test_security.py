@@ -1,3 +1,4 @@
+import os
 import stat
 from pathlib import Path
 
@@ -36,4 +37,5 @@ def test_token_is_high_entropy_persistent_and_private(tmp_path: Path) -> None:
 
     assert first == second
     assert len(first) >= 64
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600

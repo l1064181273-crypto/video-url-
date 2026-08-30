@@ -51,6 +51,7 @@ WINDOWS_PACKAGING_TOOLS = (
     "windows_publish_install.py",
     "windows_service.py",
     "windows_supervisor.py",
+    "windows_tool_supervisor.py",
 )
 FAILURE_POINTS = {
     "before-uv",

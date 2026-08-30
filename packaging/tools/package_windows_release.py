@@ -26,6 +26,7 @@ WINDOWS_TOOLS = (
     "windows_publish_install.py",
     "windows_service.py",
     "windows_supervisor.py",
+    "windows_tool_supervisor.py",
 )
 WINDOWS_SCRIPTS = (
     "install.ps1",

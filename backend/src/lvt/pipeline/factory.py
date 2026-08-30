@@ -65,7 +65,13 @@ def create_real_pipeline(
                 else None
             ),
             supervisor_path=(
-                Path(__file__).resolve().parents[4] / "packaging/tools/tool_supervisor.py"
+                Path(__file__).resolve().parents[4]
+                / "packaging/tools"
+                / (
+                    "windows_tool_supervisor.py"
+                    if config.runtime_platform is RuntimePlatform.WINDOWS
+                    else "tool_supervisor.py"
+                )
                 if config.installed_mode
                 else None
             ),

@@ -138,6 +138,9 @@ def test_windows_pipeline_uses_platform_asr_factory(monkeypatch: Any, tmp_path: 
     pipeline = create_real_pipeline(config)
 
     assert isinstance(pipeline.asr, _Engine)
+    assert pipeline.downloader.kwargs["supervisor_path"] == (
+        ROOT / "packaging/tools/windows_tool_supervisor.py"
+    )
     assert asr_calls == [
         {
             "ffmpeg_path": ffmpeg_dir / "ffmpeg.exe",
