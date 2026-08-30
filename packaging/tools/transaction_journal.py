@@ -403,7 +403,11 @@ class TransactionJournal:
             self._failpoint("root:before_marker_write")
             descriptor = os.open(
                 marker,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
                 0o600,
             )
             try:
@@ -500,13 +504,19 @@ class TransactionJournal:
         self._call(path, "before_temp_write")
         descriptor = os.open(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         try:
             view = memoryview(encoded)
             while view:
                 written = os.write(descriptor, view)
+                if written <= 0:
+                    raise JournalError("journal slot write made no progress")
                 view = view[written:]
             self._call(path, "after_temp_write")
             self._call(path, "before_file_fsync")

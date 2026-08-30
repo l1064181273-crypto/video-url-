@@ -144,7 +144,12 @@ class LifecycleLock:
         self._prepare_lifecycle_root()
         if path_is_link_like(self.lock_path):
             raise LockUnsafeError("lifecycle lock cannot be a symlink")
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
@@ -241,7 +246,13 @@ class LifecycleLock:
             "operation": self.operation,
         }
         encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
         fd = os.open(path, flags, 0o600)
         try:
             os.write(fd, encoded)

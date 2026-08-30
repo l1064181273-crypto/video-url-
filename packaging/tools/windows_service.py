@@ -189,7 +189,11 @@ def publish_service_record(path: Path, record: WindowsServiceRecord) -> None:
     try:
         descriptor = os.open(
             staged,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         view = memoryview(encoded)
@@ -204,7 +208,11 @@ def publish_service_record(path: Path, record: WindowsServiceRecord) -> None:
         descriptor = None
         try:
             if sys.platform == "win32":
-                staged.rename(path)
+                rename_exclusive(
+                    PureWindowsPath(str(staged)),
+                    PureWindowsPath(str(path)),
+                    NativeWindowsPublicationApi(),
+                )
             else:
                 os.link(staged, path, follow_symlinks=False)
                 staged.unlink()

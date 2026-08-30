@@ -49,7 +49,8 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _fsync_file(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    access = os.O_RDWR if sys.platform == "win32" else os.O_RDONLY
+    descriptor = os.open(path, access | getattr(os, "O_BINARY", 0))
     try:
         os.fsync(descriptor)
     finally:
@@ -441,7 +442,11 @@ def _download_verified_with_python(
     try:
         descriptor = os.open(
             partial,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         request = urllib.request.Request(
@@ -517,7 +522,11 @@ def _publish_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
     partial = path.parent / f".{path.name}.candidate.{uuid.uuid4().hex}"
     descriptor = os.open(
         partial,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0),
         mode,
     )
     try:
@@ -772,7 +781,11 @@ def _install_windows_ollama_archive(
                 output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 descriptor = os.open(
                     output,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
                     0o700 if output.suffix.lower() == ".exe" else 0o600,
                 )
                 digest = hashlib.sha256()
@@ -1417,7 +1430,11 @@ def _write_install_state(
     partial = state_path.parent / f".install-state.partial.{uuid.uuid4().hex}"
     descriptor = os.open(
         partial,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0),
         0o600,
     )
     try:

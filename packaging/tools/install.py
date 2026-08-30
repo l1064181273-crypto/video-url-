@@ -81,7 +81,8 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _fsync_file(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    access = os.O_RDWR if sys.platform == "win32" else os.O_RDONLY
+    descriptor = os.open(path, access | getattr(os, "O_BINARY", 0))
     try:
         os.fsync(descriptor)
     finally:
@@ -481,7 +482,11 @@ def _download_archive_with_python(
     try:
         descriptor = os.open(
             partial,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         request = urllib.request.Request(
@@ -789,7 +794,13 @@ def _ensure_token(
         return False
     partial = token.parent / f".api-token.partial.{uuid.uuid4().hex}"
     encoded = (secrets.token_urlsafe(32) + "\n").encode("ascii")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     descriptor = os.open(partial, flags, 0o600)
     try:
         os.write(descriptor, encoded)
@@ -836,7 +847,11 @@ def _write_install_state(data_root: Path, version: str) -> None:
     encoded = (json.dumps(state, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     descriptor = os.open(
         partial,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0),
         0o600,
     )
     try:

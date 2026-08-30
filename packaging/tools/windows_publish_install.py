@@ -157,7 +157,11 @@ class SystemWindowsPublicationServices:
         staged = handle.path.parent / f".{handle.path.name}.staged-{uuid.uuid4().hex}"
         descriptor = os.open(
             staged,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         try:
@@ -260,7 +264,8 @@ def _identity(path: Path, component: str) -> dict[str, str]:
 
 
 def _fsync_file(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    access = os.O_RDWR if sys.platform == "win32" else os.O_RDONLY
+    descriptor = os.open(path, access | getattr(os, "O_BINARY", 0))
     try:
         os.fsync(descriptor)
     finally:
@@ -404,7 +409,11 @@ class WindowsInstallPublisher:
             raise WindowsPublishError("current next path is occupied")
         descriptor = os.open(
             self.current_next,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         try:
@@ -603,7 +612,11 @@ class WindowsInstallPublisher:
         temporary = path.parent / f".install-state.activate-{uuid.uuid4().hex}"
         descriptor = os.open(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         try:
