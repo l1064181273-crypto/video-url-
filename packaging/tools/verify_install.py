@@ -952,7 +952,7 @@ def main(argv: list[str] | None = None) -> int:
             ],
         )
     if arguments.json:
-        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        print(json.dumps(report, ensure_ascii=True, sort_keys=True))
     else:
         print(_render_human(report))
     return int(report["exit_code"])
