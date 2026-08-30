@@ -1,0 +1,52 @@
+Local Video Transcriber Windows 新手使用说明
+============================================
+
+适用系统：Windows 10 22H2 或 Windows 11，64 位 x64 电脑。
+
+第一次使用
+----------
+
+1. 把整个 ZIP 解压到一个普通文件夹。
+   不要直接在压缩包预览窗口里运行。
+
+2. 双击：
+   启动 Local Video Transcriber.cmd
+
+3. 第一次安装会下载 Python、FFmpeg、Ollama 和语音模型。
+   文件较大，请保持网络连接并等待窗口显示 WINDOWS_READY。
+   不需要管理员权限，不要选择“以管理员身份运行”。
+
+4. 在 Chrome 地址栏打开：
+   chrome://extensions
+
+5. 打开右上角“开发者模式”，点击“加载已解压的扩展程序”。
+   选择：
+   %LOCALAPPDATA%\LocalVideoTranscriber\extension
+
+6. 打开扩展侧边栏。扩展会自动配对，不需要手工复制 Token。
+   然后选择视频或提交视频链接即可。
+
+以后使用
+--------
+
+- 启动：双击“启动 Local Video Transcriber.cmd”。
+- 停止：右键 scripts\stop.ps1，选择“使用 PowerShell 运行”。
+- 检查：右键 scripts\doctor.ps1，选择“使用 PowerShell 运行”。
+- 升级：解压新版 ZIP，再双击新版启动文件。安装器会拒绝降级。
+
+数据位置
+--------
+
+程序数据默认保存在：
+%LOCALAPPDATA%\LocalVideoTranscriber
+
+请不要手工删除 runtime、config、models 或 app 文件夹。
+
+遇到错误
+--------
+
+- WINDOWS_INSTALL_FAILED：不要强制删除文件，先运行 doctor.ps1。
+- START_UNSAFE 或 STOP_UNSAFE：说明进程身份或端口无法安全确认。
+  不要使用 taskkill 强制结束，把窗口中的错误信息交给维护人员。
+- Chrome 找不到扩展：重新打开 chrome://extensions，确认加载的是上面的
+  extension 文件夹，而不是 ZIP 文件。

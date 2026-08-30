@@ -11,6 +11,10 @@ type ObjectUrlApi = {
   revokeObjectURL(url: string): void;
 };
 
+export type ArtifactDownloadOptions = {
+  saveAs?: boolean;
+};
+
 export class ArtifactDownloadService {
   constructor(
     private readonly client: LocalApiClient,
@@ -23,6 +27,7 @@ export class ArtifactDownloadService {
     jobId: string,
     jobTitle: string,
     artifact: JobArtifact,
+    options: ArtifactDownloadOptions = {},
     signal?: AbortSignal,
   ): Promise<number> {
     const blob = await this.client.getArtifactBlob(jobId, artifact, signal);
@@ -45,7 +50,7 @@ export class ArtifactDownloadService {
         url: objectUrl,
         filename: `${directory}/${artifact.kind}`,
         conflictAction: "uniquify",
-        saveAs: false,
+        saveAs: options.saveAs === true,
       });
       if (!Number.isInteger(downloadId) || downloadId < 0) {
         throw new Error("download did not return an ID");

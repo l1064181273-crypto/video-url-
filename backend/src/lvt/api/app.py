@@ -29,12 +29,17 @@ from lvt.db.repository import DeleteFinalizationError, DeleteJobResult, JobRepos
 from lvt.security.urls import validate_public_media_url
 from lvt.workers.runner import (
     ActivationBarrier,
+    ActivationGate,
     CancelRequestResult,
     Clock,
+    FileActivationBarrier,
     JobWorkerPool,
     WorkerPipeline,
     WorkerStartupError,
 )
+
+PACKAGED_EXTENSION_ID = "hbcpdfclnpdpiamdelgbpkpiaemmbljg"
+PACKAGED_EXTENSION_ORIGIN = f"chrome-extension://{PACKAGED_EXTENSION_ID}"
 
 
 class CreateJobsRequest(BaseModel):
@@ -59,6 +64,8 @@ def create_app(
     worker_poll_interval: float = 0.25,
     worker_clock: Clock | None = None,
     precommit_activation_fd: int | None = None,
+    precommit_activation_file: Path | None = None,
+    precommit_activation_token: str | None = None,
 ) -> FastAPI:
     repository = JobRepository(db_path)
     if worker_concurrency is not None and (
@@ -73,9 +80,25 @@ def create_app(
             activation_descriptor = int(os.environ["LVT_PRECOMMIT_ACTIVATION_FD"])
         except ValueError as exc:
             raise ValueError("LVT_PRECOMMIT_ACTIVATION_FD must be an integer") from exc
-    activation_barrier = (
-        ActivationBarrier(activation_descriptor) if activation_descriptor is not None else None
-    )
+    activation_file = precommit_activation_file
+    activation_token = precommit_activation_token
+    if activation_file is None and "LVT_PRECOMMIT_ACTIVATION_FILE" in os.environ:
+        activation_file = Path(os.environ["LVT_PRECOMMIT_ACTIVATION_FILE"])
+    if activation_token is None and "LVT_PRECOMMIT_ACTIVATION_TOKEN" in os.environ:
+        activation_token = os.environ["LVT_PRECOMMIT_ACTIVATION_TOKEN"]
+    if activation_descriptor is not None and (
+        activation_file is not None or activation_token is not None
+    ):
+        raise ValueError("only one precommit activation mechanism may be configured")
+    if (activation_file is None) != (activation_token is None):
+        raise ValueError("file activation path and token must be configured together")
+    activation_barrier: ActivationGate | None
+    if activation_descriptor is not None:
+        activation_barrier = ActivationBarrier(activation_descriptor)
+    elif activation_file is not None and activation_token is not None:
+        activation_barrier = FileActivationBarrier(activation_file, activation_token)
+    else:
+        activation_barrier = None
     worker_pool = (
         JobWorkerPool(
             repository=repository,
@@ -117,7 +140,7 @@ def create_app(
             if worker_pool is None or worker_pool.live_thread_count == 0:
                 instance_lock.release()
 
-    app = FastAPI(title="Local Video Transcriber", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Local Video Transcriber", version="0.1.1", lifespan=lifespan)
     app.state.repository = repository
     app.state.worker_pool = worker_pool
     app.state.instance_lock = instance_lock
@@ -134,9 +157,32 @@ def create_app(
                 detail={"error_code": "UNAUTHORIZED", "message": "配对 Token 无效"},
             )
 
+    @app.post("/api/v1/pairing", response_model=None)
+    def pair_packaged_extension(
+        origin: Annotated[str | None, Header(alias="Origin")] = None,
+        pairing_marker: Annotated[str | None, Header(alias="X-LVT-Pairing")] = None,
+    ) -> Response:
+        valid_origin = origin is not None and secrets.compare_digest(
+            origin, PACKAGED_EXTENSION_ORIGIN
+        )
+        valid_marker = pairing_marker is not None and secrets.compare_digest(pairing_marker, "1")
+        if not valid_origin or not valid_marker:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "PAIRING_DENIED", "message": "自动配对请求无效"},
+            )
+        return JSONResponse(
+            content={"token": api_token},
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "Vary": "Origin",
+            },
+        )
+
     @app.get("/health", response_model=None)
     def health() -> Any:
-        payload: dict[str, Any] = {"status": "healthy", "version": "0.1.0"}
+        payload: dict[str, Any] = {"status": "healthy", "version": "0.1.1"}
         if worker_pool is None:
             return payload
         worker_health = worker_pool.health_snapshot()

@@ -1,0 +1,667 @@
+{
+  "development_only_count": 10,
+  "lock_file": "backend/uv.lock",
+  "lock_sha256": "177d1f118565d92cc558df953659e1f665866edfc78091c31c8642ac1928cc05",
+  "packages": [
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/annotated-doc/0.0.5/json",
+      "lock_ref": "backend/uv.lock:annotated-doc==0.0.5",
+      "package": "annotated-doc",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/annotated-doc/0.0.5/",
+      "version": "0.0.5"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/annotated-types/0.8.0/json",
+      "lock_ref": "backend/uv.lock:annotated-types==0.8.0",
+      "package": "annotated-types",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/annotated-types/0.8.0/",
+      "version": "0.8.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/anyio/4.14.2/json",
+      "lock_ref": "backend/uv.lock:anyio==4.14.2",
+      "package": "anyio",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/anyio/4.14.2/",
+      "version": "4.14.2"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/av/18.1.0/json",
+      "lock_ref": "backend/uv.lock:av==18.1.0",
+      "package": "av",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/av/18.1.0/",
+      "version": "18.1.0"
+    },
+    {
+      "license": "MIT License",
+      "license_source": "https://pypi.org/pypi/backports-tarfile/1.2.0/json",
+      "lock_ref": "backend/uv.lock:backports-tarfile==1.2.0",
+      "package": "backports-tarfile",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/backports-tarfile/1.2.0/",
+      "version": "1.2.0"
+    },
+    {
+      "license": "MPL-2.0",
+      "license_source": "https://pypi.org/pypi/certifi/2026.7.22/json",
+      "lock_ref": "backend/uv.lock:certifi==2026.7.22",
+      "package": "certifi",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/certifi/2026.7.22/",
+      "version": "2026.7.22"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/charset-normalizer/3.5.1/json",
+      "lock_ref": "backend/uv.lock:charset-normalizer==3.5.1",
+      "package": "charset-normalizer",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/charset-normalizer/3.5.1/",
+      "version": "3.5.1"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/click/8.4.2/json",
+      "lock_ref": "backend/uv.lock:click==8.4.2",
+      "package": "click",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/click/8.4.2/",
+      "version": "8.4.2"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/colorama/0.4.6/json",
+      "lock_ref": "backend/uv.lock:colorama==0.4.6",
+      "package": "colorama",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/colorama/0.4.6/",
+      "version": "0.4.6"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/coverage/7.15.4/json",
+      "lock_ref": "backend/uv.lock:coverage==7.15.4",
+      "package": "coverage",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/coverage/7.15.4/",
+      "version": "7.15.4"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/ctranslate2/4.8.1/json",
+      "lock_ref": "backend/uv.lock:ctranslate2==4.8.1",
+      "package": "ctranslate2",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/ctranslate2/4.8.1/",
+      "version": "4.8.1"
+    },
+    {
+      "license": "Public Domain OR BSD License OR GNU General Public License (GPL)",
+      "license_source": "https://pypi.org/pypi/docutils/0.23/json",
+      "lock_ref": "backend/uv.lock:docutils==0.23",
+      "package": "docutils",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/docutils/0.23/",
+      "version": "0.23"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/fastapi/0.141.1/json",
+      "lock_ref": "backend/uv.lock:fastapi==0.141.1",
+      "package": "fastapi",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/fastapi/0.141.1/",
+      "version": "0.141.1"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/faster-whisper/1.2.1/json",
+      "lock_ref": "backend/uv.lock:faster-whisper==1.2.1",
+      "package": "faster-whisper",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/faster-whisper/1.2.1/",
+      "version": "1.2.1"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/filelock/3.32.4/json",
+      "lock_ref": "backend/uv.lock:filelock==3.32.4",
+      "package": "filelock",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/filelock/3.32.4/",
+      "version": "3.32.4"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/flatbuffers/25.12.19/json",
+      "lock_ref": "backend/uv.lock:flatbuffers==25.12.19",
+      "package": "flatbuffers",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/flatbuffers/25.12.19/",
+      "version": "25.12.19"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/fsspec/2026.7.0/json",
+      "lock_ref": "backend/uv.lock:fsspec==2026.7.0",
+      "package": "fsspec",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/fsspec/2026.7.0/",
+      "version": "2026.7.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/h11/0.16.0/json",
+      "lock_ref": "backend/uv.lock:h11==0.16.0",
+      "package": "h11",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/h11/0.16.0/",
+      "version": "0.16.0"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/hf-xet/1.6.0/json",
+      "lock_ref": "backend/uv.lock:hf-xet==1.6.0",
+      "package": "hf-xet",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/hf-xet/1.6.0/",
+      "version": "1.6.0"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/httpcore/1.0.9/json",
+      "lock_ref": "backend/uv.lock:httpcore==1.0.9",
+      "package": "httpcore",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/httpcore/1.0.9/",
+      "version": "1.0.9"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/httpx/0.28.1/json",
+      "lock_ref": "backend/uv.lock:httpx==0.28.1",
+      "package": "httpx",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/httpx/0.28.1/",
+      "version": "0.28.1"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/huggingface-hub/1.28.0/json",
+      "lock_ref": "backend/uv.lock:huggingface-hub==1.28.0",
+      "package": "huggingface-hub",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/huggingface-hub/1.28.0/",
+      "version": "1.28.0"
+    },
+    {
+      "license": "Apache Software License",
+      "license_source": "https://pypi.org/pypi/id/1.6.1/json",
+      "lock_ref": "backend/uv.lock:id==1.6.1",
+      "package": "id",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/id/1.6.1/",
+      "version": "1.6.1"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/idna/3.19/json",
+      "lock_ref": "backend/uv.lock:idna==3.19",
+      "package": "idna",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/idna/3.19/",
+      "version": "3.19"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/importlib-metadata/9.0.0/json",
+      "lock_ref": "backend/uv.lock:importlib-metadata==9.0.0",
+      "package": "importlib-metadata",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/importlib-metadata/9.0.0/",
+      "version": "9.0.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/iniconfig/2.3.0/json",
+      "lock_ref": "backend/uv.lock:iniconfig==2.3.0",
+      "package": "iniconfig",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/iniconfig/2.3.0/",
+      "version": "2.3.0"
+    },
+    {
+      "license": "MIT License",
+      "license_source": "https://pypi.org/pypi/jaraco-classes/3.4.0/json",
+      "lock_ref": "backend/uv.lock:jaraco-classes==3.4.0",
+      "package": "jaraco-classes",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/jaraco-classes/3.4.0/",
+      "version": "3.4.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/jaraco-context/6.1.2/json",
+      "lock_ref": "backend/uv.lock:jaraco-context==6.1.2",
+      "package": "jaraco-context",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/jaraco-context/6.1.2/",
+      "version": "6.1.2"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/jaraco-functools/4.6.0/json",
+      "lock_ref": "backend/uv.lock:jaraco-functools==4.6.0",
+      "package": "jaraco-functools",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/jaraco-functools/4.6.0/",
+      "version": "4.6.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/keyring/25.7.0/json",
+      "lock_ref": "backend/uv.lock:keyring==25.7.0",
+      "package": "keyring",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/keyring/25.7.0/",
+      "version": "25.7.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/librt/0.15.0/json",
+      "lock_ref": "backend/uv.lock:librt==0.15.0",
+      "package": "librt",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/librt/0.15.0/",
+      "version": "0.15.0"
+    },
+    {
+      "license": "MIT License",
+      "license_source": "https://pypi.org/pypi/markdown-it-py/4.2.0/json",
+      "lock_ref": "backend/uv.lock:markdown-it-py==4.2.0",
+      "package": "markdown-it-py",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/markdown-it-py/4.2.0/",
+      "version": "4.2.0"
+    },
+    {
+      "license": "MIT License",
+      "license_source": "https://pypi.org/pypi/mdurl/0.1.2/json",
+      "lock_ref": "backend/uv.lock:mdurl==0.1.2",
+      "package": "mdurl",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/mdurl/0.1.2/",
+      "version": "0.1.2"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/more-itertools/11.1.0/json",
+      "lock_ref": "backend/uv.lock:more-itertools==11.1.0",
+      "package": "more-itertools",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/more-itertools/11.1.0/",
+      "version": "11.1.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/mypy/1.20.2/json",
+      "lock_ref": "backend/uv.lock:mypy==1.20.2",
+      "package": "mypy",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/mypy/1.20.2/",
+      "version": "1.20.2"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/mypy-extensions/1.1.0/json",
+      "lock_ref": "backend/uv.lock:mypy-extensions==1.1.0",
+      "package": "mypy-extensions",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/mypy-extensions/1.1.0/",
+      "version": "1.1.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/nh3/0.3.7/json",
+      "lock_ref": "backend/uv.lock:nh3==0.3.7",
+      "package": "nh3",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/nh3/0.3.7/",
+      "version": "0.3.7"
+    },
+    {
+      "license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "license_source": "https://pypi.org/pypi/numpy/2.4.6/json",
+      "lock_ref": "backend/uv.lock:numpy==2.4.6",
+      "package": "numpy",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/numpy/2.4.6/",
+      "version": "2.4.6"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/onnxruntime/1.29.0/json",
+      "lock_ref": "backend/uv.lock:onnxruntime==1.29.0",
+      "package": "onnxruntime",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/onnxruntime/1.29.0/",
+      "version": "1.29.0"
+    },
+    {
+      "license": "Apache-2.0 OR BSD-2-Clause",
+      "license_source": "https://pypi.org/pypi/packaging/26.3/json",
+      "lock_ref": "backend/uv.lock:packaging==26.3",
+      "package": "packaging",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/packaging/26.3/",
+      "version": "26.3"
+    },
+    {
+      "license": "Mozilla Public License 2.0 (MPL 2.0)",
+      "license_source": "https://pypi.org/pypi/pathspec/1.1.1/json",
+      "lock_ref": "backend/uv.lock:pathspec==1.1.1",
+      "package": "pathspec",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/pathspec/1.1.1/",
+      "version": "1.1.1"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/pluggy/1.6.0/json",
+      "lock_ref": "backend/uv.lock:pluggy==1.6.0",
+      "package": "pluggy",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/pluggy/1.6.0/",
+      "version": "1.6.0"
+    },
+    {
+      "license": "ISC",
+      "license_source": "https://pypi.org/pypi/progress/1.6.1/json",
+      "lock_ref": "backend/uv.lock:progress==1.6.1",
+      "package": "progress",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/progress/1.6.1/",
+      "version": "1.6.1"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/protobuf/7.36.0/json",
+      "lock_ref": "backend/uv.lock:protobuf==7.36.0",
+      "package": "protobuf",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/protobuf/7.36.0/",
+      "version": "7.36.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/pydantic/2.13.4/json",
+      "lock_ref": "backend/uv.lock:pydantic==2.13.4",
+      "package": "pydantic",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/pydantic/2.13.4/",
+      "version": "2.13.4"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/pydantic-core/2.46.4/json",
+      "lock_ref": "backend/uv.lock:pydantic-core==2.46.4",
+      "package": "pydantic-core",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/pydantic-core/2.46.4/",
+      "version": "2.46.4"
+    },
+    {
+      "license": "BSD-2-Clause",
+      "license_source": "https://pypi.org/pypi/pygments/2.21.0/json",
+      "lock_ref": "backend/uv.lock:pygments==2.21.0",
+      "package": "pygments",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/pygments/2.21.0/",
+      "version": "2.21.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/pytest/8.4.2/json",
+      "lock_ref": "backend/uv.lock:pytest==8.4.2",
+      "package": "pytest",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/pytest/8.4.2/",
+      "version": "8.4.2"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/pytest-cov/6.3.0/json",
+      "lock_ref": "backend/uv.lock:pytest-cov==6.3.0",
+      "package": "pytest-cov",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/pytest-cov/6.3.0/",
+      "version": "6.3.0"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/pywin32-ctypes/0.2.3/json",
+      "lock_ref": "backend/uv.lock:pywin32-ctypes==0.2.3",
+      "package": "pywin32-ctypes",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/pywin32-ctypes/0.2.3/",
+      "version": "0.2.3"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/pyyaml/6.0.3/json",
+      "lock_ref": "backend/uv.lock:pyyaml==6.0.3",
+      "package": "pyyaml",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/pyyaml/6.0.3/",
+      "version": "6.0.3"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/readme-renderer/45.0/json",
+      "lock_ref": "backend/uv.lock:readme-renderer==45.0",
+      "package": "readme-renderer",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/readme-renderer/45.0/",
+      "version": "45.0"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/requests/2.34.2/json",
+      "lock_ref": "backend/uv.lock:requests==2.34.2",
+      "package": "requests",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/requests/2.34.2/",
+      "version": "2.34.2"
+    },
+    {
+      "license": "Apache 2.0",
+      "license_source": "https://pypi.org/pypi/requests-toolbelt/1.0.0/json",
+      "lock_ref": "backend/uv.lock:requests-toolbelt==1.0.0",
+      "package": "requests-toolbelt",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/requests-toolbelt/1.0.0/",
+      "version": "1.0.0"
+    },
+    {
+      "license": "Apache 2.0",
+      "license_source": "https://pypi.org/pypi/rfc3986/2.0.0/json",
+      "lock_ref": "backend/uv.lock:rfc3986==2.0.0",
+      "package": "rfc3986",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/rfc3986/2.0.0/",
+      "version": "2.0.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/rich/15.0.0/json",
+      "lock_ref": "backend/uv.lock:rich==15.0.0",
+      "package": "rich",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/rich/15.0.0/",
+      "version": "15.0.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/ruff/0.16.4/json",
+      "lock_ref": "backend/uv.lock:ruff==0.16.4",
+      "package": "ruff",
+      "scope": "development-only",
+      "source": "https://pypi.org/project/ruff/0.16.4/",
+      "version": "0.16.4"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/setuptools/84.0.0/json",
+      "lock_ref": "backend/uv.lock:setuptools==84.0.0",
+      "package": "setuptools",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/setuptools/84.0.0/",
+      "version": "84.0.0"
+    },
+    {
+      "license": "Apache licensed, as found in the LICENSE file",
+      "license_source": "https://pypi.org/pypi/sherpa-onnx/1.13.6/json",
+      "lock_ref": "backend/uv.lock:sherpa-onnx==1.13.6",
+      "package": "sherpa-onnx",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/sherpa-onnx/1.13.6/",
+      "version": "1.13.6"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/sherpa-onnx-core/1.13.6/json",
+      "lock_ref": "backend/uv.lock:sherpa-onnx-core==1.13.6",
+      "package": "sherpa-onnx-core",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/sherpa-onnx-core/1.13.6/",
+      "version": "1.13.6"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/srt/3.5.3/json",
+      "lock_ref": "backend/uv.lock:srt==3.5.3",
+      "package": "srt",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/srt/3.5.3/",
+      "version": "3.5.3"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/starlette/1.6.0/json",
+      "lock_ref": "backend/uv.lock:starlette==1.6.0",
+      "package": "starlette",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/starlette/1.6.0/",
+      "version": "1.6.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/static-ffmpeg/3.0/json",
+      "lock_ref": "backend/uv.lock:static-ffmpeg==3.0",
+      "package": "static-ffmpeg",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/static-ffmpeg/3.0/",
+      "version": "3.0"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/tokenizers/0.23.1/json",
+      "lock_ref": "backend/uv.lock:tokenizers==0.23.1",
+      "package": "tokenizers",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/tokenizers/0.23.1/",
+      "version": "0.23.1"
+    },
+    {
+      "license": "MPL-2.0 AND MIT",
+      "license_source": "https://pypi.org/pypi/tqdm/4.70.0/json",
+      "lock_ref": "backend/uv.lock:tqdm==4.70.0",
+      "package": "tqdm",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/tqdm/4.70.0/",
+      "version": "4.70.0"
+    },
+    {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/twine/7.0.0/json",
+      "lock_ref": "backend/uv.lock:twine==7.0.0",
+      "package": "twine",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/twine/7.0.0/",
+      "version": "7.0.0"
+    },
+    {
+      "license": "PSF-2.0",
+      "license_source": "https://pypi.org/pypi/typing-extensions/4.16.0/json",
+      "lock_ref": "backend/uv.lock:typing-extensions==4.16.0",
+      "package": "typing-extensions",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/typing-extensions/4.16.0/",
+      "version": "4.16.0"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/typing-inspection/0.4.4/json",
+      "lock_ref": "backend/uv.lock:typing-inspection==0.4.4",
+      "package": "typing-inspection",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/typing-inspection/0.4.4/",
+      "version": "0.4.4"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/urllib3/2.7.0/json",
+      "lock_ref": "backend/uv.lock:urllib3==2.7.0",
+      "package": "urllib3",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/urllib3/2.7.0/",
+      "version": "2.7.0"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/pypi/uvicorn/0.52.4/json",
+      "lock_ref": "backend/uv.lock:uvicorn==0.52.4",
+      "package": "uvicorn",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/uvicorn/0.52.4/",
+      "version": "0.52.4"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/webvtt-py/0.5.1/json",
+      "lock_ref": "backend/uv.lock:webvtt-py==0.5.1",
+      "package": "webvtt-py",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/webvtt-py/0.5.1/",
+      "version": "0.5.1"
+    },
+    {
+      "license": "Unlicense",
+      "license_source": "https://pypi.org/pypi/yt-dlp/2026.8.19/json",
+      "lock_ref": "backend/uv.lock:yt-dlp==2026.8.19",
+      "package": "yt-dlp",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/yt-dlp/2026.8.19/",
+      "version": "2026.8.19"
+    },
+    {
+      "license": "MIT",
+      "license_source": "https://pypi.org/pypi/zipp/4.1.0/json",
+      "lock_ref": "backend/uv.lock:zipp==4.1.0",
+      "package": "zipp",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/zipp/4.1.0/",
+      "version": "4.1.0"
+    }
+  ],
+  "runtime_count": 63,
+  "schema_version": 1,
+  "target": "windows-x64-python3.11"
+}

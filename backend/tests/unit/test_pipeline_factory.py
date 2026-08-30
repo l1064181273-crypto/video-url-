@@ -24,7 +24,7 @@ def test_create_real_pipeline_accepts_repository_for_checkpoint_execution(
         lambda: (Path("/tools/ffmpeg"), Path("/tools/ffprobe")),
     )
     monkeypatch.setattr(factory, "YtDlpFFmpegDownloader", _Engine)
-    monkeypatch.setattr(factory, "MLXWhisperASREngine", _Engine)
+    monkeypatch.setattr(factory, "create_asr_engine", _Engine)
     monkeypatch.setattr(factory, "SherpaOnnxDiarizationEngine", _Engine)
     monkeypatch.setattr(factory, "OllamaTranslationEngine", _Engine)
     monkeypatch.setattr(factory, "FallbackTranslationEngine", _Engine)

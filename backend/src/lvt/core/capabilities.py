@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from importlib import import_module as import_runtime_module
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Protocol
@@ -67,15 +68,19 @@ class LocalCapabilitiesConfig:
     primary_translation_model: str
     fallback_translation_model: str
     model_cache_root: Path
+    asr_model_path: Path | None = None
     ffmpeg_path: Path | None = None
     ffprobe_path: Path | None = None
     strict_ffmpeg: bool = False
+    asr_package_name: str = "mlx-whisper"
+    asr_required_model_files: tuple[str, ...] = ("config.json", "weights.npz")
 
 
 JsonRequester = Callable[[str, float], Mapping[str, Any]]
 PackageVersion = Callable[[str], str]
 ExecutableLookup = Callable[[str], str | None]
 CommandRunner = Callable[[list[str], float], tuple[int, str]]
+ModuleImporter = Callable[[str], object]
 
 
 class LocalCapabilityProbes:
@@ -87,6 +92,7 @@ class LocalCapabilityProbes:
         which: ExecutableLookup = shutil.which,
         run_command: CommandRunner | None = None,
         request_json: JsonRequester | None = None,
+        import_module: ModuleImporter = import_runtime_module,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
@@ -94,6 +100,7 @@ class LocalCapabilityProbes:
         self._which = which
         self._run_command = run_command or _run_command
         self._request_json = request_json or _request_local_json
+        self._import_module = import_module
         self._monotonic = monotonic
 
     def as_probes(self) -> CapabilityProbes:
@@ -161,7 +168,7 @@ class LocalCapabilityProbes:
 
     def asr_package(self, _timeout: float) -> CapabilityProbeResult:
         try:
-            version = self._package_version("mlx-whisper")
+            version = self._package_version(self.config.asr_package_name)
         except metadata.PackageNotFoundError:
             return CapabilityProbeResult(CapabilityStatus.MISSING)
         except Exception:
@@ -170,11 +177,20 @@ class LocalCapabilityProbes:
 
     def asr_model(self, _timeout: float) -> CapabilityProbeResult:
         try:
-            model_root = _hugging_face_model_root(
-                self.config.model_cache_root,
-                self.config.asr_model,
-            )
-            available = _mlx_whisper_snapshot_available(model_root / "snapshots")
+            if self.config.asr_model_path is not None:
+                available = _flat_asr_model_available(
+                    self.config.asr_model_path,
+                    self.config.asr_required_model_files,
+                )
+            else:
+                model_root = _hugging_face_model_root(
+                    self.config.model_cache_root,
+                    self.config.asr_model,
+                )
+                available = _asr_snapshot_available(
+                    model_root / "snapshots",
+                    self.config.asr_required_model_files,
+                )
         except Exception:
             return CapabilityProbeResult(CapabilityStatus.UNAVAILABLE)
         return CapabilityProbeResult(
@@ -187,6 +203,10 @@ class LocalCapabilityProbes:
             version = self._package_version("sherpa-onnx")
         except metadata.PackageNotFoundError:
             return CapabilityProbeResult(CapabilityStatus.MISSING)
+        except Exception:
+            return CapabilityProbeResult(CapabilityStatus.UNAVAILABLE)
+        try:
+            self._import_module("sherpa_onnx")
         except Exception:
             return CapabilityProbeResult(CapabilityStatus.UNAVAILABLE)
         try:
@@ -519,13 +539,24 @@ def _hugging_face_model_root(cache_root: Path, model: str) -> Path:
     return cache_root / f"models--{owner}--{name}"
 
 
-def _mlx_whisper_snapshot_available(snapshots: Path) -> bool:
+def _flat_asr_model_available(model_root: Path, required_files: tuple[str, ...]) -> bool:
+    if not required_files:
+        return False
+    if model_root.is_symlink() or not model_root.is_dir():
+        return False
+    required = [model_root / name for name in required_files]
+    return all(
+        not path.is_symlink() and path.is_file() and path.stat().st_size > 0 for path in required
+    )
+
+
+def _asr_snapshot_available(snapshots: Path, required_files: tuple[str, ...]) -> bool:
+    if not required_files:
+        return False
     if not snapshots.is_dir():
         return False
     return any(
-        snapshot.is_dir()
-        and (snapshot / "config.json").is_file()
-        and (snapshot / "weights.npz").is_file()
+        snapshot.is_dir() and all((snapshot / name).is_file() for name in required_files)
         for snapshot in snapshots.iterdir()
     )
 

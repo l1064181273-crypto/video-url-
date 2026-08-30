@@ -12,6 +12,7 @@ from typing import Any
 import yt_dlp  # type: ignore[import-untyped]
 
 from lvt.core.errors import LVTError
+from lvt.core.platform_runtime import RuntimePlatform, executable_name, resolve_runtime_platform
 from lvt.core.processes import (
     CancellationToken,
     ProcessExecutionError,
@@ -30,9 +31,15 @@ def discover_ffmpeg_binaries(
     ffmpeg_dir: Path | None = None,
     app_root: Path | None = None,
     install_state: Path | None = None,
+    runtime_platform: RuntimePlatform | None = None,
 ) -> tuple[Path, Path]:
     if installed_mode:
-        return _discover_installed_ffmpeg(ffmpeg_dir, app_root, install_state)
+        return _discover_installed_ffmpeg(
+            ffmpeg_dir,
+            app_root,
+            install_state,
+            runtime_platform or resolve_runtime_platform(),
+        )
 
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
@@ -54,6 +61,7 @@ def _discover_installed_ffmpeg(
     ffmpeg_dir: Path | None,
     app_root: Path | None,
     install_state: Path | None,
+    runtime_platform: RuntimePlatform,
 ) -> tuple[Path, Path]:
     try:
         if ffmpeg_dir is None or app_root is None or install_state is None:
@@ -75,7 +83,7 @@ def _discover_installed_ffmpeg(
 
         binaries: list[Path] = []
         for name in ("ffmpeg", "ffprobe"):
-            candidate = ffmpeg_dir / name
+            candidate = ffmpeg_dir / executable_name(name, runtime_platform)
             metadata_before = candidate.lstat()
             if candidate.is_symlink() or not stat.S_ISREG(metadata_before.st_mode):
                 raise ValueError(f"{name} is not an app-owned regular file")

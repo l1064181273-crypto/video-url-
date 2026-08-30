@@ -2,7 +2,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -29,9 +29,14 @@ import { cleanupE2eResources } from "../support/e2e-resources";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "../../..");
 const BACKEND_ROOT = resolve(PROJECT_ROOT, "backend");
-const PYTHON = resolve(PROJECT_ROOT, ".venv-smoke/bin/python");
+const PYTHON =
+  process.env.LVT_E2E_PYTHON ??
+  (process.platform === "win32"
+    ? resolve(BACKEND_ROOT, ".venv/Scripts/python.exe")
+    : resolve(PROJECT_ROOT, ".venv-smoke/bin/python"));
 const EXTENSION_PATH = resolve(PROJECT_ROOT, "extension/dist");
-const TOKEN = "CheckpointOneRuntimeToken";
+const TOKEN = "CheckpointOneRuntimeToken-0123456789abcdef";
+const PACKAGED_EXTENSION_ID = "hbcpdfclnpdpiamdelgbpkpiaemmbljg";
 const execFileAsync = promisify(execFile);
 
 let backend: ChildProcessWithoutNullStreams | undefined;
@@ -51,6 +56,9 @@ test.beforeAll(async () => {
         ...process.env,
         LVT_DATA_ROOT: dataRoot,
         LVT_TOKEN: TOKEN,
+        PYTHONPATH: [resolve(BACKEND_ROOT, "src"), process.env.PYTHONPATH]
+          .filter((value): value is string => value !== undefined && value.length > 0)
+          .join(delimiter),
         PYTHONUNBUFFERED: "1",
       },
       stdio: "pipe",
@@ -77,16 +85,23 @@ test("unpacked extension reads frozen local API contracts without leaking its to
     const requests: { headers: Record<string, string>; url: string }[] = [];
     const consoleMessages: string[] = [];
     context.on("request", (request) => {
-      if (request.url().startsWith(baseUrl)) {
+      if (request.url().startsWith(baseUrl) && request.url() !== `${baseUrl}/api/v1/pairing`) {
         requests.push({ headers: request.headers(), url: request.url() });
       }
     });
+    await context.route(`${baseUrl}/api/v1/pairing`, (route) =>
+      route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: '{"detail":"forbidden"}',
+      }),
+    );
 
     const page = await context.newPage();
     page.on("console", (message) => consoleMessages.push(message.text()));
     await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
     await expect(page.getByRole("heading", { name: "Local Video Transcriber" })).toBeVisible();
-    await expect(page.locator("#connection-status")).toHaveText("请先设置本地端口和配对 Token");
+    await expect(page.locator("#connection-status")).toHaveText("本地服务未启动，请先双击启动文件");
 
     const panelBehavior = await worker.evaluate(async () => chrome.sidePanel.getPanelBehavior());
     const panelOptions = await worker.evaluate(async () => chrome.sidePanel.getOptions({}));
@@ -159,6 +174,55 @@ test("unpacked extension reads frozen local API contracts without leaking its to
   }
 });
 
+test("first open automatically pairs the packaged extension without manual token entry", async () => {
+  const profile = await mkdtemp(resolve(tmpdir(), "lvt-chromium-profile-"));
+  let context: BrowserContext | undefined;
+  try {
+    context = await chromium.launchPersistentContext(profile, {
+      channel: "chromium",
+      headless: true,
+      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    });
+    const worker = await extensionWorker(context);
+    const extensionId = new URL(worker.url()).host;
+    expect(extensionId).toBe(PACKAGED_EXTENSION_ID);
+    await worker.evaluate(
+      async (port) =>
+        chrome.storage.local.set({
+          lvtConnection: { port },
+        }),
+      Number(new URL(baseUrl).port),
+    );
+    const pairingRequests: Promise<Record<string, string>>[] = [];
+    context.on("request", (request) => {
+      if (request.url() === `${baseUrl}/api/v1/pairing`) {
+        pairingRequests.push(request.allHeaders());
+      }
+    });
+
+    const page = await context.newPage();
+    await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
+    await expect(page.locator("#token-state")).toHaveText("Token 已自动管理");
+    await expect
+      .poll(() =>
+        worker.evaluate(async () => {
+          const stored = await chrome.storage.local.get("lvtConnection");
+          return stored.lvtConnection;
+        }),
+      )
+      .toEqual({ port: Number(new URL(baseUrl).port), token: TOKEN });
+    expect(pairingRequests).toHaveLength(1);
+    const pairingHeaders = await pairingRequests[0];
+    expect(pairingHeaders?.origin).toBe(`chrome-extension://${PACKAGED_EXTENSION_ID}`);
+    expect(pairingHeaders?.["x-lvt-pairing"]).toBe("1");
+    await expect(page.locator("body")).not.toContainText(TOKEN);
+  } finally {
+    await context?.close();
+    await rm(profile, { force: true, recursive: true });
+  }
+});
+
 test("side panel restores connection summary and clears its trusted token", async () => {
   const profile = await mkdtemp(resolve(tmpdir(), "lvt-chromium-profile-"));
   let context: BrowserContext | undefined;
@@ -189,7 +253,7 @@ test("side panel restores connection summary and clears its trusted token", asyn
 
     await expect(page.locator("#connection-port")).toHaveValue(new URL(baseUrl).port);
     await expect(page.locator("#connection-token")).toHaveValue("");
-    await expect(page.locator("#token-state")).toHaveText("Token 已保存");
+    await expect(page.locator("#token-state")).toHaveText("Token 已自动管理");
     await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
     await expect
       .poll(() => [...authenticatedPaths].sort())
@@ -197,8 +261,8 @@ test("side panel restores connection summary and clears its trusted token", asyn
     await expect(page.locator("body")).not.toContainText(TOKEN);
 
     await page.getByRole("button", { name: "清除 Token" }).click();
-    await expect(page.locator("#token-state")).toHaveText("未保存 Token");
-    await expect(page.locator("#connection-status")).toHaveText("请先设置本地端口和配对 Token");
+    await expect(page.locator("#token-state")).toHaveText("等待自动配对");
+    await expect(page.locator("#connection-status")).toHaveText("本地服务未启动，请先双击启动文件");
     const persisted = await worker.evaluate(async () => chrome.storage.local.get("lvtConnection"));
     expect(persisted).toEqual({
       lvtConnection: { port: Number(new URL(baseUrl).port) },
@@ -445,7 +509,7 @@ test("settings, dynamic capabilities, and safe errors remain backend-authoritati
 
     const replacementToken = "ReplacementInputSecret";
     await page.locator("#connection-token").fill(replacementToken);
-    await page.getByRole("button", { name: "保存并连接" }).click();
+    await page.getByRole("button", { name: "保存手动设置" }).click();
     await expect(page.locator("#connection-token")).toHaveValue("");
     expect(
       await worker.evaluate(
@@ -460,14 +524,14 @@ test("settings, dynamic capabilities, and safe errors remain backend-authoritati
     await expect(page.locator("body")).not.toContainText(replacementToken);
 
     await page.locator("#connection-token").fill(TOKEN);
-    await page.getByRole("button", { name: "保存并连接" }).click();
+    await page.getByRole("button", { name: "保存手动设置" }).click();
     await expect(page.locator("#connection-token")).toHaveValue("");
     await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
     await concurrencyOne.click();
     await expect(concurrencyOne).toHaveAttribute("aria-pressed", "true");
     await page.getByRole("button", { name: "清除 Token" }).click();
     await expect(page.locator("#connection-token")).toHaveValue("");
-    await expect(page.locator("#connection-status")).toHaveText("请先设置本地端口和配对 Token");
+    await expect(page.locator("#connection-status")).toHaveText("本地服务未启动，请先双击启动文件");
     expect(
       await worker.evaluate(async () => {
         const stored = (await chrome.storage.local.get("lvtConnection")).lvtConnection as {
@@ -900,6 +964,7 @@ test("completed Job previews and downloads eight artifacts through authenticated
     await page.addInitScript(() => {
       const active = new Set<string>();
       const downloadFilenames: string[] = [];
+      const downloadSaveAs: boolean[] = [];
       const createObjectURL = URL.createObjectURL.bind(URL);
       const revokeObjectURL = URL.revokeObjectURL.bind(URL);
       URL.createObjectURL = (blob) => {
@@ -917,13 +982,30 @@ test("completed Job previews and downloads eight artifacts through authenticated
       Object.defineProperty(window, "__artifactDownloadFilenames", {
         get: () => [...downloadFilenames],
       });
+      Object.defineProperty(window, "__artifactDownloadSaveAs", {
+        get: () => [...downloadSaveAs],
+      });
       chrome.downloads.download = (options) => {
         downloadFilenames.push(options.filename ?? "");
+        downloadSaveAs.push(options.saveAs === true);
         return Promise.resolve(downloadFilenames.length);
       };
     });
     await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
     await expect(page.locator("#connection-status")).toHaveText("本地服务连接正常");
+    await page.getByRole("button", { name: "每次选择" }).click();
+    await expect(page.locator("#download-location-detail")).toHaveText(
+      "每个文件下载前打开保存窗口",
+    );
+    await expect(page.locator("#download-location-message")).toHaveText("下载文件时会打开保存窗口");
+    await expect
+      .poll(() =>
+        worker.evaluate(async () => {
+          const stored = await chrome.storage.local.get("lvtDownloadPreference");
+          return stored.lvtDownloadPreference;
+        }),
+      )
+      .toEqual({ mode: "prompt" });
     const created = parseCreateJobsResponse(
       await page.evaluate(
         async ({ origin, token }) => {
@@ -1017,6 +1099,16 @@ test("completed Job previews and downloads eight artifacts through authenticated
       `Artifact Target--${job.uuid.slice(0, 8)}/zh-CN.vtt`,
       `Artifact Target--${job.uuid.slice(0, 8)}/zh-CN.json`,
     ]);
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __artifactDownloadSaveAs?: boolean[];
+            }
+          ).__artifactDownloadSaveAs ?? [],
+      ),
+    ).toEqual(Array.from({ length: 8 }, () => true));
     expect(
       await page.evaluate(
         () =>
@@ -1362,7 +1454,9 @@ async function waitForOutput(child: ChildProcessWithoutNullStreams, marker: stri
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       cleanup();
       reject(
-        new Error(`Uvicorn exited before startup: code=${String(code)} signal=${String(signal)}`),
+        new Error(
+          `Uvicorn exited before startup: code=${String(code)} signal=${String(signal)}\n${output}`,
+        ),
       );
     };
     const cleanup = () => {

@@ -4,7 +4,7 @@ NPM ?= npm
 CHECK_VERSIONS ?= $(PYTHON) packaging/tools/check_versions.py
 VERIFY_SETUP ?= $(MAKE) --no-print-directory setup
 
-.PHONY: setup lint typecheck test test-integration build-extension smoke verify-source
+.PHONY: setup lint typecheck test test-integration build-extension package package-windows smoke verify-source
 
 setup:
 	$(UV) sync --project backend --frozen --extra dev --no-install-project
@@ -34,6 +34,12 @@ test-integration:
 build-extension:
 	cd extension && $(NPM) run build
 	cd extension && node scripts/verify-dist.mjs
+
+package: build-extension
+	$(PYTHON) packaging/tools/package_release.py --output-dir dist
+
+package-windows: build-extension
+	$(PYTHON) packaging/tools/package_windows_release.py --output-dir ../../artifacts
 
 smoke:
 	PYTHONPATH=backend/src $(PYTHON) -m pytest backend/tests/integration/test_api.py::test_batch_create_accepts_valid_and_rejects_invalid_urls

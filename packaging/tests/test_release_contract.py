@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,12 @@ def _dependencies() -> dict[str, Any]:
     return json.loads((ROOT / "packaging/dependencies.json").read_text(encoding="utf-8"))
 
 
+def _windows_dependencies() -> dict[str, Any]:
+    return json.loads(
+        (ROOT / "packaging/dependencies.windows-x64.json").read_text(encoding="utf-8")
+    )
+
+
 def _uv() -> str:
     return os.environ.get("UV", "uv")
 
@@ -45,11 +54,14 @@ def _copy_license_contract(destination: Path) -> None:
         "packaging/dependencies.json",
         "packaging/release-manifest.json",
         "docs/LICENSES/python-runtime.json",
+        "docs/LICENSES/python-runtime.windows-x64.json",
         "docs/LICENSES/npm-all.json",
         "docs/LICENSES/MIT.txt",
         "docs/LICENSES/Apache-2.0.txt",
         "docs/LICENSES/GPL-3.0-or-later.txt",
         "docs/LICENSES/PSF-2.0.txt",
+        "docs/LICENSES/Faster-Whisper-MIT.txt",
+        "docs/LICENSES/CTranslate2-MIT.txt",
         "docs/LICENSES/Ollama-MIT.txt",
         "docs/LICENSES/Whisper-MIT.txt",
         "docs/LICENSES/Pyannote-Segmentation-MIT.txt",
@@ -71,17 +83,53 @@ def test_versions_are_consistent() -> None:
     check_versions.check_versions(ROOT)
 
 
+def test_asr_dependencies_are_strictly_scoped_by_platform() -> None:
+    backend = tomllib.loads((ROOT / "backend/pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = backend["project"]["dependencies"]
+
+    assert "mlx-whisper==0.4.3; sys_platform == 'darwin'" in dependencies
+    assert "faster-whisper==1.2.1; sys_platform == 'win32'" in dependencies
+    assert "mlx-whisper==0.4.3" not in dependencies
+    assert "faster-whisper==1.2.1" not in dependencies
+
+
+def test_packaged_extension_identity_matches_backend_pairing_origin() -> None:
+    manifest = json.loads((ROOT / "extension/public/manifest.json").read_text(encoding="utf-8"))
+    public_key = base64.b64decode(manifest["key"], validate=True)
+    alphabet = "abcdefghijklmnop"
+    extension_id = "".join(
+        alphabet[nibble]
+        for byte in hashlib.sha256(public_key).digest()[:16]
+        for nibble in (byte >> 4, byte & 0x0F)
+    )
+    backend = (ROOT / "backend/src/lvt/api/app.py").read_text(encoding="utf-8")
+
+    assert extension_id == "hbcpdfclnpdpiamdelgbpkpiaemmbljg"
+    assert f'PACKAGED_EXTENSION_ID = "{extension_id}"' in backend
+
+
 @pytest.mark.parametrize(
     ("relative", "old", "new"),
     [
-        ("VERSION", "0.1.0", "0.1.1"),
-        ("backend/pyproject.toml", 'version = "0.1.0"', 'version = "0.1.1"'),
+        ("VERSION", "0.1.1", "0.1.2"),
+        ("backend/pyproject.toml", 'version = "0.1.1"', 'version = "0.1.2"'),
         (
             "backend/src/lvt/api/app.py",
-            '{"status": "healthy", "version": "0.1.0"}',
             '{"status": "healthy", "version": "0.1.1"}',
+            '{"status": "healthy", "version": "0.1.2"}',
         ),
-        ("extension/public/manifest.json", '"version": "0.1.0"', '"version": "0.1.1"'),
+        (
+            "backend/src/lvt/__init__.py",
+            '__version__ = "0.1.1"',
+            '__version__ = "0.1.2"',
+        ),
+        ("extension/public/manifest.json", '"version": "0.1.1"', '"version": "0.1.2"'),
+        ("extension/package.json", '"version": "0.1.1"', '"version": "0.1.2"'),
+        (
+            "packaging/release-manifest.json",
+            '"version": "0.1.1"',
+            '"version": "0.1.2"',
+        ),
     ],
 )
 def test_each_version_source_mismatch_is_rejected(
@@ -91,7 +139,10 @@ def test_each_version_source_mismatch_is_rejected(
         "VERSION",
         "backend/pyproject.toml",
         "backend/src/lvt/api/app.py",
+        "backend/src/lvt/__init__.py",
+        "extension/package.json",
         "extension/public/manifest.json",
+        "packaging/release-manifest.json",
     ):
         destination = tmp_path / path
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +155,30 @@ def test_each_version_source_mismatch_is_rejected(
 
 def test_dependency_manifest_is_fully_pinned() -> None:
     validate_dependencies(_dependencies())
+
+
+def test_windows_dependency_manifest_is_fully_pinned() -> None:
+    payload = _windows_dependencies()
+    validate_dependencies(payload)
+    artifacts = {item["id"]: item for item in payload["artifacts"]}
+
+    assert payload["target"] == "windows-x64"
+    assert payload["trust_policy"]["allowed_architectures"] == ["x86_64"]
+    assert artifacts["uv"]["sha256"] == (
+        "15bfd1423b7eaa7aae949922d4712ebaac2bb44a81af64ab59bbe007090cb0d0"
+    )
+    assert artifacts["python"]["expected_files"] == [
+        "python/python.exe",
+        "python/python311.dll",
+    ]
+    assert artifacts["ffmpeg"]["expected_files"] == [
+        "win32/ffmpeg.exe",
+        "win32/ffprobe.exe",
+    ]
+    assert artifacts["ollama"]["executable"] == "ollama.exe"
+    assert artifacts["asr-faster-whisper-small-model"]["sha256"] == (
+        "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"
+    )
 
 
 @pytest.mark.parametrize("size", [True, False, 0, -1, "1", 1.0])
@@ -206,14 +281,14 @@ def test_dependency_manifest_rejects_unsafe_mutations(mutation: Any) -> None:
 
 def test_release_manifest_defines_arm64_allowlist_and_exclusions() -> None:
     payload = json.loads((ROOT / "packaging/release-manifest.json").read_text(encoding="utf-8"))
-    assert payload["product"] == {"name": "Local Video Transcriber", "version": "0.1.0"}
+    assert payload["product"] == {"name": "Local Video Transcriber", "version": "0.1.1"}
     assert payload["project_license"] == license_inventory.PROJECT_LICENSE
     assert payload["platform"] == {
         "os": "macos",
         "minimum_version": "13.0",
         "architecture": "arm64",
     }
-    assert payload["archive"]["filename"] == "LocalVideoTranscriber-0.1.0-macos-arm64.zip"
+    assert payload["archive"]["filename"] == "LocalVideoTranscriber-0.1.1-macos-arm64.zip"
     assert payload["allowlist"]
     assert payload["file_modes"]["executables"]["*.command"] == "0755"
     forbidden = "\n".join(payload["forbidden"]).lower()
@@ -224,7 +299,7 @@ def test_release_manifest_defines_arm64_allowlist_and_exclusions() -> None:
 def test_uv_lock_is_complete_and_has_no_machine_paths() -> None:
     lock = (ROOT / "backend/uv.lock").read_text(encoding="utf-8")
     assert 'name = "local-video-transcriber"' in lock
-    assert 'version = "0.1.0"' in lock
+    assert 'version = "0.1.1"' in lock
     assert "sdist = {" in lock
     assert "wheels = [" in lock
     assert "/" + "Users/" not in lock
@@ -232,8 +307,25 @@ def test_uv_lock_is_complete_and_has_no_machine_paths() -> None:
     assert re.findall(r'source = \{ editable = "([^"]+)" \}', lock) == ["."]
 
 
+def test_sherpa_onnx_core_is_an_explicit_runtime_dependency() -> None:
+    project = tomllib.loads((ROOT / "backend/pyproject.toml").read_text(encoding="utf-8"))
+    assert "sherpa-onnx-core==1.13.6" in project["project"]["dependencies"]
+
+    lock = tomllib.loads((ROOT / "backend/uv.lock").read_text(encoding="utf-8"))
+    packages = {item["name"]: item for item in lock["package"]}
+    assert "sherpa-onnx-core" in packages
+    root_dependencies = {
+        item["name"] for item in packages["local-video-transcriber"]["dependencies"]
+    }
+    assert {"sherpa-onnx", "sherpa-onnx-core"} <= root_dependencies
+
+
 def test_license_inventory_matches_notices() -> None:
-    assert license_inventory.check_inventory(ROOT, _uv()) == (77, 166)
+    assert license_inventory.check_inventory(ROOT, _uv()) == (78, 166)
+    assert license_inventory.validate_python_inventories(ROOT, _uv()) == {
+        "macos-arm64-python3.11": 78,
+        "windows-x64-python3.11": 73,
+    }
 
 
 def test_ffmpeg_uses_pinned_media_archive() -> None:
@@ -330,6 +422,8 @@ def test_ollama_contract_distinguishes_gui_and_cli_paths() -> None:
     assert ollama["expected_files"] == [
         "Ollama.app/Contents/MacOS/Ollama",
         "Ollama.app/Contents/Resources/ollama",
+        "Ollama.app/Contents/Resources/llama-server",
+        "Ollama.app/Contents/Resources/llama-quantize",
     ]
     assert ollama["executable"] == "Ollama.app/Contents/Resources/ollama"
 
@@ -400,6 +494,8 @@ def test_normative_license_texts_are_complete() -> None:
         "Apache-2.0.txt": ("Apache License", 10000),
         "GPL-3.0-or-later.txt": ("GNU GENERAL PUBLIC LICENSE", 30000),
         "PSF-2.0.txt": ("PYTHON SOFTWARE FOUNDATION LICENSE", 10000),
+        "Faster-Whisper-MIT.txt": ("Copyright (c) 2023 SYSTRAN", 1000),
+        "CTranslate2-MIT.txt": ("Copyright (c) 2018-     SYSTRAN.", 1000),
     }
     for filename, (marker, minimum) in expected.items():
         text = (ROOT / "docs/LICENSES" / filename).read_text(encoding="utf-8")
@@ -407,20 +503,19 @@ def test_normative_license_texts_are_complete() -> None:
         assert len(text) >= minimum
 
 
-@pytest.mark.parametrize("target", ["package", "verify-archive", "extracted-smoke", "verify"])
-def test_future_make_targets_do_not_exist(target: str) -> None:
+def test_makefile_exposes_the_release_package_target() -> None:
     completed = subprocess.run(
-        ["make", "--no-print-directory", "-n", target],
+        ["make", "--no-print-directory", "-n", "package"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert completed.returncode != 0
-    assert "No rule to make target" in completed.stderr
+    assert completed.returncode == 0
+    assert "package_release.py" in completed.stdout
 
 
-def test_makefile_contains_only_checkpoint_one_targets_with_recipes() -> None:
+def test_makefile_contains_release_targets_with_recipes() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     targets = re.findall(r"^([a-z][a-z-]*):(?:\s.*)?$", makefile, re.MULTILINE)
     assert set(targets) == {
@@ -430,11 +525,13 @@ def test_makefile_contains_only_checkpoint_one_targets_with_recipes() -> None:
         "test",
         "test-integration",
         "build-extension",
+        "package",
+        "package-windows",
         "smoke",
         "verify-source",
     }
     for target in targets:
-        assert re.search(rf"^{re.escape(target)}:\n\t\S", makefile, re.MULTILINE)
+        assert re.search(rf"^{re.escape(target)}:[^\n]*\n\t\S", makefile, re.MULTILINE)
 
 
 def test_verify_source_runs_gates_serially() -> None:

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "product": {
     "name": "Local Video Transcriber",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "project_license": {
     "spdx": "MIT",
@@ -17,13 +17,14 @@
     "architecture": "arm64"
   },
   "archive": {
-    "filename": "LocalVideoTranscriber-0.1.0-macos-arm64.zip"
+    "filename": "LocalVideoTranscriber-0.1.1-macos-arm64.zip"
   },
   "allowlist": [
     "VERSION",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "README.md",
+    "新手使用说明.txt",
     "backend/pyproject.toml",
     "backend/uv.lock",
     "backend/src/**",
@@ -35,11 +36,16 @@
     "docs/TROUBLESHOOTING.md",
     "docs/KNOWN_LIMITATIONS.md",
     "docs/LICENSES/**",
-    "install.command",
-    "start.command",
-    "stop.command",
-    "doctor.command",
-    "uninstall.command"
+    "packaging/schemas/**",
+    "packaging/tools/**",
+    "scripts/doctor.command",
+    "scripts/install.command",
+    "scripts/start.command",
+    "scripts/stop.command",
+    "scripts/lib/common.zsh",
+    "scripts/lib/download.zsh",
+    "scripts/lib/process.zsh",
+    "启动 Local Video Transcriber.command"
   ],
   "file_modes": {
     "default": "0644",

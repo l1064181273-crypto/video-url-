@@ -286,6 +286,74 @@ def test_local_asr_probe_distinguishes_package_and_model(
     assert package_available.asr_model(1).status is CapabilityStatus.AVAILABLE
 
 
+def test_local_asr_probe_accepts_flat_app_owned_model(tmp_path: Path) -> None:
+    model_path = tmp_path / "models/asr/whisper-small-mlx"
+    model_path.mkdir(parents=True)
+    (model_path / "config.json").write_text("{}", encoding="utf-8")
+    (model_path / "weights.npz").write_bytes(b"weights")
+    probes = LocalCapabilityProbes(
+        LocalCapabilitiesConfig(
+            asr_model=ASR_MODEL,
+            asr_model_path=model_path,
+            segmentation_model=tmp_path / "segmentation.onnx",
+            embedding_model=tmp_path / "embedding.onnx",
+            ollama_url="http://127.0.0.1:11434",
+            primary_translation_model=PRIMARY_MODEL,
+            fallback_translation_model=FALLBACK_MODEL,
+            model_cache_root=tmp_path / "cache",
+        ),
+        package_version=lambda _name: "installed",
+    )
+
+    result = probes.asr_model(1)
+
+    assert result.status is CapabilityStatus.AVAILABLE
+    assert result.model == ASR_MODEL
+
+
+def test_windows_asr_probe_uses_faster_whisper_package_and_model_contract(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "models/asr/faster-whisper-small"
+    model_path.mkdir(parents=True)
+    for name in ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt"):
+        (model_path / name).write_bytes(name.encode("ascii"))
+    requested_packages: list[str] = []
+
+    def package_version(name: str) -> str:
+        requested_packages.append(name)
+        return "test-version"
+
+    probes = LocalCapabilityProbes(
+        LocalCapabilitiesConfig(
+            asr_model="Systran/faster-whisper-small",
+            asr_model_path=model_path,
+            asr_package_name="faster-whisper",
+            asr_required_model_files=(
+                "config.json",
+                "model.bin",
+                "tokenizer.json",
+                "vocabulary.txt",
+            ),
+            segmentation_model=tmp_path / "segmentation.onnx",
+            embedding_model=tmp_path / "embedding.onnx",
+            ollama_url="http://127.0.0.1:11435",
+            primary_translation_model=PRIMARY_MODEL,
+            fallback_translation_model=FALLBACK_MODEL,
+            model_cache_root=tmp_path / "cache",
+        ),
+        package_version=package_version,
+    )
+
+    assert probes.asr_package(1) == CapabilityProbeResult(
+        CapabilityStatus.AVAILABLE, version="test-version"
+    )
+    assert probes.asr_model(1) == CapabilityProbeResult(
+        CapabilityStatus.AVAILABLE, model="Systran/faster-whisper-small"
+    )
+    assert requested_packages == ["faster-whisper"]
+
+
 def test_local_ollama_probe_distinguishes_down_and_up(tmp_path: Path) -> None:
     online = False
 
@@ -343,6 +411,32 @@ def test_local_diarization_probe_requires_package_and_every_model_file(
     capability = probes.diarization(1)
     assert capability.status is CapabilityStatus.AVAILABLE
     assert capability.version == "1.13.6"
+
+
+def test_local_diarization_probe_rejects_unimportable_native_runtime(tmp_path: Path) -> None:
+    segmentation = tmp_path / "segmentation.onnx"
+    embedding = tmp_path / "embedding.onnx"
+    segmentation.touch()
+    embedding.touch()
+
+    def fail_import(_name: str) -> object:
+        raise ImportError("libonnxruntime.dylib is unavailable")
+
+    probes = LocalCapabilityProbes(
+        LocalCapabilitiesConfig(
+            asr_model=ASR_MODEL,
+            segmentation_model=segmentation,
+            embedding_model=embedding,
+            ollama_url="http://127.0.0.1:11434",
+            primary_translation_model=PRIMARY_MODEL,
+            fallback_translation_model=FALLBACK_MODEL,
+            model_cache_root=tmp_path / "cache",
+        ),
+        package_version=lambda _name: "1.13.6",
+        import_module=fail_import,
+    )
+
+    assert probes.diarization(1).status is CapabilityStatus.UNAVAILABLE
 
 
 def test_ttl_cache_does_not_repeat_probes() -> None:

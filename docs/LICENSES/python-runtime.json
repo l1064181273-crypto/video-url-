@@ -1,7 +1,7 @@
 {
   "development_only_count": 10,
   "lock_file": "backend/uv.lock",
-  "lock_sha256": "88df64ea0bb6668dc601eef6d3f8860e4bd97583f21fde27a91d6fb9b63bb22d",
+  "lock_sha256": "177d1f118565d92cc558df953659e1f665866edfc78091c31c8642ac1928cc05",
   "packages": [
     {
       "license": "MIT",
@@ -562,6 +562,15 @@
       "version": "1.13.6"
     },
     {
+      "license": "Apache-2.0",
+      "license_source": "https://pypi.org/pypi/sherpa-onnx-core/1.13.6/json",
+      "lock_ref": "backend/uv.lock:sherpa-onnx-core==1.13.6",
+      "package": "sherpa-onnx-core",
+      "scope": "runtime",
+      "source": "https://pypi.org/project/sherpa-onnx-core/1.13.6/",
+      "version": "1.13.6"
+    },
+    {
       "license": "MIT",
       "license_source": "https://pypi.org/pypi/srt/3.5.3/json",
       "lock_ref": "backend/uv.lock:srt==3.5.3",
@@ -697,7 +706,7 @@
       "version": "4.1.0"
     }
   ],
-  "runtime_count": 67,
+  "runtime_count": 68,
   "schema_version": 1,
   "target": "macos-arm64-python3.11"
 }

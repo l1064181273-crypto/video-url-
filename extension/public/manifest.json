@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Local Video Transcriber",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxAaMzC93x6TRvNr4A/xGHnQsTGSY6TUhjxeWFWDYRb7WdyLzwnbVkld/BfZF5pec15vegrnqgb/laa3/32TwUzlXlwAfRKwm0uUccL+u0xkZic8vKL1UBpdHldcx1ys8ifoRIaTfs2GakpjB1Iw9xXp4g2k2cMmBxlLL7tQHgcMuGaj7153gj9+qES0hGPy1TEIJGR7UeuwLvTgjYusuolFI+vMfSJmLhMD4FSaAMdv2Yn7E2rT2zzgghyMaH1bPZpqMgdeR794B2qaXqan6zDDevPEFKW2V1Qw4+4o8r3VLYzbFXfSiNMqx2lzmYZ0KRhQynRiOhV0k8kGZz2lx4wIDAQAB",
   "minimum_chrome_version": "114",
   "permissions": ["storage", "downloads", "sidePanel"],
   "host_permissions": ["http://127.0.0.1/*"],

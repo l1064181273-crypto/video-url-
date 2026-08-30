@@ -25,10 +25,12 @@ class MLXWhisperASREngine:
         self,
         *,
         model: str = "mlx-community/whisper-small-mlx",
+        model_path: Path | None = None,
         ffmpeg_path: Path | None = None,
         transcribe_fn: TranscribeFn = _default_transcribe,
     ) -> None:
         self.model = model
+        self.model_path = model_path
         self.ffmpeg_path = ffmpeg_path
         self.transcribe_fn = transcribe_fn
         try:
@@ -56,7 +58,7 @@ class MLXWhisperASREngine:
         try:
             result = self.transcribe_fn(
                 os.fspath(audio_path),
-                path_or_hf_repo=model,
+                path_or_hf_repo=self._runtime_model(model),
                 word_timestamps=False,
                 verbose=False,
             )
@@ -83,6 +85,25 @@ class MLXWhisperASREngine:
         if not segments:
             raise LVTError("TRANSCRIPTION_FAILED", "音频中没有可导出的语音文本")
         return ASRResult(language=language, segments=segments)
+
+    def _runtime_model(self, model: str) -> str:
+        if model != self.model or self.model_path is None:
+            return model
+        try:
+            required = [self.model_path / "config.json", self.model_path / "weights.npz"]
+            available = (
+                not self.model_path.is_symlink()
+                and self.model_path.is_dir()
+                and all(
+                    not path.is_symlink() and path.is_file() and path.stat().st_size > 0
+                    for path in required
+                )
+            )
+        except OSError:
+            available = False
+        if not available:
+            raise LVTError("ASR_MODEL_UNAVAILABLE", "已安装 ASR 模型不可用")
+        return os.fspath(self.model_path)
 
     @staticmethod
     def _wav_duration_ms(path: Path) -> int:

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "lock_file": "extension/package-lock.json",
-  "lock_sha256": "9f882b41c3e735ae485d0712b9621405160b498df6db11738b907016a575243d",
+  "lock_sha256": "402f36484727f234c5fa876bbdb672da5c2b7a1f4c11f1e1a71bf5f93e1bbb43",
   "package_count": 166,
   "runtime_count": 0,
   "development_build_only_count": 166,

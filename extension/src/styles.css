@@ -224,6 +224,18 @@ button:focus-visible {
   border-radius: 0 4px 4px 0;
 }
 
+.download-location-control {
+  grid-template-columns: repeat(2, minmax(72px, auto));
+}
+
+.download-location-control button {
+  white-space: nowrap;
+}
+
+#download-location-message:empty {
+  display: none;
+}
+
 .segmented-control button[aria-pressed="true"] {
   position: relative;
   border-color: #185abc;
@@ -841,5 +853,14 @@ dialog::backdrop {
 
   .capability-advice {
     grid-column: 1 / -1;
+  }
+
+  .download-location-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .download-location-control {
+    align-self: flex-end;
   }
 }

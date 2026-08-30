@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from lvt.core.platform_runtime import default_data_root
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -57,8 +59,12 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
-        default_root = Path.home() / "Library" / "Application Support" / "LocalVideoTranscriber"
-        data_root = Path(os.environ.get("LVT_DATA_ROOT", default_root)).expanduser()
+        configured_data_root = os.environ.get("LVT_DATA_ROOT")
+        data_root = (
+            Path(configured_data_root).expanduser()
+            if configured_data_root is not None
+            else default_data_root()
+        )
         model_root = Path(os.environ.get("LVT_MODEL_ROOT", data_root / "models")).expanduser()
         ffmpeg_dir_value = os.environ.get("LVT_FFMPEG_DIR")
         return cls(

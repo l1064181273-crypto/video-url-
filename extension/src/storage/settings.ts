@@ -1,5 +1,8 @@
 export const DEFAULT_BACKEND_PORT = 8765;
 const CONNECTION_KEY = "lvtConnection";
+const DOWNLOAD_PREFERENCE_KEY = "lvtDownloadPreference";
+
+export type DownloadMode = "automatic" | "prompt";
 
 export type ConnectionSummary = {
   port: number;
@@ -78,6 +81,19 @@ export class ConnectionSettingsStorage {
   }
 }
 
+export class DownloadPreferenceStorage {
+  constructor(private readonly area: TrustedStorageArea = chrome.storage.local) {}
+
+  async getMode(): Promise<DownloadMode> {
+    const stored = await this.area.get(DOWNLOAD_PREFERENCE_KEY);
+    return parseDownloadMode(stored[DOWNLOAD_PREFERENCE_KEY]);
+  }
+
+  async saveMode(mode: DownloadMode): Promise<void> {
+    await this.area.set({ [DOWNLOAD_PREFERENCE_KEY]: { mode } });
+  }
+}
+
 export function assertValidPort(port: number): void {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new RangeError("port must be an integer from 1 through 65535");
@@ -98,6 +114,13 @@ function parsePersistedConnection(value: unknown): ConnectionValue {
 
 function isValidPort(port: unknown): port is number {
   return typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65_535;
+}
+
+function parseDownloadMode(value: unknown): DownloadMode {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "automatic";
+  }
+  return (value as Record<string, unknown>).mode === "prompt" ? "prompt" : "automatic";
 }
 
 function validateToken(token: string): string {

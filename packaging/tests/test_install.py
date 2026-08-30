@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ DOCTOR_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "doctor.py"
 RECONCILE_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "reconcile_processes.py"
 SUPERVISOR_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "tool_supervisor.py"
 PROCESS_STATE_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "process_state.py"
+RUNTIME_LAYOUT_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "runtime_layout.py"
 COMMON_LIBRARY = REPOSITORY_ROOT / "scripts" / "lib" / "common.zsh"
 DATA_DIRECTORIES = ("config", "db", "runtime", "work", "exports", "logs", "models")
 FAILURE_POINTS = (
@@ -55,6 +58,11 @@ def _build_release(tmp_path: Path, name: str = "Release 源 naïve") -> Path:
     )
     _copy_file(INSTALL_COMMAND, release / "scripts/install.command", executable=True)
     _copy_file(COMMON_LIBRARY, release / "scripts/lib/common.zsh", executable=True)
+    _copy_file(
+        REPOSITORY_ROOT / "scripts/lib/download.zsh",
+        release / "scripts/lib/download.zsh",
+        executable=True,
+    )
     _copy_file(INSTALL_TOOL, release / "packaging/tools/install.py", executable=True)
     _copy_file(VERIFY_TOOL, release / "packaging/tools/verify_install.py", executable=True)
     _copy_file(LOCK_TOOL, release / "packaging/tools/lifecycle_lock.py", executable=True)
@@ -62,6 +70,7 @@ def _build_release(tmp_path: Path, name: str = "Release 源 naïve") -> Path:
     _copy_file(RECONCILE_TOOL, release / "packaging/tools/reconcile_processes.py", executable=True)
     _copy_file(SUPERVISOR_TOOL, release / "packaging/tools/tool_supervisor.py", executable=True)
     _copy_file(PROCESS_STATE_TOOL, release / "packaging/tools/process_state.py", executable=True)
+    _copy_file(RUNTIME_LAYOUT_TOOL, release / "packaging/tools/runtime_layout.py")
     (release / "scripts/doctor.command").chmod(0o755)
     (release / "test-tools/uv").chmod(0o755)
     (release / "test-tools/python/bin/python3").chmod(0o755)
@@ -77,6 +86,8 @@ def _environment(
     audit_path: Path | None = None,
     environment_audit_path: Path | None = None,
     injected_python: bool = True,
+    bootstrap_archive: Path | None = None,
+    bootstrap_temp_root: Path | None = None,
 ) -> dict[str, str]:
     environment = os.environ.copy()
     environment.update(
@@ -93,6 +104,19 @@ def _environment(
         environment["LVT_PYTHON"] = sys.executable
     else:
         environment.pop("LVT_PYTHON", None)
+    if bootstrap_archive is not None:
+        environment.update(
+            {
+                "LVT_TEST_FORCE_PYTHON_BOOTSTRAP": "1",
+                "LVT_TEST_BOOTSTRAP_PYTHON_ARCHIVE": str(bootstrap_archive),
+                "LVT_TEST_BOOTSTRAP_PYTHON_SHA256": hashlib.sha256(
+                    bootstrap_archive.read_bytes()
+                ).hexdigest(),
+                "LVT_TEST_BOOTSTRAP_PYTHON_SIZE": str(bootstrap_archive.stat().st_size),
+            }
+        )
+    if bootstrap_temp_root is not None:
+        environment["TMPDIR"] = str(bootstrap_temp_root)
     if failure is not None:
         environment["LVT_TEST_FAIL_AT"] = failure
     if audit_path is not None:
@@ -112,6 +136,8 @@ def _run_install(
     audit_path: Path | None = None,
     environment_audit_path: Path | None = None,
     injected_python: bool = True,
+    bootstrap_archive: Path | None = None,
+    bootstrap_temp_root: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     arguments = [str(release / "scripts/install.command"), "--phase", "staging-core"]
     if data_root is not None:
@@ -127,6 +153,8 @@ def _run_install(
             audit_path=audit_path,
             environment_audit_path=environment_audit_path,
             injected_python=injected_python,
+            bootstrap_archive=bootstrap_archive,
+            bootstrap_temp_root=bootstrap_temp_root,
         ),
         capture_output=True,
         text=True,
@@ -137,6 +165,16 @@ def _run_install(
 
 def _candidate(data_root: Path, version: str = "0.1.0") -> Path:
     return data_root / "app" / "releases" / version
+
+
+def _build_bootstrap_python_archive(tmp_path: Path, release: Path) -> Path:
+    payload = tmp_path / "bootstrap-payload"
+    executable = payload / "python/bin/python3"
+    _copy_file(release / "test-tools/python/bin/python3", executable, executable=True)
+    archive = tmp_path / "bootstrap-python.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(payload / "python", arcname="python")
+    return archive
 
 
 def _assert_no_cp4_publish(data_root: Path) -> None:
@@ -230,6 +268,72 @@ def test_empty_home_first_install_builds_valid_staging_candidate_without_secret_
         "version": "0.1.0",
     }
     _assert_no_cp4_publish(data_root)
+
+
+def test_first_install_bootstraps_python_when_no_interpreter_is_available(
+    tmp_path: Path,
+) -> None:
+    release = _build_release(tmp_path)
+    archive = _build_bootstrap_python_archive(tmp_path, release)
+    test_root = tmp_path / "Test Root"
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    bootstrap_temp_root = tmp_path / "Bootstrap Temp"
+    bootstrap_temp_root.mkdir()
+
+    completed = _run_install(
+        release,
+        test_root,
+        home=home,
+        injected_python=False,
+        bootstrap_archive=archive,
+        bootstrap_temp_root=bootstrap_temp_root,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    data_root = test_root / "LocalVideoTranscriber"
+    installed_python = data_root / "app/tools/python/bin/python3"
+    assert installed_python.is_file()
+    assert os.access(installed_python, os.X_OK)
+    assert "PYTHON_BOOTSTRAP_READY" in completed.stdout
+    assert list(bootstrap_temp_root.iterdir()) == []
+    _assert_staging_valid(data_root, _candidate(data_root))
+
+
+def test_python_bootstrap_checksum_failure_is_bounded_and_leaves_no_install(
+    tmp_path: Path,
+) -> None:
+    release = _build_release(tmp_path)
+    archive = _build_bootstrap_python_archive(tmp_path, release)
+    test_root = tmp_path / "Test Root"
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    bootstrap_temp_root = tmp_path / "Bootstrap Temp"
+    bootstrap_temp_root.mkdir()
+    environment = _environment(
+        release,
+        test_root,
+        home=home,
+        injected_python=False,
+        bootstrap_archive=archive,
+        bootstrap_temp_root=bootstrap_temp_root,
+    )
+    environment["LVT_TEST_BOOTSTRAP_PYTHON_SHA256"] = "0" * 64
+
+    completed = subprocess.run(
+        [str(release / "scripts/install.command"), "--phase", "staging-core"],
+        cwd="/",
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "PYTHON_BOOTSTRAP_FAILED" in completed.stdout
+    assert list(bootstrap_temp_root.iterdir()) == []
+    assert not (test_root / "LocalVideoTranscriber/app/tools/python").exists()
 
 
 @pytest.mark.parametrize("directory_name", ["path with spaces", "中文目录", "naïve-路径"])

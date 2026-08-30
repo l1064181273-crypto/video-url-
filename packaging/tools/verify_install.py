@@ -15,7 +15,12 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from process_state import verify_owned_service_record
+from runtime_layout import (
+    RuntimeLayout,
+    path_is_link_like,
+    runtime_layout,
+    runtime_layout_for_target,
+)
 
 PHASES = (
     "staging-core",
@@ -23,13 +28,14 @@ PHASES = (
     "installed-prerequisites",
     "runtime-full",
 )
-MODEL_ARTIFACT_IDS = {
-    "asr-whisper-small-mlx-config",
-    "asr-whisper-small-mlx-weights",
-    "diarization-segmentation",
-    "diarization-embedding",
-    "hy-mt2",
-}
+
+
+def _release_python_relative(layout: RuntimeLayout) -> str:
+    return layout.venv_python
+
+
+def _ffmpeg_executable_names(layout: RuntimeLayout) -> dict[str, str]:
+    return dict(layout.ffmpeg_executables)
 
 
 class CheckStatus(StrEnum):
@@ -138,29 +144,34 @@ def validate_install(
     data_root: Path,
     release_root: Path | None = None,
     probes: LocalProbes | None = None,
+    target: str | None = None,
 ) -> dict[str, Any]:
     if phase not in PHASES:
         raise ValueError("unsupported validation phase")
+    layout = runtime_layout() if target is None else runtime_layout_for_target(target)
     active_probes = probes or LocalProbes(data_root)
     if phase == "staging-core":
-        checks = _validate_staging_core(release_root, data_root)
+        checks = _validate_staging_core(release_root, data_root, layout)
     elif phase == "dependencies":
-        checks = _validate_dependencies(data_root, release_root)
+        checks = _validate_dependencies(data_root, release_root, layout)
     elif phase == "installed-prerequisites":
         checks = _validate_installed_prerequisites(
             data_root,
             release_root,
             active_probes,
+            layout,
         )
     else:
-        checks = _validate_runtime_full(data_root, release_root, active_probes)
+        checks = _validate_runtime_full(data_root, release_root, active_probes, layout)
     return build_report(phase, checks)
 
 
 def _validate_staging_core(
     release_root: Path | None,
     data_root: Path | None = None,
+    layout: RuntimeLayout | None = None,
 ) -> list[Check]:
+    selected = runtime_layout() if layout is None else layout
     root_check = _validate_root(release_root, "release")
     if root_check.status is not CheckStatus.OK or release_root is None:
         return [root_check]
@@ -174,14 +185,19 @@ def _validate_staging_core(
     }
     for identifier, relative in required_files.items():
         checks.append(_required_path(release_root, relative, identifier))
-    checks.append(_validate_release_python(release_root, data_root))
+    checks.append(_validate_release_python(release_root, data_root, selected))
     checks.extend(_validate_release_version(release_root))
-    checks.extend(_validate_dependency_metadata(release_root))
+    checks.extend(_validate_dependency_metadata(release_root, selected))
     return checks
 
 
-def _validate_dependencies(data_root: Path, release_root: Path | None) -> list[Check]:
-    checks = _validate_staging_core(release_root, data_root)
+def _validate_dependencies(
+    data_root: Path,
+    release_root: Path | None,
+    layout: RuntimeLayout | None = None,
+) -> list[Check]:
+    selected = runtime_layout() if layout is None else layout
+    checks = _validate_staging_core(release_root, data_root, selected)
     if report_exit_code(checks) == 2 or release_root is None:
         return checks
     data_check = _validate_root(data_root, "data_root")
@@ -192,7 +208,7 @@ def _validate_dependencies(data_root: Path, release_root: Path | None) -> list[C
     if dependencies is None:
         return checks
     for item in dependencies.get("artifacts", []):
-        if not isinstance(item, dict) or item.get("id") not in MODEL_ARTIFACT_IDS:
+        if not isinstance(item, dict) or item.get("id") not in selected.model_artifact_ids:
             continue
         for relative in item.get("expected_files", []):
             checks.append(
@@ -218,7 +234,7 @@ def _validate_dependencies(data_root: Path, release_root: Path | None) -> list[C
             )
         if model.get("id") == "qwen2.5-1.5b":
             checks.extend(_validate_qwen_blobs(data_root, model))
-    checks.extend(_validate_ffmpeg_install(data_root))
+    checks.extend(_validate_ffmpeg_install(data_root, selected))
     return checks
 
 
@@ -226,15 +242,21 @@ def _validate_installed_prerequisites(
     data_root: Path,
     release_root: Path | None,
     probes: LocalProbes,
+    layout: RuntimeLayout | None = None,
 ) -> list[Check]:
+    selected = runtime_layout() if layout is None else layout
     data_check = _validate_root(data_root, "data_root")
     if data_check.status is not CheckStatus.OK:
         return [data_check]
-    current_root, current_checks = _resolve_current_release(data_root, release_root)
+    current_root, current_checks = _resolve_current_release(
+        data_root,
+        release_root,
+        selected,
+    )
     checks = [data_check, *current_checks]
     if current_root is None:
         return checks
-    checks.extend(_validate_dependencies(data_root, current_root))
+    checks.extend(_validate_dependencies(data_root, current_root, selected))
     checks.append(_validate_stable_extension(data_root, current_root))
     checks.append(_validate_token_metadata(data_root))
     for relative in ("db", "exports", "logs", "work", "runtime"):
@@ -258,8 +280,10 @@ def _validate_runtime_full(
     data_root: Path,
     release_root: Path | None,
     probes: LocalProbes,
+    layout: RuntimeLayout | None = None,
 ) -> list[Check]:
-    checks = _validate_installed_prerequisites(data_root, release_root, probes)
+    selected = runtime_layout() if layout is None else layout
+    checks = _validate_installed_prerequisites(data_root, release_root, probes, selected)
     if report_exit_code(checks) == 2:
         return checks
     if probes.ollama_port_state() != "owned":
@@ -327,7 +351,7 @@ def _validate_root(path: Path | None, identifier: str) -> Check:
 def _required_path(root: Path, relative: str, identifier: str) -> Check:
     try:
         path = _safe_join(root, relative)
-        if path.is_symlink():
+        if path_is_link_like(path):
             raise ValueError
         if not path.exists():
             raise FileNotFoundError(relative)
@@ -481,11 +505,18 @@ def _safe_join(root: Path, relative: str) -> Path:
     return candidate
 
 
-def _validate_release_python(release_root: Path, data_root: Path | None) -> Check:
+def _validate_release_python(
+    release_root: Path,
+    data_root: Path | None,
+    layout: RuntimeLayout | None = None,
+) -> Check:
+    selected = runtime_layout() if layout is None else layout
     try:
-        python_path = _safe_join(release_root, ".venv/bin/python")
+        python_path = _safe_join(release_root, _release_python_relative(selected))
         metadata = python_path.stat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
+        if not stat.S_ISREG(metadata.st_mode) or (
+            selected.system != "win32" and metadata.st_mode & 0o111 == 0
+        ):
             raise ValueError
         resolved = python_path.resolve(strict=True)
         allowed_roots = [release_root.resolve(strict=True)]
@@ -545,7 +576,11 @@ def _load_dependencies(release_root: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _validate_dependency_metadata(release_root: Path) -> list[Check]:
+def _validate_dependency_metadata(
+    release_root: Path,
+    layout: RuntimeLayout | None = None,
+) -> list[Check]:
+    selected = runtime_layout() if layout is None else layout
     payload = _load_dependencies(release_root)
     if payload is None:
         return [
@@ -557,7 +592,13 @@ def _validate_dependency_metadata(release_root: Path) -> list[Check]:
             )
         ]
     try:
+        if payload.get("target") != selected.target or payload.get("trust_policy", {}).get(
+            "allowed_architectures"
+        ) != [selected.architecture]:
+            raise ValueError
         for item in [*payload["artifacts"], *payload["ollama_models"]]:
+            if item.get("architecture") != selected.architecture:
+                raise ValueError
             expected = item["expected_files"]
             if not isinstance(expected, list) or not expected:
                 raise ValueError
@@ -575,10 +616,14 @@ def _validate_dependency_metadata(release_root: Path) -> list[Check]:
     return [ok("dependencies_manifest", "DEPENDENCIES_MANIFEST_VALID", "依赖合同有效")]
 
 
-def _validate_ffmpeg_install(data_root: Path) -> list[Check]:
+def _validate_ffmpeg_install(
+    data_root: Path,
+    layout: RuntimeLayout | None = None,
+) -> list[Check]:
+    selected = runtime_layout() if layout is None else layout
     try:
         state_path = _safe_join(data_root, "runtime/install-state.json")
-        if state_path.is_symlink():
+        if path_is_link_like(state_path):
             raise ValueError
         state = json.loads(state_path.read_text(encoding="utf-8"))
         metadata = state["ffmpeg"]
@@ -588,14 +633,14 @@ def _validate_ffmpeg_install(data_root: Path) -> list[Check]:
         version = metadata["version"]
         if Path(directory).parts[-2:] != (version, "bin"):
             raise ValueError
-        for name in ("ffmpeg", "ffprobe"):
-            path = _safe_join(ffmpeg_dir, name)
+        for logical_name, executable_name in _ffmpeg_executable_names(selected).items():
+            path = _safe_join(ffmpeg_dir, executable_name)
             file_stat = path.lstat()
-            if path.is_symlink() or not stat.S_ISREG(file_stat.st_mode):
+            if path_is_link_like(path) or not stat.S_ISREG(file_stat.st_mode):
                 raise ValueError
-            if file_stat.st_mode & 0o111 == 0:
+            if selected.system != "win32" and file_stat.st_mode & 0o111 == 0:
                 raise ValueError
-            if _sha256(path) != digests[name]:
+            if _sha256(path) != digests[logical_name]:
                 raise ValueError
     except FileNotFoundError:
         return [
@@ -621,7 +666,56 @@ def _validate_ffmpeg_install(data_root: Path) -> list[Check]:
 def _resolve_current_release(
     data_root: Path,
     supplied_release: Path | None,
+    layout: RuntimeLayout | None = None,
 ) -> tuple[Path | None, list[Check]]:
+    selected = runtime_layout() if layout is None else layout
+    if selected.system == "win32":
+        try:
+            state_path = _safe_join(data_root, "runtime/install-state.json")
+            if path_is_link_like(state_path):
+                raise ValueError
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            core = state["core"]
+            relative = core["release"]
+            if (
+                state.get("schema_version") != 1
+                or not isinstance(core, dict)
+                or core.get("verified") is not True
+                or core.get("activated") is not True
+                or not isinstance(relative, str)
+            ):
+                raise FileNotFoundError
+            resolved = _safe_join(data_root, relative)
+            resolved.relative_to(_safe_join(data_root, "app/releases"))
+            if path_is_link_like(resolved) or not resolved.is_dir():
+                raise ValueError
+            if supplied_release is not None and supplied_release.resolve(strict=True) != (
+                resolved.resolve(strict=True)
+            ):
+                raise ValueError
+            version = _safe_join(resolved, "VERSION").read_text(encoding="utf-8").strip()
+            if core.get("version") != version:
+                raise ValueError
+        except FileNotFoundError:
+            return None, [
+                missing(
+                    "current_release",
+                    "CURRENT_RELEASE_MISSING",
+                    "当前发布版本不存在",
+                    "完成安装发布后重试",
+                )
+            ]
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None, [
+                unsafe(
+                    "current_release",
+                    "CURRENT_RELEASE_UNSAFE",
+                    "当前发布版本不安全",
+                    "修复应用发布状态后重试",
+                )
+            ]
+        return resolved, [ok("current_release", "CURRENT_RELEASE_VALID", "当前发布版本有效")]
+
     current = data_root / "app" / "current"
     try:
         if not current.is_symlink():
@@ -655,7 +749,7 @@ def _validate_token_metadata(data_root: Path) -> Check:
     token = _safe_join(data_root, "config/api-token")
     try:
         metadata = token.lstat()
-        if token.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        if path_is_link_like(token) or not stat.S_ISREG(metadata.st_mode):
             raise ValueError
         if (
             metadata.st_uid != os.getuid()
@@ -705,7 +799,7 @@ def _writable_directory(data_root: Path, relative: str) -> Check:
     try:
         path = _safe_join(data_root, relative)
         metadata = path.lstat()
-        if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        if path_is_link_like(path) or not stat.S_ISDIR(metadata.st_mode):
             raise ValueError
         path.resolve(strict=True).relative_to(data_root.resolve(strict=True))
         if metadata.st_mode & 0o200 == 0:
@@ -736,7 +830,7 @@ def _writable_directory(data_root: Path, relative: str) -> Check:
 
 def _database_quick_check(data_root: Path) -> Check:
     database = _safe_join(data_root, "db/lvt.sqlite3")
-    if not database.is_file() or database.is_symlink():
+    if not database.is_file() or path_is_link_like(database):
         return missing(
             "database",
             "DATABASE_MISSING",
@@ -760,6 +854,11 @@ def _database_quick_check(data_root: Path) -> Check:
 
 
 def _owned_ollama_metadata_valid(data_root: Path) -> bool:
+    if sys.platform == "win32":
+        from windows_service import verify_owned_service_record
+    else:
+        from process_state import verify_owned_service_record
+
     return verify_owned_service_record(
         data_root / "runtime" / "ollama.pid",
         "ollama",
@@ -784,7 +883,7 @@ def _has_symlink_component(path: Path) -> bool:
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
-        if current.is_symlink():
+        if path_is_link_like(current):
             return True
         if not current.exists():
             break
@@ -816,16 +915,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phase", required=True, choices=PHASES)
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--release-root", type=Path)
+    parser.add_argument("--target")
     parser.add_argument("--json", action="store_true")
     arguments = parser.parse_args(argv)
-    data_root = arguments.data_root or (
-        Path.home() / "Library" / "Application Support" / "LocalVideoTranscriber"
-    )
     try:
+        layout = (
+            runtime_layout()
+            if arguments.target is None
+            else runtime_layout_for_target(arguments.target)
+        )
+        if arguments.data_root is not None:
+            data_root = arguments.data_root
+        elif layout.system == "darwin":
+            data_root = Path.home() / "Library" / "Application Support" / "LocalVideoTranscriber"
+        else:
+            local_app_data = os.environ.get("LOCALAPPDATA")
+            if not local_app_data:
+                raise ValueError("LOCALAPPDATA is unavailable")
+            data_root = Path(local_app_data) / "LocalVideoTranscriber"
         report = validate_install(
             arguments.phase,
             data_root=data_root,
             release_root=arguments.release_root,
+            target=layout.target,
         )
     except Exception:
         report = build_report(

@@ -18,6 +18,9 @@ COMMON = ROOT / "scripts" / "lib" / "common.zsh"
 PROCESS = ROOT / "scripts" / "lib" / "process.zsh"
 DOWNLOAD = ROOT / "scripts" / "lib" / "download.zsh"
 DOCTOR_COMMAND = ROOT / "scripts" / "doctor.command"
+START_COMMAND = ROOT / "scripts" / "start.command"
+STOP_COMMAND = ROOT / "scripts" / "stop.command"
+LAUNCH_COMMAND = ROOT / "启动 Local Video Transcriber.command"
 LOCK_MODULE = ROOT / "packaging" / "tools" / "lifecycle_lock.py"
 
 
@@ -41,6 +44,157 @@ def _load_lock_module() -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_user_facing_launch_command_exists_and_is_executable() -> None:
+    assert LAUNCH_COMMAND.is_file()
+    assert os.access(LAUNCH_COMMAND, os.X_OK)
+    source = LAUNCH_COMMAND.read_text(encoding="utf-8")
+    assert "/install.command" in source
+    assert "/start.command" in source
+    assert "api-token" not in source
+
+
+def test_python_bootstrap_metadata_matches_pinned_dependency_manifest() -> None:
+    source = (ROOT / "scripts/install.command").read_text(encoding="utf-8")
+    dependencies = json.loads((ROOT / "packaging/dependencies.json").read_text(encoding="utf-8"))
+    python = next(item for item in dependencies["artifacts"] if item["id"] == "python")
+
+    assert f'bootstrap_python_url="{python["url"]}"' in source
+    assert f'bootstrap_python_sha256="{python["sha256"]}"' in source
+    assert f'bootstrap_python_size="{python["size"]}"' in source
+
+
+def test_user_facing_launch_command_dispatches_first_install(tmp_path: Path) -> None:
+    release = tmp_path / "Release with spaces"
+    (release / "VERSION").parent.mkdir(parents=True)
+    (release / "VERSION").write_text("0.1.1\n", encoding="ascii")
+    scripts = release / "scripts"
+    shutil.copytree(ROOT / "scripts/lib", scripts / "lib")
+    shutil.copy2(LAUNCH_COMMAND, release / LAUNCH_COMMAND.name)
+    installer = scripts / "install.command"
+    installer.write_text('#!/bin/zsh\nprint -r -- "install:$*"\n', encoding="utf-8")
+    installer.chmod(0o755)
+    launcher = release / LAUNCH_COMMAND.name
+    launcher.chmod(0o755)
+    data_root = tmp_path / "Data Root"
+
+    completed = subprocess.run(
+        [str(launcher), "--data-root", str(data_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert f"install:--data-root {data_root}" in completed.stdout
+
+
+def test_user_facing_launch_command_dispatches_installed_start(tmp_path: Path) -> None:
+    release = tmp_path / "Release"
+    release.mkdir()
+    (release / "VERSION").write_text("0.1.1\n", encoding="ascii")
+    scripts = release / "scripts"
+    shutil.copytree(ROOT / "scripts/lib", scripts / "lib")
+    shutil.copy2(LAUNCH_COMMAND, release / LAUNCH_COMMAND.name)
+    launcher = release / LAUNCH_COMMAND.name
+    launcher.chmod(0o755)
+    data_root = tmp_path / "Data"
+    installed = data_root / "app/releases/0.1.1"
+    installed_scripts = installed / "scripts"
+    installed_scripts.mkdir(parents=True)
+    start = installed_scripts / "start.command"
+    start.write_text('#!/bin/zsh\nprint -r -- "start:$*"\n', encoding="utf-8")
+    start.chmod(0o755)
+    (installed / "VERSION").write_text("0.1.1\n", encoding="ascii")
+    (data_root / "app/current").symlink_to("releases/0.1.1")
+
+    completed = subprocess.run(
+        [str(launcher), "--data-root", str(data_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert f"start:--data-root {data_root}" in completed.stdout
+
+
+def test_user_facing_launch_command_dispatches_upgrade_install(tmp_path: Path) -> None:
+    release = tmp_path / "Release"
+    release.mkdir()
+    (release / "VERSION").write_text("0.1.1\n", encoding="ascii")
+    scripts = release / "scripts"
+    shutil.copytree(ROOT / "scripts/lib", scripts / "lib")
+    shutil.copy2(LAUNCH_COMMAND, release / LAUNCH_COMMAND.name)
+    installer = scripts / "install.command"
+    installer.write_text('#!/bin/zsh\nprint -r -- "install:$*"\n', encoding="utf-8")
+    installer.chmod(0o755)
+    launcher = release / LAUNCH_COMMAND.name
+    launcher.chmod(0o755)
+    data_root = tmp_path / "Data"
+    installed = data_root / "app/releases/0.1.0"
+    installed_scripts = installed / "scripts"
+    installed_scripts.mkdir(parents=True)
+    start = installed_scripts / "start.command"
+    start.write_text('#!/bin/zsh\nprint -r -- "old-start:$*"\n', encoding="utf-8")
+    start.chmod(0o755)
+    (installed / "VERSION").write_text("0.1.0\n", encoding="ascii")
+    (data_root / "app/current").symlink_to("releases/0.1.0")
+
+    completed = subprocess.run(
+        [str(launcher), "--data-root", str(data_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert f"install:--data-root {data_root}" in completed.stdout
+    assert "old-start:" not in completed.stdout
+
+
+def test_user_facing_launch_command_refuses_downgrade(tmp_path: Path) -> None:
+    release = tmp_path / "Release"
+    release.mkdir()
+    (release / "VERSION").write_text("0.1.1\n", encoding="ascii")
+    scripts = release / "scripts"
+    shutil.copytree(ROOT / "scripts/lib", scripts / "lib")
+    shutil.copy2(LAUNCH_COMMAND, release / LAUNCH_COMMAND.name)
+    installer_called = tmp_path / "installer-called"
+    installer = scripts / "install.command"
+    installer.write_text(
+        f"#!/bin/zsh\n: > {str(installer_called)!r}\n",
+        encoding="utf-8",
+    )
+    installer.chmod(0o755)
+    launcher = release / LAUNCH_COMMAND.name
+    launcher.chmod(0o755)
+    data_root = tmp_path / "Data"
+    installed = data_root / "app/releases/0.2.0"
+    installed_scripts = installed / "scripts"
+    installed_scripts.mkdir(parents=True)
+    start_called = tmp_path / "start-called"
+    start = installed_scripts / "start.command"
+    start.write_text(
+        f"#!/bin/zsh\n: > {str(start_called)!r}\n",
+        encoding="utf-8",
+    )
+    start.chmod(0o755)
+    (installed / "VERSION").write_text("0.2.0\n", encoding="ascii")
+    (data_root / "app/current").symlink_to("releases/0.2.0")
+
+    completed = subprocess.run(
+        [str(launcher), "--data-root", str(data_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "LAUNCH_DOWNGRADE_REFUSED" in completed.stdout + completed.stderr
+    assert not installer_called.exists()
+    assert not start_called.exists()
 
 
 @pytest.mark.parametrize(
@@ -250,6 +404,42 @@ def test_doctor_command_resolves_relocated_release_with_spaces_and_unicode(
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout)["status"] == "healthy"
     assert str(tmp_path) not in completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("command", "success_code"),
+    [
+        (START_COMMAND, "START_READY"),
+        (STOP_COMMAND, "STOP_COMPLETE"),
+    ],
+)
+def test_lifecycle_commands_capture_child_exit_without_zsh_readonly_collision(
+    tmp_path: Path,
+    command: Path,
+    success_code: str,
+) -> None:
+    data_root = tmp_path / "用户 数据" / "LocalVideoTranscriber"
+    release = data_root / "app/releases/0.1.0"
+    python = release / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/zsh\nprint -r -- child-ok\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    process_tool = release / "packaging/tools/process_state.py"
+    process_tool.parent.mkdir(parents=True)
+    process_tool.write_text("# fixture\n", encoding="utf-8")
+    (data_root / "app/current").symlink_to("releases/0.1.0")
+
+    completed = subprocess.run(
+        ["/bin/zsh", str(command), "--data-root", str(data_root)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "child-ok" in completed.stdout
+    assert success_code in completed.stdout
 
 
 def test_two_concurrent_bootstrap_attempts_have_one_winner(tmp_path: Path) -> None:

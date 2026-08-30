@@ -21,7 +21,12 @@ import {
 } from "./artifacts/preview";
 import { VisibilityPoller } from "./state/poller";
 import { ConnectionStore, type ConnectionStatus } from "./state/store";
-import { ConnectionSettingsStorage, type ConnectionSummary } from "./storage/settings";
+import {
+  ConnectionSettingsStorage,
+  type ConnectionSummary,
+  type DownloadMode,
+  DownloadPreferenceStorage,
+} from "./storage/settings";
 import { CONTRACT_VERSION } from "./api/contracts";
 import {
   filterJobs,
@@ -62,6 +67,9 @@ const clearButton = requireElement("#clear-token", HTMLButtonElement);
 const concurrencyControl = requireElement("#concurrency-control", HTMLDivElement);
 const runtimeEffect = requireElement("#runtime-effect", HTMLSpanElement);
 const settingsMessage = requireElement("#settings-message", HTMLParagraphElement);
+const downloadLocationControl = requireElement("#download-location-control", HTMLDivElement);
+const downloadLocationDetail = requireElement("#download-location-detail", HTMLParagraphElement);
+const downloadLocationMessage = requireElement("#download-location-message", HTMLParagraphElement);
 const capabilitiesCheckedAt = requireElement("#capabilities-checked-at", HTMLTimeElement);
 const capabilitiesList = requireElement("#capabilities-list", HTMLDivElement);
 const jobForm = requireElement("#job-form", HTMLFormElement);
@@ -117,6 +125,7 @@ const deleteCancel = requireElement("#delete-cancel", HTMLButtonElement);
 const deleteConfirm = requireElement("#delete-confirm", HTMLButtonElement);
 const deleteError = requireElement("#delete-error", HTMLParagraphElement);
 let tokenConfigured = false;
+let downloadMode: DownloadMode = "automatic";
 let connected = false;
 let submissionBusy = false;
 let currentFilter: JobFilter = "all";
@@ -151,6 +160,7 @@ let pendingSettings:
   | undefined;
 
 const connectionStorage = new ConnectionSettingsStorage();
+const downloadPreferenceStorage = new DownloadPreferenceStorage();
 const apiClient = new LocalApiClient(new LocalApiTransport(connectionStorage));
 const artifactDownloader = new ArtifactDownloadService(apiClient, connectionStorage);
 const store = new ConnectionStore();
@@ -219,6 +229,17 @@ concurrencyControl.addEventListener("click", (event) => {
   const concurrency = Number(target.dataset.concurrency);
   if (concurrency === 1 || concurrency === 2) {
     void updateWorkerConcurrency(concurrency);
+  }
+});
+
+downloadLocationControl.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement)) {
+    return;
+  }
+  const mode = target.dataset.downloadMode;
+  if (isDownloadMode(mode)) {
+    void updateDownloadMode(mode);
   }
 });
 
@@ -417,16 +438,64 @@ renderBatchInput();
 
 async function initialize(): Promise<void> {
   try {
-    const summary = await connectionStorage.getSummary();
-    renderSummary(summary);
-    if (summary.tokenConfigured) {
+    downloadMode = await downloadPreferenceStorage.getMode();
+  } catch {
+    downloadMode = "automatic";
+    downloadLocationMessage.textContent = "无法读取下载偏好，当前使用默认目录";
+  }
+  renderDownloadMode();
+  try {
+    const current = await connectionStorage.getSummary();
+    renderSummary(current);
+    try {
+      detail.textContent = "正在自动配对本地服务";
+      const token = await apiClient.pair();
+      const paired = await connectionStorage.saveConnection(current.port, token);
+      renderSummary(paired);
+      detail.textContent = "已自动配对，无需手动输入 Token";
       startPolling();
-    } else {
-      store.markNotConfigured(1);
+    } catch {
+      detail.textContent = "";
+      if (current.tokenConfigured) {
+        startPolling();
+      } else {
+        store.markNotConfigured(1);
+      }
     }
   } catch {
     renderLocalFailure();
   }
+}
+
+async function updateDownloadMode(mode: DownloadMode): Promise<void> {
+  if (mode === downloadMode) {
+    return;
+  }
+  const previous = downloadMode;
+  downloadMode = mode;
+  downloadLocationMessage.textContent = "";
+  renderDownloadMode();
+  try {
+    await downloadPreferenceStorage.saveMode(mode);
+    downloadLocationMessage.textContent =
+      mode === "prompt" ? "下载文件时会打开保存窗口" : "下载文件将自动保存到默认目录";
+  } catch {
+    downloadMode = previous;
+    renderDownloadMode();
+    downloadLocationMessage.textContent = "无法保存下载偏好，请重试";
+  }
+}
+
+function renderDownloadMode(): void {
+  for (const button of downloadLocationControl.querySelectorAll<HTMLButtonElement>(
+    "[data-download-mode]",
+  )) {
+    button.setAttribute("aria-pressed", String(button.dataset.downloadMode === downloadMode));
+  }
+  downloadLocationDetail.textContent =
+    downloadMode === "prompt"
+      ? "每个文件下载前打开保存窗口"
+      : "自动保存到 Chrome 下载目录 / 任务名称";
 }
 
 async function saveAndConnect(): Promise<void> {
@@ -457,7 +526,15 @@ async function saveAndConnect(): Promise<void> {
 async function reconnect(): Promise<void> {
   setBusy(true);
   try {
-    const summary = await connectionStorage.getSummary();
+    let summary = await connectionStorage.getSummary();
+    try {
+      detail.textContent = "正在自动配对本地服务";
+      const token = await apiClient.pair();
+      summary = await connectionStorage.saveConnection(summary.port, token);
+      detail.textContent = "已自动配对，无需手动输入 Token";
+    } catch {
+      detail.textContent = "";
+    }
     renderSummary(summary);
     if (!summary.tokenConfigured) {
       store.markNotConfigured(poller.stop());
@@ -1093,7 +1170,9 @@ async function downloadArtifact(job: Job, artifact: JobArtifact): Promise<void> 
   artifactMessage.textContent = "";
   renderArtifactGroups();
   try {
-    await artifactDownloader.download(job.uuid, jobDisplayTitle(job), artifact);
+    await artifactDownloader.download(job.uuid, jobDisplayTitle(job), artifact, {
+      saveAs: downloadMode === "prompt",
+    });
     if (selectedJobId === job.uuid) {
       artifactMessage.textContent = `已开始下载 ${artifact.kind}`;
     }
@@ -1147,6 +1226,10 @@ function previewLanguageForKind(kind: "source.json" | "zh-CN.json"): PreviewLang
 
 function isPreviewLanguage(value: string | undefined): value is PreviewLanguage {
   return value === "source" || value === "zh-CN";
+}
+
+function isDownloadMode(value: string | undefined): value is DownloadMode {
+  return value === "automatic" || value === "prompt";
 }
 
 function formatSegmentTimestamp(milliseconds: number): string {
@@ -1415,14 +1498,14 @@ function isJobFilter(value: string | undefined): value is JobFilter {
 function renderSummary(summary: ConnectionSummary): void {
   tokenConfigured = summary.tokenConfigured;
   portInput.value = String(summary.port);
-  tokenState.textContent = summary.tokenConfigured ? "Token 已保存" : "未保存 Token";
-  reconnectButton.disabled = !summary.tokenConfigured;
+  tokenState.textContent = summary.tokenConfigured ? "Token 已自动管理" : "等待自动配对";
+  reconnectButton.disabled = false;
   clearButton.disabled = !summary.tokenConfigured;
 }
 
 function setBusy(busy: boolean): void {
   saveButton.disabled = busy;
-  reconnectButton.disabled = busy || !tokenConfigured;
+  reconnectButton.disabled = busy;
   clearButton.disabled = busy || !tokenConfigured;
   portInput.disabled = busy;
   tokenInput.disabled = busy;

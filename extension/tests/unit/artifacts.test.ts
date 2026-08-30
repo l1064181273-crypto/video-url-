@@ -202,6 +202,30 @@ describe("bounded transcript preview", () => {
 });
 
 describe("artifact download lifecycle", () => {
+  it("asks Chrome to show the save dialog when location prompting is enabled", async () => {
+    const artifact = parsedArtifact();
+    const client = {
+      getArtifactBlob: vi.fn(() => Promise.resolve(new Blob(["artifact"]))),
+    } as unknown as LocalApiClient;
+    const download = vi.fn(() => Promise.resolve(23));
+    const service = new ArtifactDownloadService(
+      client,
+      { getConnection: () => Promise.resolve({ port: 9123, token: "token" }) },
+      { download },
+      { createObjectURL: () => "blob:save-as", revokeObjectURL: vi.fn() },
+    );
+
+    await expect(
+      service.download(JOB_ID, "Choose location", artifact, { saveAs: true }),
+    ).resolves.toBe(23);
+    expect(download).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        filename: `Choose location--${JOB_ID.slice(0, 8)}/source.txt`,
+        saveAs: true,
+      }),
+    );
+  });
+
   it.each(["success", "failure", "cancel"] as const)(
     "revokes the Blob URL after %s",
     async (outcome) => {
@@ -248,6 +272,7 @@ describe("artifact download lifecycle", () => {
       const filename = firstCall[0].filename ?? "";
       expect(filename).toBe(`local-video--${JOB_ID.slice(0, 8)}/source.txt`);
       expect(filename).not.toContain("CurrentSecretToken");
+      expect(firstCall[0].saveAs).toBe(false);
     },
   );
 

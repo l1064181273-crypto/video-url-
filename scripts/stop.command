@@ -57,12 +57,12 @@ typeset result
 result="$("${python_path}" "${process_tool}" stop \
   --data-root "${data_root}" \
   --release-root "${release_root}")"
-typeset status=$?
+typeset command_status=$?
 set -e
 print -r -- "${result}"
-if (( status == 0 )); then
+if (( command_status == 0 )); then
   lvt_log INFO "STOP_COMPLETE：本地服务及工具进程已停止"
 else
   lvt_log ERROR "STOP_UNSAFE：进程所有权无法安全验证"
 fi
-exit "${status}"
+exit "${command_status}"

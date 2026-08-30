@@ -24,7 +24,7 @@ const INITIAL_STATE: AppState = {
   generation: 0,
   connection: {
     status: "notConfigured",
-    message: "请先设置本地端口和配对 Token",
+    message: "本地服务未启动，请先双击启动文件",
   },
   health: null,
   settings: null,
@@ -104,7 +104,7 @@ export class ConnectionStore {
       generation,
       connection: {
         status: "notConfigured",
-        message: "请先设置本地端口和配对 Token",
+        message: "本地服务未启动，请先双击启动文件",
       },
     });
   }

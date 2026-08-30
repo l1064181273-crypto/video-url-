@@ -1,0 +1,63 @@
+name: Windows x64 validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_model_install:
+        description: Download pinned models and run full CPU acceptance
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install uv
+        shell: pwsh
+        run: python -m pip install "uv==0.11.25"
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: uv sync --project backend --frozen --extra dev --no-install-project
+
+      - name: Install extension dependencies
+        shell: pwsh
+        run: npm --prefix extension ci
+
+      - name: Build extension
+        shell: pwsh
+        run: npm --prefix extension run build
+
+      - name: Run Windows acceptance
+        shell: pwsh
+        env:
+          LVT_FULL_MODEL_INSTALL: ${{ inputs.full_model_install }}
+        run: ./scripts/windows-acceptance.ps1
+
+      - name: Upload evidence and package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-validation
+          if-no-files-found: error
+          path: |
+            windows-evidence/**
+            dist-windows/**

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import stat
 import struct
 import subprocess
@@ -21,19 +22,13 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from lifecycle_lock import LifecycleLock
+from runtime_layout import RuntimeLayout, path_is_link_like, runtime_layout
 
-MODEL_ARTIFACT_IDS = (
-    "asr-whisper-small-mlx-config",
-    "asr-whisper-small-mlx-weights",
-    "diarization-segmentation",
-    "diarization-embedding",
-    "hy-mt2",
-)
-REQUIRED_PACKAGES = ("mlx_whisper", "sherpa_onnx")
 QWEN_ID = "qwen2.5-1.5b"
 HY_MODEL = "hy-mt2:1.8b-q4km-fixed"
 OLLAMA_ORIGIN = "http://127.0.0.1:11435"
 ARM64_CPU_TYPE = 0x0100000C
+X64_PE_MACHINE = 0x8664
 TEST_ROOT_MARKER = ".lvt-provision-test-root"
 TEST_ROOT_MARKER_CONTENT = "lvt-provision-test-root-v1\n"
 _TEST_ROOT: Path | None = None
@@ -44,6 +39,8 @@ class ProvisionError(RuntimeError):
 
 
 def _fsync_directory(path: Path) -> None:
+    if sys.platform == "win32":
+        return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
@@ -71,7 +68,7 @@ def _has_symlink_component(path: Path) -> bool:
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
-        if current.is_symlink():
+        if path_is_link_like(current):
             return True
         if not current.exists():
             break
@@ -102,8 +99,8 @@ def _prepare_roots(data_root: Path, release_root: Path) -> None:
         or not release_root.is_absolute()
         or _has_symlink_component(data_root)
         or _has_symlink_component(release_root)
-        or data_root.is_symlink()
-        or release_root.is_symlink()
+        or path_is_link_like(data_root)
+        or path_is_link_like(release_root)
         or not data_root.is_dir()
         or not release_root.is_dir()
     ):
@@ -116,17 +113,22 @@ def _prepare_roots(data_root: Path, release_root: Path) -> None:
         raise ProvisionError("release candidate is outside the application root") from exc
     for relative in ("app/downloads", "app/tools", "models", "models/quarantine", "runtime"):
         path = _safe_join(data_root, relative)
-        if path.exists() or path.is_symlink():
-            if path.is_symlink() or not path.is_dir():
+        if path.exists() or path_is_link_like(path):
+            if path_is_link_like(path) or not path.is_dir():
                 raise ProvisionError("installation directory is unsafe")
         else:
             path.mkdir(mode=0o700, parents=True)
             _fsync_directory(path.parent)
 
 
-def _load_dependencies(release_root: Path) -> dict[str, Any]:
+def _load_dependencies(
+    release_root: Path,
+    *,
+    system: str | None = None,
+) -> dict[str, Any]:
+    layout = runtime_layout(system)
     path = _safe_join(release_root, "packaging/dependencies.json")
-    if path.is_symlink() or not path.is_file():
+    if path_is_link_like(path) or not path.is_file():
         raise ProvisionError("dependency manifest is unavailable")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -137,14 +139,17 @@ def _load_dependencies(release_root: Path) -> dict[str, Any]:
     policy = payload.get("trust_policy")
     expected_policy = {
         "allowed_schemes": ["https"],
-        "allowed_architectures": ["arm64"],
+        "allowed_architectures": [layout.architecture],
         "allow_floating_tags": False,
         "allow_runtime_digest_rewrite": False,
     }
-    if policy != expected_policy or payload.get("target") != "macos-arm64":
+    if policy != expected_policy or payload.get("target") != layout.target:
         raise ProvisionError("dependency trust policy is invalid")
     items = [*payload.get("artifacts", []), *payload.get("ollama_models", [])]
-    if any(not isinstance(item, dict) or item.get("architecture") != "arm64" for item in items):
+    if any(
+        not isinstance(item, dict) or item.get("architecture") != layout.architecture
+        for item in items
+    ):
         raise ProvisionError("dependency architecture is invalid")
     return payload
 
@@ -185,12 +190,12 @@ def _verified_file(
     expected_sha256: Any,
     *,
     executable: bool = False,
-    arm64: bool = False,
+    executable_format: str | None = None,
 ) -> bool:
     try:
         metadata = path.lstat()
         if (
-            path.is_symlink()
+            path_is_link_like(path)
             or not stat.S_ISREG(metadata.st_mode)
             or type(expected_size) is not int
             or expected_size <= 0
@@ -198,7 +203,8 @@ def _verified_file(
             or not _valid_digest(expected_sha256)
             or _sha256(path) != expected_sha256
             or (executable and metadata.st_mode & 0o111 == 0)
-            or (arm64 and not _is_arm64_macho(path))
+            or (executable_format == "macho-arm64" and not _is_arm64_macho(path))
+            or (executable_format == "pe-x64" and not _is_x64_pe(path))
         ):
             return False
     except OSError:
@@ -232,6 +238,26 @@ def _is_arm64_macho(path: Path) -> bool:
     return False
 
 
+def _is_x64_pe(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(64)
+            if len(header) < 64 or header[:2] != b"MZ":
+                return False
+            pe_offset = struct.unpack("<I", header[0x3C:0x40])[0]
+            if pe_offset < 64 or pe_offset > 16 * 1024 * 1024:
+                return False
+            stream.seek(pe_offset)
+            pe_header = stream.read(6)
+    except OSError:
+        return False
+    return (
+        len(pe_header) == 6
+        and pe_header[:4] == b"PE\0\0"
+        and struct.unpack("<H", pe_header[4:6])[0] == X64_PE_MACHINE
+    )
+
+
 def _configure_test_context(
     source_root: Path,
     data_root: Path,
@@ -246,7 +272,7 @@ def _configure_test_context(
     if (
         not candidate.is_absolute()
         or _has_symlink_component(candidate)
-        or candidate.is_symlink()
+        or path_is_link_like(candidate)
         or not candidate.is_dir()
     ):
         raise ProvisionError("test root is unsafe")
@@ -254,7 +280,7 @@ def _configure_test_context(
         test_root = candidate.resolve(strict=True)
         marker = test_root / TEST_ROOT_MARKER
         if (
-            marker.is_symlink()
+            path_is_link_like(marker)
             or not marker.is_file()
             or marker.read_text(encoding="utf-8") != TEST_ROOT_MARKER_CONTENT
         ):
@@ -278,7 +304,11 @@ def _test_path_setting(name: str, *, must_exist: bool) -> Path | None:
         return None
     assert _TEST_ROOT is not None
     candidate = Path(value)
-    if not candidate.is_absolute() or _has_symlink_component(candidate) or candidate.is_symlink():
+    if (
+        not candidate.is_absolute()
+        or _has_symlink_component(candidate)
+        or path_is_link_like(candidate)
+    ):
         raise ProvisionError("test injection path is unsafe")
     try:
         if must_exist:
@@ -294,7 +324,7 @@ def _test_path_setting(name: str, *, must_exist: bool) -> Path | None:
 def _download_library(source_root: Path) -> Path:
     injected = _test_path_setting("LVT_TEST_DOWNLOAD_LIBRARY", must_exist=True)
     library = injected if injected else source_root / "scripts/lib/download.zsh"
-    if library.is_symlink() or not library.is_file():
+    if path_is_link_like(library) or not library.is_file():
         raise ProvisionError("download helper is unavailable")
     return library
 
@@ -351,11 +381,21 @@ def _download_verified(
     expected_sha256: Any,
     expected_size: Any,
     identifier: str,
+    *,
+    layout: RuntimeLayout | None = None,
 ) -> Path:
+    selected = runtime_layout() if layout is None else layout
     if not _valid_digest(expected_sha256) or type(expected_size) is not int or expected_size <= 0:
         raise ProvisionError("dependency integrity metadata is invalid")
     destination = _safe_join(controlled_root, relative_destination)
     effective_url = _effective_url(url, identifier)
+    if selected.system == "win32":
+        return _download_verified_with_python(
+            effective_url,
+            destination,
+            expected_sha256,
+            expected_size,
+        )
     completed = subprocess.run(
         [
             "/bin/zsh",
@@ -389,8 +429,72 @@ def _download_verified(
     return destination
 
 
+def _download_verified_with_python(
+    url: str,
+    destination: Path,
+    expected_sha256: str,
+    expected_size: int,
+) -> Path:
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    partial = destination.parent / f".{destination.name}.partial.{uuid.uuid4().hex}"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            partial,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "LocalVideoTranscriber-Installer/1"},
+        )
+        digest = hashlib.sha256()
+        observed_size = 0
+        with urllib.request.urlopen(request, timeout=60) as response:
+            final = urlsplit(response.geturl())
+            test_http = (
+                _TEST_ROOT is not None
+                and final.scheme == "http"
+                and final.hostname == "127.0.0.1"
+                and final.username is None
+                and final.password is None
+            )
+            if (
+                not (final.scheme == "https" or test_http)
+                or not final.netloc
+                or final.username is not None
+                or final.password is not None
+            ):
+                raise ProvisionError("verified dependency download failed")
+            while chunk := response.read(1024 * 1024):
+                observed_size += len(chunk)
+                if observed_size > expected_size:
+                    raise ProvisionError("verified dependency download failed")
+                digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise ProvisionError("verified dependency download failed")
+                    view = view[written:]
+        if observed_size != expected_size or digest.hexdigest() != expected_sha256:
+            raise ProvisionError("verified dependency download failed")
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        partial.replace(destination)
+        _fsync_directory(destination.parent)
+        return destination
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        raise ProvisionError("verified dependency download failed") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        partial.unlink(missing_ok=True)
+
+
 def _quarantine(data_root: Path, path: Path, label: str) -> None:
-    if not path.exists() and not path.is_symlink():
+    if not path.exists() and not path_is_link_like(path):
         return
     models_root = _safe_join(data_root, "models")
     resolved_parent = path.parent.resolve(strict=True)
@@ -450,7 +554,7 @@ def _ensure_archive(
     destination = _safe_join(cache_root, relative)
     if _verified_file(destination, artifact.get("size"), artifact.get("sha256")):
         return destination
-    if destination.exists() or destination.is_symlink():
+    if destination.exists() or path_is_link_like(destination):
         _quarantine(data_root, destination, identifier)
     return _download_verified(
         source_root,
@@ -470,12 +574,10 @@ def _zip_members(archive: Path) -> dict[str, bytes]:
             for info in bundle.infolist():
                 path = PurePosixPath(info.filename)
                 mode = info.external_attr >> 16
-                if (
-                    path.is_absolute()
-                    or any(part in {"", ".", ".."} for part in path.parts)
-                    or stat.S_ISLNK(mode)
-                ):
+                if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
                     raise ProvisionError("archive contains an unsafe member")
+                if stat.S_ISLNK(mode):
+                    continue
                 if info.is_dir():
                     continue
                 members[path.as_posix()] = bundle.read(info)
@@ -490,8 +592,17 @@ def _install_archive_tool(
     artifact: dict[str, Any],
     *,
     tool_name: str,
+    layout: RuntimeLayout | None = None,
 ) -> tuple[Path, dict[str, str]]:
+    selected = runtime_layout() if layout is None else layout
     archive = _ensure_archive(source_root, data_root, artifact)
+    if selected.system == "win32" and tool_name == "ollama":
+        return _install_windows_ollama_archive(
+            data_root,
+            archive,
+            artifact,
+            selected,
+        )
     members = _zip_members(archive)
     expected_files = artifact.get("expected_files")
     version = artifact.get("version")
@@ -499,19 +610,28 @@ def _install_archive_tool(
         raise ProvisionError("tool archive metadata is invalid")
     if tool_name == "ffmpeg":
         sources = {
-            name: next(
+            logical_name: next(
                 (
                     member
                     for member in expected_files
-                    if isinstance(member, str) and PurePosixPath(member).name == name
+                    if isinstance(member, str) and PurePosixPath(member).name == executable_name
                 ),
                 None,
             )
-            for name in ("ffmpeg", "ffprobe")
+            for logical_name, executable_name in selected.ffmpeg_executables.items()
         }
     else:
-        executable = artifact.get("executable")
-        sources = {"ollama": executable if isinstance(executable, str) else None}
+        sources = {
+            logical_name: next(
+                (
+                    member
+                    for member in expected_files
+                    if isinstance(member, str) and PurePosixPath(member).name == executable_name
+                ),
+                None,
+            )
+            for logical_name, executable_name in selected.ollama_executables.items()
+        }
     if any(source not in members for source in sources.values()):
         raise ProvisionError("tool archive is missing a required executable")
     destination_dir = _safe_join(
@@ -520,38 +640,213 @@ def _install_archive_tool(
     )
     destination_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     digests: dict[str, str] = {}
-    for name, source in sources.items():
+    executable_names = (
+        selected.ffmpeg_executables if tool_name == "ffmpeg" else selected.ollama_executables
+    )
+    for logical_name, source in sources.items():
         assert source is not None
         content = members[source]
         digest = hashlib.sha256(content).hexdigest()
-        destination = destination_dir / name
+        destination = destination_dir / executable_names[logical_name]
         if not _verified_file(
             destination,
             len(content),
             digest,
             executable=True,
-            arm64=True,
+            executable_format=selected.executable_format,
         ):
-            if destination.exists() or destination.is_symlink():
-                _quarantine(data_root, destination, f"{tool_name}-{name}")
+            if destination.exists() or path_is_link_like(destination):
+                _quarantine(data_root, destination, f"{tool_name}-{logical_name}")
             _publish_bytes(destination, content, mode=0o700)
             if not _verified_file(
                 destination,
                 len(content),
                 digest,
                 executable=True,
-                arm64=True,
+                executable_format=selected.executable_format,
             ):
-                _quarantine(data_root, destination, f"{tool_name}-{name}")
+                _quarantine(data_root, destination, f"{tool_name}-{logical_name}")
                 raise ProvisionError("installed executable failed verification")
-        digests[name] = digest
+        digests[logical_name] = digest
     return destination_dir, digests
+
+
+def _install_windows_ollama_archive(
+    data_root: Path,
+    archive: Path,
+    artifact: dict[str, Any],
+    layout: RuntimeLayout,
+) -> tuple[Path, dict[str, str]]:
+    version = artifact.get("version")
+    expected_files = artifact.get("expected_files")
+    if not isinstance(version, str) or not isinstance(expected_files, list):
+        raise ProvisionError("Ollama archive metadata is invalid")
+    required_sources = {
+        logical_name: next(
+            (
+                member
+                for member in expected_files
+                if isinstance(member, str) and PurePosixPath(member).name == executable_name
+            ),
+            None,
+        )
+        for logical_name, executable_name in layout.ollama_executables.items()
+    }
+    if any(source is None for source in required_sources.values()):
+        raise ProvisionError("Ollama archive metadata is incomplete")
+    destination = _safe_join(data_root, f"app/tools/ollama/{version}")
+    marker_name = ".archive-integrity.json"
+
+    def existing_valid() -> tuple[bool, dict[str, str]]:
+        marker = destination / marker_name
+        try:
+            if path_is_link_like(destination) or not destination.is_dir():
+                return False, {}
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            files = payload["files"]
+            if (
+                payload.get("schema_version") != 1
+                or payload.get("archive_sha256") != artifact.get("sha256")
+                or payload.get("archive_size") != artifact.get("size")
+                or not isinstance(files, dict)
+            ):
+                return False, {}
+            observed = {
+                path.relative_to(destination).as_posix()
+                for path in destination.rglob("*")
+                if path.is_file() and path.name != marker_name
+            }
+            if observed != set(files):
+                return False, {}
+            for relative, expected in files.items():
+                path = _safe_join(destination, relative)
+                if (
+                    not isinstance(expected, dict)
+                    or path_is_link_like(path)
+                    or not path.is_file()
+                    or path.stat().st_size != expected.get("size")
+                    or _sha256(path) != expected.get("sha256")
+                ):
+                    return False, {}
+            digests = {
+                logical_name: files[str(source)]["sha256"]
+                for logical_name, source in required_sources.items()
+            }
+            return True, digests
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return False, {}
+
+    valid, existing_digests = existing_valid()
+    if valid:
+        return destination, existing_digests
+    if destination.exists() or path_is_link_like(destination):
+        _quarantine(data_root, destination, "ollama-runtime")
+
+    candidate = destination.parent / f".{version}.candidate.{uuid.uuid4().hex}"
+    candidate.mkdir(mode=0o700, parents=True)
+    file_contract: dict[str, dict[str, Any]] = {}
+    try:
+        try:
+            bundle = zipfile.ZipFile(archive)
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise ProvisionError("Ollama archive is invalid") from exc
+        with bundle:
+            infos = bundle.infolist()
+            for info in infos:
+                relative = PurePosixPath(info.filename)
+                windows_path = PureWindowsPath(info.filename)
+                mode = info.external_attr >> 16
+                if (
+                    not info.filename
+                    or "\\" in info.filename
+                    or ":" in info.filename
+                    or relative.is_absolute()
+                    or windows_path.is_absolute()
+                    or any(part in {"", ".", ".."} for part in relative.parts)
+                    or stat.S_ISLNK(mode)
+                ):
+                    raise ProvisionError("Ollama archive contains an unsafe member")
+                if info.is_dir():
+                    continue
+                output = _safe_join(candidate, relative.as_posix())
+                output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                descriptor = os.open(
+                    output,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                    0o700 if output.suffix.lower() == ".exe" else 0o600,
+                )
+                digest = hashlib.sha256()
+                size = 0
+                try:
+                    with bundle.open(info) as source:
+                        while chunk := source.read(1024 * 1024):
+                            digest.update(chunk)
+                            size += len(chunk)
+                            view = memoryview(chunk)
+                            while view:
+                                written = os.write(descriptor, view)
+                                if written <= 0:
+                                    raise ProvisionError(
+                                        "Ollama archive extraction made no progress"
+                                    )
+                                view = view[written:]
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                file_contract[relative.as_posix()] = {
+                    "size": size,
+                    "sha256": digest.hexdigest(),
+                }
+        for logical_name, source in required_sources.items():
+            assert source is not None
+            installed = _safe_join(candidate, source)
+            contract = file_contract.get(source)
+            if contract is None or not _verified_file(
+                installed,
+                contract["size"],
+                contract["sha256"],
+                executable=True,
+                executable_format=layout.executable_format,
+            ):
+                raise ProvisionError(
+                    f"installed Ollama {logical_name} executable failed verification"
+                )
+        marker_payload = {
+            "schema_version": 1,
+            "archive_sha256": artifact.get("sha256"),
+            "archive_size": artifact.get("size"),
+            "files": file_contract,
+        }
+        _publish_bytes(
+            candidate / marker_name,
+            (json.dumps(marker_payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                "ascii"
+            ),
+        )
+        for current, _directories, files in os.walk(candidate, topdown=False):
+            current_path = Path(current)
+            for name in files:
+                _fsync_file(current_path / name)
+            _fsync_directory(current_path)
+        candidate.rename(destination)
+        _fsync_directory(destination.parent)
+    except Exception:
+        if candidate.exists():
+            _quarantine(data_root, candidate, "ollama-runtime-candidate")
+        raise
+    return destination, {
+        logical_name: file_contract[str(source)]["sha256"]
+        for logical_name, source in required_sources.items()
+    }
 
 
 def _installed_ffmpeg(
     data_root: Path,
     artifact: dict[str, Any],
+    *,
+    layout: RuntimeLayout | None = None,
 ) -> tuple[Path, dict[str, str]] | None:
+    selected = runtime_layout() if layout is None else layout
     state_path = _safe_join(data_root, "runtime/install-state.json")
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -568,15 +863,15 @@ def _installed_ffmpeg(
         ):
             return None
         ffmpeg_dir = _safe_join(_safe_join(data_root, "app"), directory)
-        for name in ("ffmpeg", "ffprobe"):
-            path = ffmpeg_dir / name
+        for logical_name, executable_name in selected.ffmpeg_executables.items():
+            path = ffmpeg_dir / executable_name
             size = path.lstat().st_size
             if not _verified_file(
                 path,
                 size,
-                digests.get(name),
+                digests.get(logical_name),
                 executable=True,
-                arm64=True,
+                executable_format=selected.executable_format,
             ):
                 return None
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -603,7 +898,7 @@ def _install_direct_model(
     expected_sha256 = artifact.get("expected_file_sha256", artifact.get("sha256"))
     if _verified_file(destination, expected_size, expected_sha256):
         return destination
-    if destination.exists() or destination.is_symlink():
+    if destination.exists() or path_is_link_like(destination):
         _quarantine(data_root, destination, identifier)
     candidate_root = _safe_join(
         data_root,
@@ -652,7 +947,7 @@ def _install_segmentation(
     expected_sha256 = artifact.get("expected_file_sha256")
     if _verified_file(destination, expected_size, expected_sha256):
         return destination
-    if destination.exists() or destination.is_symlink():
+    if destination.exists() or path_is_link_like(destination):
         _quarantine(data_root, destination, "diarization-segmentation")
     archive = _ensure_archive(source_root, data_root, artifact)
     candidate_root = _safe_join(
@@ -786,14 +1081,14 @@ def _install_qwen(
             "manifest_media_type": model["manifest_media_type"],
             "blobs": blobs,
         }
-    if manifest_path.exists() or manifest_path.is_symlink():
+    if manifest_path.exists() or path_is_link_like(manifest_path):
         _quarantine(data_root, manifest_path, "qwen-manifest")
     for index, blob in enumerate(blobs):
         if str(index) in valid_blobs:
             continue
         digest = blob["digest"][7:]
         path = _safe_join(data_root, f"models/ollama/blobs/sha256-{digest}")
-        if path.exists() or path.is_symlink():
+        if path.exists() or path_is_link_like(path):
             _quarantine(data_root, path, f"qwen-blob-{index}")
 
     candidate_root = _safe_join(
@@ -865,27 +1160,39 @@ def _install_qwen(
     }
 
 
-def _verify_python_packages(release_root: Path) -> None:
+def _verify_python_packages(
+    release_root: Path,
+    layout: RuntimeLayout | None = None,
+) -> None:
+    selected = runtime_layout() if layout is None else layout
     missing_injection = _test_setting("LVT_TEST_MISSING_PACKAGE")
-    packages = [package for package in REQUIRED_PACKAGES if package != missing_injection]
+    packages = [package for package in selected.required_packages if package != missing_injection]
     script = (
         "import importlib.util,sys;"
         f"sys.exit(0 if all(importlib.util.find_spec(name) for name in {packages!r}) else 1)"
     )
     completed = subprocess.run(
-        [str(_safe_join(release_root, ".venv/bin/python")), "-c", script],
+        [str(_safe_join(release_root, selected.venv_python)), "-c", script],
         close_fds=True,
         capture_output=True,
         text=True,
         check=False,
     )
-    if completed.returncode != 0 or missing_injection in REQUIRED_PACKAGES:
+    if completed.returncode != 0 or missing_injection in selected.required_packages:
         raise ProvisionError("required model runtime package is unavailable")
 
 
-def _project_port_in_use(source_root: Path) -> bool:
+def _project_port_in_use(
+    source_root: Path,
+    layout: RuntimeLayout | None = None,
+) -> bool:
+    selected = runtime_layout() if layout is None else layout
+    if selected.system == "win32":
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            return probe.connect_ex(("127.0.0.1", 11435)) == 0
     library = source_root / "scripts/lib/process.zsh"
-    if library.is_symlink() or not library.is_file():
+    if path_is_link_like(library) or not library.is_file():
         raise ProvisionError("process helper is unavailable")
     completed = subprocess.run(
         [
@@ -914,15 +1221,43 @@ def _ollama_json(path: str) -> dict[str, Any]:
     return payload
 
 
-def _ollama_environment(data_root: Path) -> dict[str, str]:
-    environment = {
-        "HOME": os.environ.get("HOME", "/"),
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        "OLLAMA_HOST": "127.0.0.1:11435",
-        "OLLAMA_MODELS": str(_safe_join(data_root, "models/ollama")),
-    }
-    if tmpdir := os.environ.get("TMPDIR"):
-        environment["TMPDIR"] = tmpdir
+def _ollama_environment(
+    data_root: Path,
+    layout: RuntimeLayout | None = None,
+) -> dict[str, str]:
+    selected = runtime_layout() if layout is None else layout
+    if selected.system == "win32":
+        environment = {
+            name: value
+            for name in (
+                "APPDATA",
+                "COMSPEC",
+                "LOCALAPPDATA",
+                "SYSTEMROOT",
+                "TEMP",
+                "TMP",
+                "USERPROFILE",
+                "WINDIR",
+            )
+            if (value := os.environ.get(name))
+        }
+        system_root = environment.get("SYSTEMROOT") or environment.get("WINDIR")
+        environment["PATH"] = (
+            str(Path(system_root) / "System32") if system_root else r"C:\Windows\System32"
+        )
+    else:
+        environment = {
+            "HOME": os.environ.get("HOME", "/"),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        }
+        if tmpdir := os.environ.get("TMPDIR"):
+            environment["TMPDIR"] = tmpdir
+    environment.update(
+        {
+            "OLLAMA_HOST": "127.0.0.1:11435",
+            "OLLAMA_MODELS": str(_safe_join(data_root, "models/ollama")),
+        }
+    )
     for name in ("LVT_TEST_OLLAMA_STATE", "LVT_TEST_OLLAMA_AUDIT"):
         if path_value := _test_path_setting(name, must_exist=False):
             environment[name] = str(path_value)
@@ -932,15 +1267,22 @@ def _ollama_environment(data_root: Path) -> dict[str, str]:
 
 
 class _OllamaSession:
-    def __init__(self, source_root: Path, data_root: Path, executable: Path) -> None:
+    def __init__(
+        self,
+        source_root: Path,
+        data_root: Path,
+        executable: Path,
+        layout: RuntimeLayout | None = None,
+    ) -> None:
         self.source_root = source_root
         self.data_root = data_root
         self.executable = executable
+        self.layout = runtime_layout() if layout is None else layout
         self.process: subprocess.Popen[bytes] | None = None
-        self.environment = _ollama_environment(data_root)
+        self.environment = _ollama_environment(data_root, self.layout)
 
     def __enter__(self) -> _OllamaSession:
-        if _project_port_in_use(self.source_root):
+        if _project_port_in_use(self.source_root, self.layout):
             raise ProvisionError("port 11435 is occupied by another process")
         self.process = subprocess.Popen(
             [str(self.executable), "serve"],
@@ -1001,12 +1343,16 @@ class _OllamaSession:
             raise ProvisionError("primary translation model creation failed")
 
 
-def _ollama_executable(installed: Path) -> Path:
+def _ollama_executable(
+    installed: Path,
+    layout: RuntimeLayout | None = None,
+) -> Path:
+    selected = runtime_layout() if layout is None else layout
     injected = _test_path_setting("LVT_TEST_OLLAMA_EXECUTABLE", must_exist=True)
     executable = injected if injected else installed
-    if executable.is_symlink() or not executable.is_file():
+    if path_is_link_like(executable) or not executable.is_file():
         raise ProvisionError("Ollama executable is unavailable")
-    if executable.stat().st_mode & 0o111 == 0:
+    if selected.system != "win32" and executable.stat().st_mode & 0o111 == 0:
         raise ProvisionError("Ollama executable is not executable")
     return executable
 
@@ -1016,11 +1362,12 @@ def _ensure_hy_model(
     data_root: Path,
     executable: Path,
     gguf: Path,
+    layout: RuntimeLayout | None = None,
 ) -> None:
     modelfile = source_root / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km"
-    if modelfile.is_symlink() or not modelfile.is_file():
+    if path_is_link_like(modelfile) or not modelfile.is_file():
         raise ProvisionError("Hy-MT2 Modelfile is unavailable")
-    with _OllamaSession(source_root, data_root, executable) as ollama:
+    with _OllamaSession(source_root, data_root, executable, layout) as ollama:
         if ollama.has_model(HY_MODEL):
             return
         build_root = _safe_join(
@@ -1050,7 +1397,7 @@ def _write_install_state(
     ollama_models: dict[str, Any] | None,
 ) -> None:
     state_path = _safe_join(data_root, "runtime/install-state.json")
-    if state_path.is_symlink() or not state_path.is_file():
+    if path_is_link_like(state_path) or not state_path.is_file():
         raise ProvisionError("install state is unavailable")
     previous = state_path.read_bytes()
     try:
@@ -1094,8 +1441,13 @@ def _write_install_state(
         partial.unlink(missing_ok=True)
 
 
-def _validate_dependencies(release_root: Path, data_root: Path) -> None:
-    python = _safe_join(release_root, ".venv/bin/python")
+def _validate_dependencies(
+    release_root: Path,
+    data_root: Path,
+    layout: RuntimeLayout | None = None,
+) -> None:
+    selected = runtime_layout() if layout is None else layout
+    python = _safe_join(release_root, selected.venv_python)
     validator = _safe_join(release_root, "packaging/tools/verify_install.py")
     completed = subprocess.run(
         [
@@ -1107,6 +1459,8 @@ def _validate_dependencies(release_root: Path, data_root: Path) -> None:
             str(data_root),
             "--release-root",
             str(release_root),
+            "--target",
+            selected.target,
             "--json",
         ],
         close_fds=True,
@@ -1133,24 +1487,27 @@ def provision_dependencies(
     release_root: Path,
     *,
     skip_models: bool = False,
+    system: str | None = None,
 ) -> bool:
+    layout = runtime_layout(system)
     source_root = source_root.resolve(strict=True)
     _configure_test_context(source_root, data_root, release_root)
     _prepare_roots(data_root, release_root)
     data_root = data_root.resolve(strict=True)
     release_root = release_root.resolve(strict=True)
-    dependencies = _load_dependencies(release_root)
+    dependencies = _load_dependencies(release_root, system=layout.system)
     lock = LifecycleLock(data_root / "app", operation="install")
     lock.acquire_bootstrap_then_flock()
     try:
         ffmpeg_artifact = _artifact(dependencies, "ffmpeg")
-        existing_ffmpeg = _installed_ffmpeg(data_root, ffmpeg_artifact)
+        existing_ffmpeg = _installed_ffmpeg(data_root, ffmpeg_artifact, layout=layout)
         if existing_ffmpeg is None:
             ffmpeg_dir, ffmpeg_digests = _install_archive_tool(
                 source_root,
                 data_root,
                 ffmpeg_artifact,
                 tool_name="ffmpeg",
+                layout=layout,
             )
         else:
             ffmpeg_dir, ffmpeg_digests = existing_ffmpeg
@@ -1163,15 +1520,16 @@ def provision_dependencies(
             _write_install_state(data_root, ffmpeg_state, None)
             return False
 
-        _verify_python_packages(release_root)
+        _verify_python_packages(release_root, layout)
         ollama_artifact = _artifact(dependencies, "ollama")
         ollama_dir, _ = _install_archive_tool(
             source_root,
             data_root,
             ollama_artifact,
             tool_name="ollama",
+            layout=layout,
         )
-        for identifier in MODEL_ARTIFACT_IDS:
+        for identifier in layout.model_artifact_ids:
             artifact = _artifact(dependencies, identifier)
             if identifier == "diarization-segmentation":
                 _install_segmentation(source_root, data_root, artifact)
@@ -1183,15 +1541,19 @@ def provision_dependencies(
         _ensure_hy_model(
             source_root,
             data_root,
-            _ollama_executable(ollama_dir / "ollama"),
+            _ollama_executable(
+                ollama_dir / layout.ollama_executables["ollama"],
+                layout,
+            ),
             hy_path,
+            layout,
         )
         _write_install_state(
             data_root,
             ffmpeg_state,
             {QWEN_ID: qwen_state},
         )
-        _validate_dependencies(release_root, data_root)
+        _validate_dependencies(release_root, data_root, layout)
         return True
     finally:
         lock.close()

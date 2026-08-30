@@ -4,7 +4,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-DEFAULT_ASR_MODEL = "mlx-community/whisper-small-mlx"
+from lvt.core.platform_runtime import default_asr_model
+
+DEFAULT_ASR_MODEL = default_asr_model()
 
 
 class JobOptions(BaseModel):

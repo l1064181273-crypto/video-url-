@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
+import ctypes
 import json
 import os
 import shutil
@@ -13,7 +13,18 @@ import uuid
 from pathlib import Path
 from typing import Protocol, TypedDict, cast
 
+try:
+    import fcntl
+except ModuleNotFoundError:
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ModuleNotFoundError:
+    msvcrt = None  # type: ignore[assignment]
+
 OPERATIONS = {"install", "start", "stop", "upgrade", "uninstall"}
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 
 class LockBusyError(RuntimeError):
@@ -22,6 +33,16 @@ class LockBusyError(RuntimeError):
 
 class LockUnsafeError(RuntimeError):
     pass
+
+
+def path_is_link_like(path: Path) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    return path.is_symlink() or bool(
+        getattr(metadata, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
+    )
 
 
 class ProcessInspector(Protocol):
@@ -40,6 +61,8 @@ class SystemProcessInspector:
     def identity(self, pid: int) -> str | None:
         if type(pid) is not int or pid <= 0:
             return None
+        if sys.platform == "win32":
+            return _windows_process_identity(pid)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -119,7 +142,7 @@ class LifecycleLock:
 
     def acquire_flock(self, *, blocking: bool = False) -> None:
         self._prepare_lifecycle_root()
-        if self.lock_path.is_symlink():
+        if path_is_link_like(self.lock_path):
             raise LockUnsafeError("lifecycle lock cannot be a symlink")
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
         if hasattr(os, "O_NOFOLLOW"):
@@ -132,14 +155,9 @@ class LifecycleLock:
             metadata = os.fstat(fd)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 raise LockUnsafeError("lifecycle lock is not a regular file")
-            os.fchmod(fd, 0o600)
-            operation = fcntl.LOCK_EX
-            if not blocking:
-                operation |= fcntl.LOCK_NB
-            try:
-                fcntl.flock(fd, operation)
-            except BlockingIOError as exc:
-                raise LockBusyError("lifecycle lock is held") from exc
+            if sys.platform != "win32":
+                os.fchmod(fd, 0o600)
+            _lock_descriptor(fd, blocking=blocking)
             os.set_inheritable(fd, False)
             self._lock_fd = fd
         except Exception:
@@ -180,7 +198,7 @@ class LifecycleLock:
             bootstrap_error = exc
         finally:
             if self._lock_fd is not None:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                _unlock_descriptor(self._lock_fd)
                 os.close(self._lock_fd)
                 self._lock_fd = None
         if bootstrap_error is not None:
@@ -207,7 +225,7 @@ class LifecycleLock:
             created = True
         except FileExistsError:
             pass
-        if self.lifecycle_root.is_symlink() or not self.lifecycle_root.is_dir():
+        if path_is_link_like(self.lifecycle_root) or not self.lifecycle_root.is_dir():
             raise LockUnsafeError("lifecycle root is unsafe")
         self.lifecycle_root.resolve(strict=True).relative_to(resolved_parent)
         if created:
@@ -251,19 +269,24 @@ class LifecycleLock:
 
     def _read_owner(self, bootstrap: Path) -> OwnerMetadata:
         try:
-            if bootstrap.is_symlink() or not bootstrap.is_dir():
+            if path_is_link_like(bootstrap) or not bootstrap.is_dir():
                 raise ValueError
             bootstrap_metadata = bootstrap.stat()
-            if (
-                bootstrap_metadata.st_uid != os.getuid()
-                or bootstrap_metadata.st_mode & 0o777 != 0o700
+            if not _owned_by_current_user(bootstrap_metadata) or (
+                sys.platform != "win32" and bootstrap_metadata.st_mode & 0o777 != 0o700
             ):
                 raise ValueError
             owner = bootstrap / "owner.json"
             metadata = owner.lstat()
-            if owner.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            if (
+                path_is_link_like(owner)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+            ):
                 raise ValueError
-            if metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o600:
+            if not _owned_by_current_user(metadata) or (
+                sys.platform != "win32" and metadata.st_mode & 0o777 != 0o600
+            ):
                 raise ValueError
             payload = json.loads(owner.read_text(encoding="utf-8"))
             if (
@@ -291,6 +314,8 @@ class LifecycleLock:
 
 
 def _fsync_directory(path: Path) -> None:
+    if sys.platform == "win32":
+        return
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(fd)
@@ -298,11 +323,93 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _owned_by_current_user(metadata: os.stat_result) -> bool:
+    getuid = getattr(os, "getuid", None)
+    return getuid is None or metadata.st_uid == getuid()
+
+
+def _lock_descriptor(fd: int, *, blocking: bool) -> None:
+    if sys.platform == "win32":
+        if msvcrt is None:
+            raise LockUnsafeError("Windows file locking is unavailable")
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+            os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        try:
+            msvcrt.locking(fd, mode, 1)
+        except OSError as exc:
+            raise LockBusyError("lifecycle lock is held") from exc
+        return
+    if fcntl is None:
+        raise LockUnsafeError("POSIX file locking is unavailable")
+    operation = fcntl.LOCK_EX
+    if not blocking:
+        operation |= fcntl.LOCK_NB
+    try:
+        fcntl.flock(fd, operation)
+    except BlockingIOError as exc:
+        raise LockBusyError("lifecycle lock is held") from exc
+
+
+def _unlock_descriptor(fd: int) -> None:
+    if sys.platform == "win32":
+        if msvcrt is None:
+            raise LockUnsafeError("Windows file locking is unavailable")
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    if fcntl is None:
+        raise LockUnsafeError("POSIX file locking is unavailable")
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _windows_process_identity(pid: int) -> str | None:
+    if sys.platform != "win32":
+        return None
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    get_process_times = kernel32.GetProcessTimes
+    get_process_times.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    get_process_times.restype = ctypes.c_int
+    handle = open_process(0x1000, 0, pid)
+    if not handle:
+        return None
+    creation = ctypes.c_uint64()
+    exit_time = ctypes.c_uint64()
+    kernel_time = ctypes.c_uint64()
+    user_time = ctypes.c_uint64()
+    try:
+        if not get_process_times(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            return None
+        return f"{creation.value:016x}"
+    finally:
+        close_handle(handle)
+
+
 def _has_symlink_component(path: Path) -> bool:
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
-        if current.is_symlink():
+        if path_is_link_like(current):
             return True
         if not current.exists():
             break

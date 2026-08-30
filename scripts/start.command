@@ -57,16 +57,16 @@ typeset result
 result="$("${python_path}" "${process_tool}" start \
   --data-root "${data_root}" \
   --release-root "${release_root}")"
-typeset status=$?
+typeset command_status=$?
 set -e
 print -r -- "${result}"
-if (( status == 0 )); then
+if (( command_status == 0 )); then
   lvt_log INFO "START_READY：本地服务已启动"
   lvt_log INFO "START_HEALTH：http://127.0.0.1:8765/health"
   lvt_log INFO "START_EXTENSION：${data_root/#${HOME}/\~}/extension"
-elif (( status == 1 )); then
+elif (( command_status == 1 )); then
   lvt_log ERROR "START_PREREQUISITE_MISSING：请先完成安装依赖"
 else
   lvt_log ERROR "START_UNSAFE：服务状态无法安全收敛"
 fi
-exit "${status}"
+exit "${command_status}"

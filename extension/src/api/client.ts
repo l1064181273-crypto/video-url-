@@ -46,6 +46,7 @@ type RequestOptions = {
   authenticated?: boolean;
   body?: unknown;
   method?: "GET" | "POST" | "PATCH" | "DELETE";
+  pairing?: boolean;
   signal?: AbortSignal | undefined;
 };
 
@@ -127,9 +128,12 @@ export class LocalApiTransport {
     const headers = new Headers({ Accept: options.accept ?? "application/json" });
     if (authenticated) {
       if (connection.token === null) {
-        throw new ApiClientError("notConfigured", "请先设置本地端口和配对 Token");
+        throw new ApiClientError("notConfigured", "尚未自动配对，请确认本地服务已启动");
       }
       headers.set("X-LVT-Token", connection.token);
+    }
+    if (options.pairing === true) {
+      headers.set("X-LVT-Pairing", "1");
     }
     if (options.body !== undefined) {
       headers.set("Content-Type", "application/json");
@@ -163,6 +167,28 @@ export class LocalApiTransport {
 
 export class LocalApiClient {
   constructor(private readonly transport: LocalApiTransport) {}
+
+  async pair(signal?: AbortSignal): Promise<string> {
+    const value = await this.transport.requestJson("/api/v1/pairing", "other", {
+      authenticated: false,
+      method: "POST",
+      pairing: true,
+      signal,
+    });
+    if (!isRecord(value) || Object.keys(value).length !== 1) {
+      throw invalidResponse();
+    }
+    const token = value.token;
+    if (
+      typeof token !== "string" ||
+      token.length < 32 ||
+      token.length > 256 ||
+      !/^[A-Za-z0-9_-]+$/u.test(token)
+    ) {
+      throw invalidResponse();
+    }
+    return token;
+  }
 
   async getHealth(signal?: AbortSignal): Promise<HealthResponse> {
     return parseContract(
@@ -426,6 +452,10 @@ function assertValidatedLocalTarget(url: URL, port: number): void {
 
 function isJsonResponse(response: Response): boolean {
   return response.headers.get("Content-Type")?.toLowerCase().includes("application/json") === true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseContract<T>(value: unknown, parser: (input: unknown) => T): T {

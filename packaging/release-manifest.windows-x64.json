@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "product": {
+    "name": "Local Video Transcriber",
+    "version": "0.1.1"
+  },
+  "platform": {
+    "os": "windows",
+    "minimum_versions": [
+      "Windows 10 22H2",
+      "Windows 11"
+    ],
+    "architecture": "x86_64"
+  },
+  "archive": {
+    "filename": "LocalVideoTranscriber-0.1.1-windows-x64.zip",
+    "root": "LocalVideoTranscriber-0.1.1"
+  },
+  "line_endings": {
+    "*.cmd": "CRLF",
+    "*.ps1": "CRLF",
+    "*.psm1": "CRLF"
+  },
+  "forbidden": [
+    ".git",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    "test-results",
+    "playwright-report",
+    "api-token",
+    "*.sqlite*",
+    "*.db",
+    "*.log",
+    "*.gguf",
+    "*.onnx",
+    "*.trace"
+  ]
+}

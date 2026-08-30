@@ -26,6 +26,7 @@ PROVISION = ROOT / "packaging/tools/provision.py"
 INSTALL = ROOT / "packaging/tools/install.py"
 VERIFY = ROOT / "packaging/tools/verify_install.py"
 PROCESS_STATE_TOOL = ROOT / "packaging/tools/process_state.py"
+RUNTIME_LAYOUT_TOOL = ROOT / "packaging/tools/runtime_layout.py"
 LOCK = ROOT / "packaging/tools/lifecycle_lock.py"
 DOCTOR = ROOT / "packaging/tools/doctor.py"
 RECONCILE = ROOT / "packaging/tools/reconcile_processes.py"
@@ -58,13 +59,21 @@ def _macho_arm64(label: bytes) -> bytes:
     return b"\xcf\xfa\xed\xfe" + struct.pack("<I", 0x0100000C) + label
 
 
-def _zip_bytes(files: dict[str, bytes]) -> bytes:
+def _zip_bytes(
+    files: dict[str, bytes],
+    *,
+    symlinks: dict[str, str] | None = None,
+) -> bytes:
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
         for name, content in files.items():
             info = zipfile.ZipInfo(name)
             info.external_attr = 0o100755 << 16
             archive.writestr(info, content)
+        for name, target in (symlinks or {}).items():
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(info, target.encode("utf-8"))
     return stream.getvalue()
 
 
@@ -124,6 +133,7 @@ def _fixture_contract(
     *,
     segmentation_model: bytes = b"segmentation-model-v1",
     unsafe_archive: str | None = None,
+    ollama_symlinks: bool = False,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     ffmpeg_archive = _zip_bytes(
         {
@@ -135,7 +145,16 @@ def _fixture_contract(
         {
             "Ollama.app/Contents/MacOS/Ollama": _macho_arm64(b"app"),
             "Ollama.app/Contents/Resources/ollama": _macho_arm64(b"cli"),
-        }
+            "Ollama.app/Contents/Resources/llama-server": _macho_arm64(b"server"),
+            "Ollama.app/Contents/Resources/llama-quantize": _macho_arm64(b"quantizer"),
+        },
+        symlinks=(
+            {
+                "Ollama.app/Contents/Resources/libggml.dylib": "libggml.0.20.2.dylib",
+            }
+            if ollama_symlinks
+            else None
+        ),
     )
     segmentation = _segmentation_archive(
         segmentation_model,
@@ -172,6 +191,8 @@ def _fixture_contract(
             "expected_files": [
                 "Ollama.app/Contents/MacOS/Ollama",
                 "Ollama.app/Contents/Resources/ollama",
+                "Ollama.app/Contents/Resources/llama-server",
+                "Ollama.app/Contents/Resources/llama-quantize",
             ],
             "kind": "tool",
             "executable": "Ollama.app/Contents/Resources/ollama",
@@ -320,6 +341,7 @@ def _candidate_tree(
     doctor.chmod(0o755)
     _copy(VERIFY, release / "packaging/tools/verify_install.py", executable=True)
     _copy(PROCESS_STATE_TOOL, release / "packaging/tools/process_state.py", executable=True)
+    _copy(RUNTIME_LAYOUT_TOOL, release / "packaging/tools/runtime_layout.py")
     _copy(PROVISION, release / "packaging/tools/provision.py", executable=True)
     _copy(LOCK, release / "packaging/tools/lifecycle_lock.py", executable=True)
     _copy(COMMON, release / "scripts/lib/common.zsh", executable=True)
@@ -550,6 +572,59 @@ def test_provision_builds_healthy_dependencies_candidate(tmp_path: Path) -> None
     assert set(state) == {"schema_version", "core", "ffmpeg", "ollama_models"}
     assert not (data_root / "app/current").exists()
     assert not (data_root / "extension/manifest.json").exists()
+
+
+def test_provision_accepts_unreferenced_ollama_archive_symlinks(
+    tmp_path: Path,
+) -> None:
+    dependencies, files = _fixture_contract(ollama_symlinks=True)
+    data_root, release = _candidate_tree(tmp_path, dependencies)
+    with DownloadFixture(files) as fixture:
+        completed = _run_provision(
+            data_root,
+            release,
+            _environment(tmp_path, fixture),
+        )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    installed = data_root / "app/tools/ollama/0.32.15/bin/ollama"
+    assert installed.is_file()
+    assert not installed.is_symlink()
+    assert not (data_root / "app/tools/ollama/0.32.15/libggml.dylib").exists()
+
+
+def test_provision_installs_ollama_gguf_quantizer(tmp_path: Path) -> None:
+    dependencies, files = _fixture_contract()
+    data_root, release = _candidate_tree(tmp_path, dependencies)
+    with DownloadFixture(files) as fixture:
+        completed = _run_provision(
+            data_root,
+            release,
+            _environment(tmp_path, fixture),
+        )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    quantizer = data_root / "app/tools/ollama/0.32.15/bin/llama-quantize"
+    assert quantizer.is_file()
+    assert not quantizer.is_symlink()
+    assert quantizer.stat().st_mode & 0o111 != 0
+
+
+def test_provision_installs_ollama_inference_server(tmp_path: Path) -> None:
+    dependencies, files = _fixture_contract()
+    data_root, release = _candidate_tree(tmp_path, dependencies)
+    with DownloadFixture(files) as fixture:
+        completed = _run_provision(
+            data_root,
+            release,
+            _environment(tmp_path, fixture),
+        )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    server = data_root / "app/tools/ollama/0.32.15/bin/llama-server"
+    assert server.is_file()
+    assert not server.is_symlink()
+    assert server.stat().st_mode & 0o111 != 0
 
 
 def test_dependencies_verify_rejects_same_size_qwen_blob_corruption(
@@ -1002,6 +1077,7 @@ def _build_install_source(
     _copy(PROVISION, release / "packaging/tools/provision.py", executable=True)
     _copy(VERIFY, release / "packaging/tools/verify_install.py", executable=True)
     _copy(PROCESS_STATE_TOOL, release / "packaging/tools/process_state.py", executable=True)
+    _copy(RUNTIME_LAYOUT_TOOL, release / "packaging/tools/runtime_layout.py")
     _copy(LOCK, release / "packaging/tools/lifecycle_lock.py", executable=True)
     _copy(DOCTOR, release / "packaging/tools/doctor.py", executable=True)
     _copy(RECONCILE, release / "packaging/tools/reconcile_processes.py", executable=True)

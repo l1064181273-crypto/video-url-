@@ -8,6 +8,7 @@ from lvt.core.capabilities import (
     LocalCapabilitiesConfig,
     LocalCapabilityProbes,
 )
+from lvt.core.platform_runtime import RuntimePlatform
 from lvt.pipeline import factory
 from lvt.pipeline.factory import RealPipelineConfig, create_real_pipeline
 
@@ -27,6 +28,7 @@ def test_installed_pipeline_uses_configured_models_ffmpeg_and_ollama(
     ffmpeg_dir = tmp_path / "app" / "tools" / "ffmpeg" / "8.0" / "bin"
     install_state = tmp_path / "runtime" / "install-state.json"
     resolver_calls: list[dict[str, Any]] = []
+    asr_calls: list[dict[str, Any]] = []
     ollama_calls: list[dict[str, Any]] = []
 
     def resolve(**kwargs: Any) -> tuple[Path, Path]:
@@ -38,9 +40,13 @@ def test_installed_pipeline_uses_configured_models_ffmpeg_and_ollama(
             super().__init__(*_args, **kwargs)
             ollama_calls.append(kwargs)
 
+    def asr_factory(**kwargs: Any) -> _Engine:
+        asr_calls.append(kwargs)
+        return _Engine(**kwargs)
+
     monkeypatch.setattr(factory, "discover_ffmpeg_binaries", resolve)
     monkeypatch.setattr(factory, "YtDlpFFmpegDownloader", _Engine)
-    monkeypatch.setattr(factory, "MLXWhisperASREngine", _Engine)
+    monkeypatch.setattr(factory, "create_asr_engine", asr_factory)
     monkeypatch.setattr(factory, "SherpaOnnxDiarizationEngine", _Engine)
     monkeypatch.setattr(factory, "OllamaTranslationEngine", _OllamaEngine)
     monkeypatch.setattr(factory, "FallbackTranslationEngine", _Engine)
@@ -55,6 +61,8 @@ def test_installed_pipeline_uses_configured_models_ffmpeg_and_ollama(
         / "diarization"
         / "embedding"
         / "nemo_en_titanet_small.onnx",
+        asr_model_path=tmp_path / "models" / "asr" / "whisper-small-mlx",
+        runtime_platform=RuntimePlatform.MACOS,
         ollama_url="http://127.0.0.1:11435",
         installed_mode=True,
         ffmpeg_dir=ffmpeg_dir,
@@ -70,6 +78,7 @@ def test_installed_pipeline_uses_configured_models_ffmpeg_and_ollama(
             "ffmpeg_dir": ffmpeg_dir,
             "app_root": tmp_path / "app",
             "install_state": install_state,
+            "runtime_platform": RuntimePlatform.MACOS,
         }
     ]
     assert pipeline.downloader.kwargs == {
@@ -78,12 +87,64 @@ def test_installed_pipeline_uses_configured_models_ffmpeg_and_ollama(
         "process_root": tmp_path / "runtime/processes",
         "supervisor_path": ROOT / "packaging/tools/tool_supervisor.py",
     }
-    assert pipeline.asr.kwargs["ffmpeg_path"] == ffmpeg_dir / "ffmpeg"
+    assert asr_calls == [
+        {
+            "ffmpeg_path": ffmpeg_dir / "ffmpeg",
+            "model": "mlx-community/whisper-small-mlx",
+            "model_path": config.asr_model_path,
+            "platform": RuntimePlatform.MACOS,
+        }
+    ]
     assert pipeline.diarizer.kwargs["segmentation_model"] == config.segmentation_model
     assert pipeline.diarizer.kwargs["embedding_model"] == config.embedding_model
     assert [call["base_url"] for call in ollama_calls] == [
         "http://127.0.0.1:11435",
         "http://127.0.0.1:11435",
+    ]
+
+
+def test_windows_pipeline_uses_platform_asr_factory(monkeypatch: Any, tmp_path: Path) -> None:
+    ffmpeg_dir = tmp_path / "app/tools/ffmpeg/8.0/bin"
+    asr_calls: list[dict[str, Any]] = []
+
+    def resolve(**_kwargs: Any) -> tuple[Path, Path]:
+        return ffmpeg_dir / "ffmpeg.exe", ffmpeg_dir / "ffprobe.exe"
+
+    def asr_factory(**kwargs: Any) -> _Engine:
+        asr_calls.append(kwargs)
+        return _Engine(**kwargs)
+
+    monkeypatch.setattr(factory, "discover_ffmpeg_binaries", resolve)
+    monkeypatch.setattr(factory, "YtDlpFFmpegDownloader", _Engine)
+    monkeypatch.setattr(factory, "create_asr_engine", asr_factory)
+    monkeypatch.setattr(factory, "SherpaOnnxDiarizationEngine", _Engine)
+    monkeypatch.setattr(factory, "OllamaTranslationEngine", _Engine)
+    monkeypatch.setattr(factory, "FallbackTranslationEngine", _Engine)
+    monkeypatch.setattr(factory, "FilteringTranslationEngine", lambda engine: engine)
+    model_path = tmp_path / "models/asr/faster-whisper-small"
+    config = RealPipelineConfig(
+        work_root=tmp_path / "work",
+        export_root=tmp_path / "exports",
+        segmentation_model=tmp_path / "models/diarization/segmentation/model.onnx",
+        embedding_model=tmp_path / "models/diarization/embedding/model.onnx",
+        asr_model_path=model_path,
+        runtime_platform=RuntimePlatform.WINDOWS,
+        installed_mode=True,
+        ffmpeg_dir=ffmpeg_dir,
+        app_root=tmp_path / "app",
+        install_state=tmp_path / "runtime/install-state.json",
+    )
+
+    pipeline = create_real_pipeline(config)
+
+    assert isinstance(pipeline.asr, _Engine)
+    assert asr_calls == [
+        {
+            "ffmpeg_path": ffmpeg_dir / "ffmpeg.exe",
+            "model": "Systran/faster-whisper-small",
+            "model_path": model_path,
+            "platform": RuntimePlatform.WINDOWS,
+        }
     ]
 
 

@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from lvt.core.errors import LVTError
+from lvt.core.platform_runtime import RuntimePlatform
 from lvt.engines import media
 
 
@@ -60,6 +61,39 @@ def test_installed_ffmpeg_accepts_app_owned_digest_matched_binaries(tmp_path: Pa
         ffmpeg_dir / "ffmpeg",
         ffmpeg_dir / "ffprobe",
     )
+
+
+def test_installed_ffmpeg_uses_windows_executable_names(tmp_path: Path) -> None:
+    app_root = tmp_path / "app"
+    ffmpeg_dir = app_root / "tools" / "ffmpeg" / "8.0" / "bin"
+    ffmpeg_sha256 = _write_executable(ffmpeg_dir / "ffmpeg.exe", b"verified ffmpeg")
+    ffprobe_sha256 = _write_executable(ffmpeg_dir / "ffprobe.exe", b"verified ffprobe")
+    install_state = tmp_path / "runtime" / "install-state.json"
+    install_state.parent.mkdir(parents=True)
+    install_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ffmpeg": {
+                    "version": "8.0",
+                    "directory": "tools/ffmpeg/8.0/bin",
+                    "sha256": {
+                        "ffmpeg": ffmpeg_sha256,
+                        "ffprobe": ffprobe_sha256,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert media.discover_ffmpeg_binaries(
+        installed_mode=True,
+        ffmpeg_dir=ffmpeg_dir,
+        app_root=app_root,
+        install_state=install_state,
+        runtime_platform=RuntimePlatform.WINDOWS,
+    ) == (ffmpeg_dir / "ffmpeg.exe", ffmpeg_dir / "ffprobe.exe")
 
 
 @pytest.mark.parametrize("filename", ["ffmpeg", "ffprobe"])

@@ -77,6 +77,31 @@ def test_mlx_whisper_uses_requested_persisted_model(tmp_path: Path) -> None:
     )
 
 
+def test_mlx_whisper_uses_app_owned_path_for_installed_default(tmp_path: Path) -> None:
+    audio = tmp_path / "audio.wav"
+    write_wav(audio, [0] * 16_000)
+    model_path = tmp_path / "models/asr/whisper-small-mlx"
+    model_path.mkdir(parents=True)
+    (model_path / "config.json").write_text("{}", encoding="utf-8")
+    (model_path / "weights.npz").write_bytes(b"weights")
+    captured: dict[str, Any] = {}
+
+    def transcribe(_audio: str, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "Hello."}],
+        }
+
+    engine = MLXWhisperASREngine(model_path=model_path, transcribe_fn=transcribe)
+    engine.transcribe_with_model(audio, "mlx-community/whisper-small-mlx")
+
+    assert captured["path_or_hf_repo"] == str(model_path)
+    assert engine.version_for_model("mlx-community/whisper-small-mlx").endswith(
+        "model=mlx-community/whisper-small-mlx"
+    )
+
+
 def test_ffmpeg_normalizer_accepts_verified_sibling_checkpoint_input(
     tmp_path: Path,
 ) -> None:

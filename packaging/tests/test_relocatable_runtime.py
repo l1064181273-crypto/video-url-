@@ -48,6 +48,7 @@ def test_installed_launcher_is_relocatable_and_uses_app_owned_paths(tmp_path: Pa
             "ollama_models": os.environ["OLLAMA_MODELS"],
             "segmentation": str(main.pipeline_config.segmentation_model),
             "embedding": str(main.pipeline_config.embedding_model),
+            "asr_model_path": str(main.pipeline_config.asr_model_path),
             "ollama_url": main.pipeline_config.ollama_url,
             "installed_mode": main.pipeline_config.installed_mode,
             "started": started,
@@ -79,6 +80,7 @@ def test_installed_launcher_is_relocatable_and_uses_app_owned_paths(tmp_path: Pa
     assert payload["embedding"] == str(
         model_root / "diarization" / "embedding" / "nemo_en_titanet_small.onnx"
     )
+    assert payload["asr_model_path"] == str(model_root / "asr" / "whisper-small-mlx")
     assert payload["ollama_url"] == "http://127.0.0.1:11435"
     assert payload["installed_mode"] is True
     assert payload["started"] == {"host": "127.0.0.1", "port": 8765}

@@ -12,7 +12,11 @@ type Manifest = {
   action?: unknown;
   content_security_policy?: unknown;
   content_scripts?: unknown;
+  key?: unknown;
 };
+
+const PACKAGED_EXTENSION_KEY =
+  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxAaMzC93x6TRvNr4A/xGHnQsTGSY6TUhjxeWFWDYRb7WdyLzwnbVkld/BfZF5pec15vegrnqgb/laa3/32TwUzlXlwAfRKwm0uUccL+u0xkZic8vKL1UBpdHldcx1ys8ifoRIaTfs2GakpjB1Iw9xXp4g2k2cMmBxlLL7tQHgcMuGaj7153gj9+qES0hGPy1TEIJGR7UeuwLvTgjYusuolFI+vMfSJmLhMD4FSaAMdv2Yn7E2rT2zzgghyMaH1bPZpqMgdeR794B2qaXqan6zDDevPEFKW2V1Qw4+4o8r3VLYzbFXfSiNMqx2lzmYZ0KRhQynRiOhV0k8kGZz2lx4wIDAQAB";
 
 async function readManifest(): Promise<Manifest> {
   const raw = await readFile(new URL("../../public/manifest.json", import.meta.url), "utf8");
@@ -44,6 +48,12 @@ describe("Manifest V3 permissions", () => {
     expect(manifest.action).toEqual({
       default_title: "打开 Local Video Transcriber",
     });
+  });
+
+  it("pins one extension identity for automatic local pairing", async () => {
+    const manifest = await readManifest();
+
+    expect(manifest.key).toBe(PACKAGED_EXTENSION_KEY);
   });
 
   it("forbids remote, inline, and evaluated extension scripts", async () => {

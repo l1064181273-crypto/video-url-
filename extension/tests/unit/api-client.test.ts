@@ -159,6 +159,39 @@ describe("local API transport security", () => {
 });
 
 describe("typed API client", () => {
+  it("pairs through the fixed unauthenticated route with a non-simple request header", async () => {
+    const connection = new MutableConnectionSource();
+    connection.token = null;
+    const requests: { init: RequestInit; url: string }[] = [];
+    const token = "auto-paired-" + "x".repeat(48);
+    const fetcher = vi.fn<typeof fetch>((input, init) => {
+      requests.push({ url: requestUrl(input), init: init ?? {} });
+      return Promise.resolve(jsonResponse({ token }));
+    });
+    const client = new LocalApiClient(new LocalApiTransport(connection, fetcher));
+
+    await expect(client.pair()).resolves.toBe(token);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(`http://127.0.0.1:${String(PORT)}/api/v1/pairing`);
+    expect(requests[0]?.init.method).toBe("POST");
+    const headers = new Headers(requests[0]?.init.headers);
+    expect(headers.get("X-LVT-Pairing")).toBe("1");
+    expect(headers.has("X-LVT-Token")).toBe(false);
+  });
+
+  it.each([{ token: "short" }, { token: 123 }, {}, []])(
+    "rejects malformed pairing response %#",
+    async (payload) => {
+      const client = new LocalApiClient(
+        new LocalApiTransport(new MutableConnectionSource(), () =>
+          Promise.resolve(jsonResponse(payload)),
+        ),
+      );
+
+      await expect(client.pair()).rejects.toMatchObject({ kind: "invalidResponse" });
+    },
+  );
+
   it("updates worker concurrency with a validated PATCH response", async () => {
     const requests: RequestInit[] = [];
     const fetcher = vi.fn<typeof fetch>((_input, init) => {

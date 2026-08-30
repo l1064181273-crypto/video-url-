@@ -18,7 +18,7 @@
       <section class="connection-section" aria-labelledby="connection-title">
         <div class="section-heading">
           <h2 id="connection-title">扩展本地设置</h2>
-          <span id="token-state" class="token-state">未保存 Token</span>
+          <span id="token-state" class="token-state">等待自动配对</span>
         </div>
         <form id="connection-form" novalidate>
           <div class="connection-fields">
@@ -41,19 +41,19 @@
             </label>
           </div>
           <label class="token-field">
-            <span>配对 Token</span>
+            <span>手动配对 Token（仅排错）</span>
             <input
               id="connection-token"
               name="token"
               type="password"
               autocomplete="off"
               spellcheck="false"
-              placeholder="输入或替换 Token"
+              placeholder="正常情况下无需输入"
             />
           </label>
           <p id="connection-detail" class="connection-detail"></p>
           <div class="connection-actions">
-            <button id="save-connection" type="submit">保存并连接</button>
+            <button id="save-connection" type="submit">保存手动设置</button>
             <button id="reconnect" type="button" class="secondary">重新连接</button>
             <button id="clear-token" type="button" class="danger">清除 Token</button>
           </div>
@@ -79,6 +79,26 @@
             <button type="button" data-concurrency="2" aria-pressed="false" disabled>2</button>
           </div>
         </div>
+        <div class="runtime-setting-row download-location-row">
+          <div>
+            <span class="setting-label">下载位置</span>
+            <p id="download-location-detail" class="setting-description">
+              自动保存到 Chrome 下载目录 / 任务名称
+            </p>
+          </div>
+          <div
+            id="download-location-control"
+            class="segmented-control download-location-control"
+            role="group"
+            aria-label="下载位置"
+          >
+            <button type="button" data-download-mode="automatic" aria-pressed="true">
+              默认目录
+            </button>
+            <button type="button" data-download-mode="prompt" aria-pressed="false">每次选择</button>
+          </div>
+        </div>
+        <p id="download-location-message" class="form-message" role="status"></p>
         <p id="settings-message" class="form-message" role="status"></p>
       </section>
       <section class="capabilities-section" aria-labelledby="capabilities-title">

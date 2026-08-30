@@ -13,25 +13,34 @@ def collect_versions(root: Path) -> dict[str, str]:
     version = (root / "VERSION").read_text(encoding="utf-8").strip()
     pyproject = tomllib.loads((root / "backend/pyproject.toml").read_text(encoding="utf-8"))
     manifest = json.loads((root / "extension/public/manifest.json").read_text(encoding="utf-8"))
+    extension_package = json.loads((root / "extension/package.json").read_text(encoding="utf-8"))
+    release_manifest = json.loads(
+        (root / "packaging/release-manifest.json").read_text(encoding="utf-8")
+    )
     app_source = (root / "backend/src/lvt/api/app.py").read_text(encoding="utf-8")
+    package_source = (root / "backend/src/lvt/__init__.py").read_text(encoding="utf-8")
     fastapi = re.search(r'FastAPI\([^)]*\bversion="([^"]+)"', app_source)
     health = re.search(r'\{"status": "healthy", "version": "([^"]+)"\}', app_source)
-    if fastapi is None or health is None:
+    package = re.search(r'^__version__ = "([^"]+)"$', package_source, re.MULTILINE)
+    if fastapi is None or health is None or package is None:
         raise ValueError("backend app version declarations are missing")
     return {
         "VERSION": version,
         "backend_metadata": str(pyproject["project"]["version"]),
         "backend_fastapi": fastapi.group(1),
         "backend_health": health.group(1),
+        "backend_package": package.group(1),
         "extension_manifest": str(manifest["version"]),
+        "extension_package": str(extension_package["version"]),
+        "release_manifest": str(release_manifest["product"]["version"]),
     }
 
 
 def check_versions(root: Path) -> None:
     versions = collect_versions(root)
     expected = versions["VERSION"]
-    if expected != "0.1.0":
-        raise ValueError(f"VERSION must be 0.1.0, got {expected!r}")
+    if expected != "0.1.1":
+        raise ValueError(f"VERSION must be 0.1.1, got {expected!r}")
     mismatches = {name: value for name, value in versions.items() if value != expected}
     if mismatches:
         raise ValueError(f"version mismatch: {mismatches}")
@@ -46,7 +55,7 @@ def main() -> int:
     except (KeyError, OSError, ValueError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
         print(f"version check failed: {exc}", file=sys.stderr)
         return 1
-    print("version check passed: 0.1.0")
+    print("version check passed: 0.1.1")
     return 0
 
 

@@ -31,6 +31,59 @@ PROJECT_LICENSE = {
     "confirmed_at": "2026-08-24",
     "copyright": "Copyright (c) 2026 Leoy",
 }
+DEPENDENCY_TARGETS = {
+    "macos-arm64": {
+        "architecture": "arm64",
+        "ollama_expected_files": [
+            "Ollama.app/Contents/MacOS/Ollama",
+            "Ollama.app/Contents/Resources/ollama",
+            "Ollama.app/Contents/Resources/llama-server",
+            "Ollama.app/Contents/Resources/llama-quantize",
+        ],
+        "ollama_executable": "Ollama.app/Contents/Resources/ollama",
+        "asr_evidence_ids": [
+            "asr-whisper-small-mlx-config",
+            "asr-whisper-small-mlx-weights",
+        ],
+    },
+    "windows-x64": {
+        "architecture": "x86_64",
+        "ollama_expected_files": [
+            "ollama.exe",
+            "lib/ollama/llama-server.exe",
+            "lib/ollama/llama-quantize.exe",
+        ],
+        "ollama_executable": "ollama.exe",
+        "asr_evidence_ids": [
+            "asr-faster-whisper-small-config",
+            "asr-faster-whisper-small-model",
+            "asr-faster-whisper-small-tokenizer",
+            "asr-faster-whisper-small-vocabulary",
+        ],
+    },
+}
+PYTHON_INVENTORY_FILES = (
+    "python-runtime.json",
+    "python-runtime.windows-x64.json",
+)
+PYTHON_TARGET_ENVIRONMENTS = {
+    "macos-arm64-python3.11": {
+        "python_version": "3.11",
+        "python_full_version": "3.11.15",
+        "sys_platform": "darwin",
+        "platform_system": "Darwin",
+        "platform_machine": "arm64",
+        "implementation_name": "cpython",
+    },
+    "windows-x64-python3.11": {
+        "python_version": "3.11",
+        "python_full_version": "3.11.15",
+        "sys_platform": "win32",
+        "platform_system": "Windows",
+        "platform_machine": "AMD64",
+        "implementation_name": "cpython",
+    },
+}
 QWEN_MANIFEST = {
     "manifest_sha256": "65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b",
     "manifest_size": 857,
@@ -79,6 +132,19 @@ COMPONENT_EVIDENCE = {
         "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
         "required_notice": "Copyright (c) 2022 OpenAI",
     },
+    **{
+        identifier: {
+            "path": "docs/LICENSES/Whisper-MIT.txt",
+            "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+            "required_notice": "Copyright (c) 2022 OpenAI",
+        }
+        for identifier in (
+            "asr-faster-whisper-small-config",
+            "asr-faster-whisper-small-model",
+            "asr-faster-whisper-small-tokenizer",
+            "asr-faster-whisper-small-vocabulary",
+        )
+    },
     "diarization-segmentation": {
         "path": "docs/LICENSES/Pyannote-Segmentation-MIT.txt",
         "sha256": "63a777ad4b3c7aed4b260b084d8fb49ec781c46c70c6b599ca5d2402ef7ebe50",
@@ -122,13 +188,16 @@ def _validate_expected_files(value: Any, identifier: str) -> None:
 
 
 def validate_dependency_manifest(payload: dict[str, Any]) -> None:
-    if payload.get("schema_version") != 1 or payload.get("target") != "macos-arm64":
+    target = payload.get("target")
+    if payload.get("schema_version") != 1 or target not in DEPENDENCY_TARGETS:
         raise ValueError("dependency manifest schema or target is invalid")
+    target_contract = DEPENDENCY_TARGETS[str(target)]
+    architecture = target_contract["architecture"]
     if payload.get("trust_policy") != {
         "allow_runtime_digest_rewrite": False,
         "allow_floating_tags": False,
         "allowed_schemes": ["https"],
-        "allowed_architectures": ["arm64"],
+        "allowed_architectures": [architecture],
     }:
         raise ValueError("dependency trust policy is not strict")
 
@@ -146,8 +215,8 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
                 raise ValueError("FFmpeg URL resolves to a Git LFS pointer")
             if not url.startswith("https://media.githubusercontent.com/media/zackees/ffmpeg_bins/"):
                 raise ValueError("FFmpeg must use the pinned GitHub media URL")
-        if item.get("architecture") != "arm64":
-            raise ValueError(f"dependency architecture is not arm64: {identifier}")
+        if item.get("architecture") != architecture:
+            raise ValueError(f"dependency architecture is not {architecture}: {identifier}")
         if not isinstance(item.get("sha256"), str) or not SHA256.fullmatch(item["sha256"]):
             raise ValueError(f"dependency SHA-256 is invalid: {identifier}")
         if (
@@ -169,12 +238,9 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
         ):
             raise ValueError(f"license source is not immutable HTTPS: {identifier}")
         if identifier == "ollama":
-            if item.get("expected_files") != [
-                "Ollama.app/Contents/MacOS/Ollama",
-                "Ollama.app/Contents/Resources/ollama",
-            ]:
-                raise ValueError("Ollama expected files must preserve GUI and CLI paths")
-            if item.get("executable") != "Ollama.app/Contents/Resources/ollama":
+            if item.get("expected_files") != target_contract["ollama_expected_files"]:
+                raise ValueError("Ollama expected files do not match the platform archive")
+            if item.get("executable") != target_contract["ollama_executable"]:
                 raise ValueError("Ollama executable must be the CLI/daemon")
         if identifier == "hy-mt2":
             if item.get("license_url") != (
@@ -206,8 +272,8 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
         url = model.get("manifest_url")
         if not isinstance(url, str) or urlsplit(url).scheme != "https" or FLOATING.search(url):
             raise ValueError(f"Ollama manifest URL is not pinned HTTPS: {identifier}")
-        if model.get("architecture") != "arm64":
-            raise ValueError(f"Ollama model architecture is not arm64: {identifier}")
+        if model.get("architecture") != architecture:
+            raise ValueError(f"Ollama model architecture is not {architecture}: {identifier}")
         if not isinstance(model.get("manifest_sha256"), str) or not SHA256.fullmatch(
             model["manifest_sha256"]
         ):
@@ -260,7 +326,18 @@ def validate_dependency_manifest(payload: dict[str, Any]) -> None:
 
 def validate_component_license_evidence(root: Path, payload: dict[str, Any]) -> None:
     components = {item["id"]: item for item in [*payload["artifacts"], *payload["ollama_models"]]}
-    for identifier, expected in COMPONENT_EVIDENCE.items():
+    target = str(payload.get("target"))
+    if target not in DEPENDENCY_TARGETS:
+        raise ValueError("dependency manifest target is invalid")
+    identifiers = [
+        "ollama",
+        *DEPENDENCY_TARGETS[target]["asr_evidence_ids"],
+        "diarization-segmentation",
+        "hy-mt2",
+        "qwen2.5-1.5b",
+    ]
+    for identifier in identifiers:
+        expected = COMPONENT_EVIDENCE[identifier]
         evidence = components[identifier].get("license_evidence")
         if evidence != expected:
             raise ValueError(f"component license evidence metadata mismatch: {identifier}")
@@ -281,7 +358,13 @@ def validate_component_license_evidence(root: Path, payload: dict[str, Any]) -> 
         raise ValueError("Hy-MT2 GGUF README does not prove the base-model relationship")
 
 
-def _export_packages(root: Path, uv: str, *, dev: bool) -> dict[str, str]:
+def _export_packages(
+    root: Path,
+    uv: str,
+    *,
+    dev: bool,
+    target: str = "macos-arm64-python3.11",
+) -> dict[str, str]:
     command = [
         uv,
         "export",
@@ -298,17 +381,10 @@ def _export_packages(root: Path, uv: str, *, dev: bool) -> dict[str, str]:
     else:
         command.append("--no-dev")
     completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    if target not in PYTHON_TARGET_ENVIRONMENTS:
+        raise ValueError(f"unsupported Python inventory target: {target}")
     environment = default_environment()
-    environment.update(
-        {
-            "python_version": "3.11",
-            "python_full_version": "3.11.15",
-            "sys_platform": "darwin",
-            "platform_system": "Darwin",
-            "platform_machine": "arm64",
-            "implementation_name": "cpython",
-        }
-    )
+    environment.update(PYTHON_TARGET_ENVIRONMENTS[target])
     packages: dict[str, str] = {}
     for line in completed.stdout.splitlines():
         line = line.strip()
@@ -326,15 +402,18 @@ def _export_packages(root: Path, uv: str, *, dev: bool) -> dict[str, str]:
     return packages
 
 
-def validate_python_inventory(root: Path, uv: str) -> int:
-    inventory_path = root / "docs/LICENSES/python-runtime.json"
+def _validate_python_inventory_file(root: Path, uv: str, filename: str) -> tuple[str, int]:
+    inventory_path = root / "docs/LICENSES" / filename
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    target = inventory.get("target")
+    if not isinstance(target, str) or target not in PYTHON_TARGET_ENVIRONMENTS:
+        raise ValueError(f"Python inventory target is invalid: {filename}")
     lock_path = root / inventory["lock_file"]
     if inventory["lock_sha256"] != _sha256(lock_path):
         raise ValueError("Python inventory uv.lock fingerprint mismatch")
 
-    runtime = _export_packages(root, uv, dev=False)
-    development = _export_packages(root, uv, dev=True)
+    runtime = _export_packages(root, uv, dev=False, target=target)
+    development = _export_packages(root, uv, dev=True, target=target)
     expected = set(development)
     entries = inventory["packages"]
     by_name = {item["package"]: item for item in entries}
@@ -364,7 +443,23 @@ def validate_python_inventory(root: Path, uv: str) -> int:
             raise ValueError(f"Python inventory license source mismatch: {name}")
         if item.get("lock_ref") != f"backend/uv.lock:{name}=={version}":
             raise ValueError(f"Python inventory lock trace mismatch: {name}")
-    return len(entries)
+    return target, len(entries)
+
+
+def validate_python_inventories(root: Path, uv: str) -> dict[str, int]:
+    validated: dict[str, int] = {}
+    for filename in PYTHON_INVENTORY_FILES:
+        target, count = _validate_python_inventory_file(root, uv, filename)
+        if target in validated:
+            raise ValueError(f"duplicate Python inventory target: {target}")
+        validated[target] = count
+    if set(validated) != set(PYTHON_TARGET_ENVIRONMENTS):
+        raise ValueError("Python inventory targets are incomplete")
+    return validated
+
+
+def validate_python_inventory(root: Path, uv: str) -> int:
+    return validate_python_inventories(root, uv)["macos-arm64-python3.11"]
 
 
 def validate_npm_inventory(root: Path) -> int:
@@ -409,16 +504,20 @@ def check_inventory(root: Path, uv: str) -> tuple[int, int]:
     dependencies = json.loads((root / "packaging/dependencies.json").read_text(encoding="utf-8"))
     validate_dependency_manifest(dependencies)
     validate_component_license_evidence(root, dependencies)
-    python_count = validate_python_inventory(root, uv)
+    python_inventories = validate_python_inventories(root, uv)
+    python_count = python_inventories["macos-arm64-python3.11"]
     npm_count = validate_npm_inventory(root)
 
     notice = (root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
     for marker in (
         "Copyright (c) 2026 Leoy",
-        "67 runtime",
+        "68 runtime",
         "10 development-only",
+        "63 Windows x64 runtime",
+        "10 Windows x64 development-only",
         "166 development/build-only",
         "docs/LICENSES/python-runtime.json",
+        "docs/LICENSES/python-runtime.windows-x64.json",
         "docs/LICENSES/npm-all.json",
         "docs/LICENSES/Ollama-MIT.txt",
         "docs/LICENSES/Whisper-MIT.txt",
@@ -435,6 +534,8 @@ def check_inventory(root: Path, uv: str) -> tuple[int, int]:
         "Apache-2.0.txt": ("Apache License", 10000),
         "GPL-3.0-or-later.txt": ("GNU GENERAL PUBLIC LICENSE", 30000),
         "PSF-2.0.txt": ("PYTHON SOFTWARE FOUNDATION LICENSE", 10000),
+        "Faster-Whisper-MIT.txt": ("Copyright (c) 2023 SYSTRAN", 1000),
+        "CTranslate2-MIT.txt": ("Copyright (c) 2018-     SYSTRAN.", 1000),
     }
     for filename, (marker, minimum_size) in required_texts.items():
         text = (root / "docs/LICENSES" / filename).read_text(encoding="utf-8")

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
+import re
 import select
+import stat
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import Protocol
 
 from lvt.core.errors import LVTError
@@ -52,6 +55,14 @@ class WorkerShutdownError(RuntimeError):
 
 class WorkerStartupError(RuntimeError):
     pass
+
+
+class ActivationGate(Protocol):
+    def start(self) -> None: ...
+
+    def wait(self, stop: threading.Event) -> bool: ...
+
+    def close(self) -> None: ...
 
 
 class ActivationBarrier:
@@ -122,6 +133,117 @@ class ActivationBarrier:
             self._closed.set()
 
 
+class FileActivationBarrier:
+    def __init__(self, path: Path, token: str) -> None:
+        if (
+            not path.is_absolute()
+            or not isinstance(token, str)
+            or re.fullmatch(r"[0-9a-f]{32}", token) is None
+        ):
+            raise ValueError("file activation barrier configuration is invalid")
+        self.path = path
+        self.token = token
+        self._activated = threading.Event()
+        self._closed = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
+        self._activation_count = 0
+
+    @property
+    def activated(self) -> bool:
+        return self._activated.is_set()
+
+    @property
+    def activation_count(self) -> int:
+        with self._state_lock:
+            return self._activation_count
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._watch,
+            name="lvt-precommit-file-activation",
+            daemon=False,
+        )
+        self._thread.start()
+
+    def wait(self, stop: threading.Event) -> bool:
+        while not self._activated.is_set():
+            if stop.is_set():
+                return False
+            self._activated.wait(0.05)
+            if self._closed.is_set() and not self._activated.is_set():
+                return False
+        return True
+
+    def wait_closed(self, timeout: float | None = None) -> bool:
+        return self._closed.wait(timeout)
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    def _read_token(self) -> bool:
+        try:
+            named_before = self.path.lstat()
+            if (
+                self.path.is_symlink()
+                or bool(
+                    getattr(named_before, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                )
+                or not stat.S_ISREG(named_before.st_mode)
+                or named_before.st_nlink != 1
+                or named_before.st_size != len(self.token) + 1
+            ):
+                return False
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.path, flags)
+            try:
+                opened_before = os.fstat(descriptor)
+                content = os.read(descriptor, len(self.token) + 2)
+                opened_after = os.fstat(descriptor)
+                named_after = self.path.stat(follow_symlinks=False)
+            finally:
+                os.close(descriptor)
+            identities = {
+                (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                )
+                for metadata in (
+                    named_before,
+                    opened_before,
+                    opened_after,
+                    named_after,
+                )
+            }
+            return len(identities) == 1 and content == f"{self.token}\n".encode("ascii")
+        except OSError:
+            return False
+
+    def _watch(self) -> None:
+        try:
+            while not self._stop.is_set():
+                if not self.path.exists() and not self.path.is_symlink():
+                    self._stop.wait(0.05)
+                    continue
+                if self._read_token():
+                    with self._state_lock:
+                        if not self._activated.is_set():
+                            self._activation_count += 1
+                            self._activated.set()
+                return
+        finally:
+            self._closed.set()
+
+
 class CancelRequestResult(StrEnum):
     CANCELLED = "cancelled"
     CANCELLING = "cancelling"
@@ -176,7 +298,7 @@ class JobWorkerPool:
         clock: Clock | None = None,
         poll_interval: float = 0.25,
         worker_park_hook: Callable[[int], None] | None = None,
-        activation_barrier: ActivationBarrier | None = None,
+        activation_barrier: ActivationGate | None = None,
     ) -> None:
         if type(concurrency) is not int or concurrency not in {1, 2}:
             raise ValueError("worker concurrency must be 1 or 2")

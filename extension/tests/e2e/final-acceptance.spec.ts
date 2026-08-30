@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 
 import {
   chromium,
@@ -19,7 +19,11 @@ import { cleanupE2eResources, stopProcess } from "../support/e2e-resources";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "../../..");
 const BACKEND_ROOT = resolve(PROJECT_ROOT, "backend");
-const PYTHON = resolve(PROJECT_ROOT, ".venv-smoke/bin/python");
+const PYTHON =
+  process.env.LVT_E2E_PYTHON ??
+  (process.platform === "win32"
+    ? resolve(BACKEND_ROOT, ".venv/Scripts/python.exe")
+    : resolve(PROJECT_ROOT, ".venv-smoke/bin/python"));
 const EXTENSION_PATH = resolve(PROJECT_ROOT, "extension/dist");
 const TOKEN = "PhaseThreeFinalAcceptanceToken";
 const LIFECYCLE_PING = "lvt.lifecycle.ping";
@@ -216,6 +220,9 @@ function startBackend(port: number, dataRoot: string): ChildProcessWithoutNullSt
         ...process.env,
         LVT_DATA_ROOT: dataRoot,
         LVT_TOKEN: TOKEN,
+        PYTHONPATH: [resolve(BACKEND_ROOT, "src"), process.env.PYTHONPATH]
+          .filter((value): value is string => value !== undefined && value.length > 0)
+          .join(delimiter),
         PYTHONUNBUFFERED: "1",
       },
       stdio: "pipe",
@@ -322,7 +329,9 @@ async function waitForOutput(child: ChildProcessWithoutNullStreams, marker: stri
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       cleanup();
       reject(
-        new Error(`Uvicorn exited before startup: code=${String(code)} signal=${String(signal)}`),
+        new Error(
+          `Uvicorn exited before startup: code=${String(code)} signal=${String(signal)}\n${output}`,
+        ),
       );
     };
     const cleanup = () => {

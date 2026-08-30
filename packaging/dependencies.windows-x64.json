@@ -1,0 +1,280 @@
+{
+  "schema_version": 1,
+  "target": "windows-x64",
+  "artifacts": [
+    {
+      "id": "uv",
+      "kind": "tool",
+      "version": "0.11.25",
+      "architecture": "x86_64",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.11.25/uv-x86_64-pc-windows-msvc.zip",
+      "sha256": "15bfd1423b7eaa7aae949922d4712ebaac2bb44a81af64ab59bbe007090cb0d0",
+      "size": 24889479,
+      "media_type": "application/zip",
+      "license": "Apache-2.0 OR MIT",
+      "license_url": "https://github.com/astral-sh/uv/blob/0.11.25/LICENSE-APACHE",
+      "expected_files": [
+        "uv-x86_64-pc-windows-msvc/uv.exe",
+        "uv-x86_64-pc-windows-msvc/uvx.exe"
+      ]
+    },
+    {
+      "id": "python",
+      "kind": "runtime",
+      "version": "3.11.15+20260623",
+      "architecture": "x86_64",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.11.15%2B20260623-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "sha256": "6589ca6d63f520bec4096d62b3ab91da3d0a80b16b594c99a6b677e335814683",
+      "size": 25682043,
+      "media_type": "application/gzip",
+      "license": "PSF-2.0",
+      "license_url": "https://raw.githubusercontent.com/python/cpython/v3.11.15/LICENSE",
+      "expected_files": [
+        "python/python.exe",
+        "python/python311.dll"
+      ]
+    },
+    {
+      "id": "ffmpeg",
+      "kind": "tool",
+      "version": "8.0",
+      "architecture": "x86_64",
+      "url": "https://media.githubusercontent.com/media/zackees/ffmpeg_bins/df95abcb0ce6efff710dda5ef28a2f6f1dc21493/v8.0/win32.zip",
+      "sha256": "92662c2241e93fe71b3f3a01e94a0b0dc8cfad726019f96b83bc109ce44c5d0b",
+      "size": 72065209,
+      "media_type": "application/zip",
+      "license": "GPL-3.0-or-later",
+      "license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0/COPYING.GPLv3",
+      "expected_files": [
+        "win32/ffmpeg.exe",
+        "win32/ffprobe.exe"
+      ]
+    },
+    {
+      "id": "ollama",
+      "kind": "tool",
+      "version": "0.32.15",
+      "architecture": "x86_64",
+      "url": "https://github.com/ollama/ollama/releases/download/v0.32.15/ollama-windows-amd64.zip",
+      "sha256": "a1d11d46a944f9c7521f5e9a3a5db51cd3365401da627d96c204698fc6914ff9",
+      "size": 1460302386,
+      "media_type": "application/zip",
+      "license": "MIT",
+      "license_url": "https://raw.githubusercontent.com/ollama/ollama/v0.32.15/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Ollama-MIT.txt",
+        "sha256": "5934ed2ce0d15154bcdb9c85203210abac0da4314af34081e36df4599f90b226",
+        "required_notice": "Copyright (c) Ollama"
+      },
+      "expected_files": [
+        "ollama.exe",
+        "lib/ollama/llama-server.exe",
+        "lib/ollama/llama-quantize.exe"
+      ],
+      "executable": "ollama.exe"
+    },
+    {
+      "id": "asr-faster-whisper-small-config",
+      "kind": "model",
+      "version": "536b0662742c02347bc0e980a01041f333bce120",
+      "architecture": "x86_64",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/config.json",
+      "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828",
+      "size": 2370,
+      "media_type": "application/json",
+      "license": "MIT",
+      "license_url": "https://raw.githubusercontent.com/openai/whisper/5f86d1d86363843179951550570367b37c5d6f78/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Whisper-MIT.txt",
+        "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+        "required_notice": "Copyright (c) 2022 OpenAI"
+      },
+      "expected_files": [
+        "models/asr/faster-whisper-small/config.json"
+      ]
+    },
+    {
+      "id": "asr-faster-whisper-small-model",
+      "kind": "model",
+      "version": "536b0662742c02347bc0e980a01041f333bce120",
+      "architecture": "x86_64",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin",
+      "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671",
+      "size": 483546902,
+      "media_type": "application/octet-stream",
+      "license": "MIT",
+      "license_url": "https://raw.githubusercontent.com/openai/whisper/5f86d1d86363843179951550570367b37c5d6f78/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Whisper-MIT.txt",
+        "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+        "required_notice": "Copyright (c) 2022 OpenAI"
+      },
+      "expected_files": [
+        "models/asr/faster-whisper-small/model.bin"
+      ]
+    },
+    {
+      "id": "asr-faster-whisper-small-tokenizer",
+      "kind": "model",
+      "version": "536b0662742c02347bc0e980a01041f333bce120",
+      "architecture": "x86_64",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json",
+      "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+      "size": 2203239,
+      "media_type": "application/json",
+      "license": "MIT",
+      "license_url": "https://raw.githubusercontent.com/openai/whisper/5f86d1d86363843179951550570367b37c5d6f78/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Whisper-MIT.txt",
+        "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+        "required_notice": "Copyright (c) 2022 OpenAI"
+      },
+      "expected_files": [
+        "models/asr/faster-whisper-small/tokenizer.json"
+      ]
+    },
+    {
+      "id": "asr-faster-whisper-small-vocabulary",
+      "kind": "model",
+      "version": "536b0662742c02347bc0e980a01041f333bce120",
+      "architecture": "x86_64",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt",
+      "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+      "size": 459861,
+      "media_type": "text/plain",
+      "license": "MIT",
+      "license_url": "https://raw.githubusercontent.com/openai/whisper/5f86d1d86363843179951550570367b37c5d6f78/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Whisper-MIT.txt",
+        "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+        "required_notice": "Copyright (c) 2022 OpenAI"
+      },
+      "expected_files": [
+        "models/asr/faster-whisper-small/vocabulary.txt"
+      ]
+    },
+    {
+      "id": "diarization-segmentation",
+      "kind": "model",
+      "version": "pyannote-segmentation-3.0-onnx",
+      "architecture": "x86_64",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+      "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
+      "size": 6958444,
+      "expected_file_size": 5992913,
+      "expected_file_sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+      "media_type": "application/x-bzip2",
+      "license": "MIT",
+      "license_url": "https://huggingface.co/pyannote/segmentation-3.0/resolve/e66f3d3b9eb0873085418a7b813d3b369bf160bb/LICENSE",
+      "license_evidence": {
+        "path": "docs/LICENSES/Pyannote-Segmentation-MIT.txt",
+        "sha256": "63a777ad4b3c7aed4b260b084d8fb49ec781c46c70c6b599ca5d2402ef7ebe50",
+        "required_notice": "Copyright (c) 2023 CNRS"
+      },
+      "expected_files": [
+        "models/diarization/segmentation/model.onnx"
+      ]
+    },
+    {
+      "id": "diarization-embedding",
+      "kind": "model",
+      "version": "nemo-en-titanet-small",
+      "architecture": "x86_64",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+      "sha256": "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
+      "size": 40257283,
+      "media_type": "application/onnx",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/NVIDIA/NeMo/blob/v1.19.0/LICENSE",
+      "expected_files": [
+        "models/diarization/embedding/nemo_en_titanet_small.onnx"
+      ]
+    },
+    {
+      "id": "hy-mt2",
+      "kind": "model",
+      "version": "1cd5208700acedef4ef93019b6cfc148b8522d45",
+      "architecture": "x86_64",
+      "url": "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/1cd5208700acedef4ef93019b6cfc148b8522d45/Hy-MT2-1.8B-Q4_K_M.gguf",
+      "sha256": "dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699",
+      "size": 1133080448,
+      "media_type": "application/octet-stream",
+      "license": "Apache-2.0",
+      "license_url": "https://huggingface.co/tencent/Hy-MT2-1.8B/resolve/9a341cd1b679d3efd23b46e847b01745a71ed792/LICENSE.txt",
+      "license_evidence": {
+        "path": "docs/LICENSES/Hy-MT2-Apache-2.0.txt",
+        "sha256": "1af3c6dc0c697277cbb6b68720787c1caa43a79c5626bf9f19cd8c00de9c8cd4",
+        "required_notice": "Copyright (C) 2026 Tencent. All rights reserved."
+      },
+      "license_basis": {
+        "base_model": "tencent/Hy-MT2-1.8B",
+        "readme_url": "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/1cd5208700acedef4ef93019b6cfc148b8522d45/README.md",
+        "readme_sha256": "4c37a2e6b69773b102027c71e1d5377946d697c927c2604f91af5cdd5624f91f",
+        "evidence_path": "docs/LICENSES/Hy-MT2-GGUF-README.md",
+        "evidence_sha256": "4319879604ecb49e6998d3e2623525600b346e75501ebd0c1ce25abec0c9f05f"
+      },
+      "expected_files": [
+        "models/ollama/blobs/sha256-dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699"
+      ]
+    }
+  ],
+  "ollama_models": [
+    {
+      "id": "qwen2.5-1.5b",
+      "version": "1.5b",
+      "architecture": "x86_64",
+      "manifest_url": "https://registry.ollama.ai/v2/library/qwen2.5/manifests/1.5b",
+      "manifest_sha256": "65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b",
+      "manifest_size": 857,
+      "manifest_media_type": "application/vnd.docker.distribution.manifest.v2+json",
+      "license": "Apache-2.0",
+      "license_url": "https://registry.ollama.ai/v2/library/qwen2.5/blobs/sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+      "license_evidence": {
+        "path": "docs/LICENSES/Qwen2.5-Apache-2.0.txt",
+        "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+        "size": 11343,
+        "required_notice": "Copyright 2024 Alibaba Cloud"
+      },
+      "expected_files": [
+        "models/ollama/manifests/registry.ollama.ai/library/qwen2.5/1.5b"
+      ],
+      "blobs": [
+        {
+          "digest": "sha256:377ac4d7aeefd5b870c9fccff9a6d4df36901d99fe3277c2f755bc401601ba1c",
+          "size": 487,
+          "media_type": "application/vnd.docker.container.image.v1+json"
+        },
+        {
+          "digest": "sha256:183715c435899236895da3869489cc30ac241476b4971a20285b1a462818a5b4",
+          "size": 986048512,
+          "media_type": "application/vnd.ollama.image.model"
+        },
+        {
+          "digest": "sha256:66b9ea09bd5b7099cbb4fc820f31b575c0366fa439b08245566692c6784e281e",
+          "size": 68,
+          "media_type": "application/vnd.ollama.image.system"
+        },
+        {
+          "digest": "sha256:eb4402837c7829a690fa845de4d7f3fd842c2adee476d5341da8a46ea9255175",
+          "size": 1482,
+          "media_type": "application/vnd.ollama.image.template"
+        },
+        {
+          "digest": "sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+          "size": 11343,
+          "media_type": "application/vnd.ollama.image.license"
+        }
+      ]
+    }
+  ],
+  "trust_policy": {
+    "allow_runtime_digest_rewrite": false,
+    "allow_floating_tags": false,
+    "allowed_schemes": [
+      "https"
+    ],
+    "allowed_architectures": [
+      "x86_64"
+    ]
+  }
+}

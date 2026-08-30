@@ -59,7 +59,9 @@
       },
       "expected_files": [
         "Ollama.app/Contents/MacOS/Ollama",
-        "Ollama.app/Contents/Resources/ollama"
+        "Ollama.app/Contents/Resources/ollama",
+        "Ollama.app/Contents/Resources/llama-server",
+        "Ollama.app/Contents/Resources/llama-quantize"
       ],
       "executable": "Ollama.app/Contents/Resources/ollama"
     },

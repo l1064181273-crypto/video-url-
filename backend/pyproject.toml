@@ -4,15 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-video-transcriber"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local video transcription, diarization, translation, and export service"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "fastapi>=0.116,<1",
-  "mlx-whisper==0.4.3",
+  "mlx-whisper==0.4.3; sys_platform == 'darwin'",
+  "faster-whisper==1.2.1; sys_platform == 'win32'",
   "numpy>=2.4,<3",
   "pydantic>=2.11,<3",
   "sherpa-onnx==1.13.6",
+  "sherpa-onnx-core==1.13.6",
   "srt>=3.5,<4",
   "static-ffmpeg==3.0",
   "uvicorn>=0.35,<1",

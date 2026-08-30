@@ -11,7 +11,9 @@ from lvt.core.capabilities import (
     LocalCapabilityProbes,
 )
 from lvt.core.config import Settings
+from lvt.core.platform_runtime import executable_name
 from lvt.db.repository import JobRepository
+from lvt.engines.asr_factory import asr_runtime_profile
 from lvt.pipeline.factory import RealPipelineConfig, create_real_pipeline
 from lvt.pipeline.runner import Pipeline
 from lvt.security.token import load_or_create_token
@@ -20,6 +22,7 @@ settings = Settings.from_env()
 settings.configure_model_environment()
 settings.ensure_directories()
 assert settings.model_root is not None
+asr_profile = asr_runtime_profile()
 pipeline_config = RealPipelineConfig(
     work_root=settings.data_root / "work",
     export_root=settings.data_root / "exports",
@@ -28,17 +31,32 @@ pipeline_config = RealPipelineConfig(
     / "diarization"
     / "embedding"
     / "nemo_en_titanet_small.onnx",
+    asr_model_path=(
+        settings.model_root / asr_profile.installed_model_directory
+        if settings.installed_mode
+        else None
+    ),
+    runtime_platform=asr_profile.platform,
     ollama_url=settings.ollama_url,
     installed_mode=settings.installed_mode,
     ffmpeg_dir=settings.ffmpeg_dir,
     app_root=settings.data_root / "app",
     install_state=settings.install_state,
 )
-ffmpeg_path = settings.ffmpeg_dir / "ffmpeg" if settings.ffmpeg_dir else None
-ffprobe_path = settings.ffmpeg_dir / "ffprobe" if settings.ffmpeg_dir else None
+ffmpeg_path = (
+    settings.ffmpeg_dir / executable_name("ffmpeg", asr_profile.platform)
+    if settings.ffmpeg_dir
+    else None
+)
+ffprobe_path = (
+    settings.ffmpeg_dir / executable_name("ffprobe", asr_profile.platform)
+    if settings.ffmpeg_dir
+    else None
+)
 local_capability_probes = LocalCapabilityProbes(
     LocalCapabilitiesConfig(
         asr_model=pipeline_config.asr_model,
+        asr_model_path=pipeline_config.asr_model_path,
         segmentation_model=pipeline_config.segmentation_model,
         embedding_model=pipeline_config.embedding_model,
         ollama_url=pipeline_config.ollama_url,
@@ -48,6 +66,8 @@ local_capability_probes = LocalCapabilityProbes(
         ffmpeg_path=ffmpeg_path,
         ffprobe_path=ffprobe_path,
         strict_ffmpeg=settings.installed_mode,
+        asr_package_name=asr_profile.package_name,
+        asr_required_model_files=asr_profile.required_model_files,
     )
 )
 capabilities_provider = CapabilitiesProvider(

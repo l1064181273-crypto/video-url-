@@ -5,11 +5,14 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+
+from runtime_layout import path_is_link_like
 
 SCHEMA_VERSION = 1
 SLOTS = ("slot-a.json", "slot-b.json")
@@ -154,10 +157,21 @@ def _validate_uuid(value: Any) -> bool:
 
 
 def _validate_identity(value: Any) -> bool:
-    if not isinstance(value, dict) or value.get("kind") not in {"absent", "symlink", "tree"}:
+    if not isinstance(value, dict) or value.get("kind") not in {
+        "absent",
+        "file",
+        "symlink",
+        "tree",
+    }:
         return False
     if value["kind"] == "absent":
         return set(value) == {"kind"}
+    if value["kind"] == "file":
+        return (
+            set(value) == {"kind", "sha256"}
+            and isinstance(value.get("sha256"), str)
+            and len(value["sha256"]) == 64
+        )
     if value["kind"] == "symlink":
         return (
             set(value) == {"kind", "target", "sha256"}
@@ -372,7 +386,7 @@ class TransactionJournal:
         current = Path(self.root.anchor)
         for part in self.root.parts[1:]:
             current /= part
-            if current.is_symlink():
+            if path_is_link_like(current):
                 raise JournalError("journal root contains a symlink")
             if not current.exists():
                 self._failpoint(f"root:before_mkdir:{current.name}")
@@ -381,7 +395,7 @@ class TransactionJournal:
                 self._failpoint(f"root:before_parent_fsync:{current.name}")
                 _fsync_directory(current.parent)
                 self._failpoint(f"root:after_parent_fsync:{current.name}")
-        if self.root.is_symlink() or not self.root.is_dir():
+        if path_is_link_like(self.root) or not self.root.is_dir():
             raise JournalError("journal root is unsafe")
         self.root.chmod(0o700)
         marker = self.root / JOURNAL_MARKER
@@ -393,22 +407,27 @@ class TransactionJournal:
                 0o600,
             )
             try:
-                os.write(descriptor, b"1\n")
+                view = memoryview(b"1\n")
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise JournalError("journal marker write made no progress")
+                    view = view[written:]
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
             self._failpoint("root:after_marker_write")
             _fsync_directory(self.root)
-        elif marker.is_symlink() or marker.read_bytes() != b"1\n":
+        elif path_is_link_like(marker) or marker.read_bytes() != b"1\n":
             raise JournalError("journal marker is corrupt")
 
     def _valid_entries(self) -> list[JournalEntry]:
         if not self.root.exists():
             return []
-        if self.root.is_symlink() or not self.root.is_dir():
+        if path_is_link_like(self.root) or not self.root.is_dir():
             raise JournalError("journal root is unsafe")
         marker = self.root / JOURNAL_MARKER
-        if marker.is_symlink() or not marker.is_file() or marker.read_bytes() != b"1\n":
+        if path_is_link_like(marker) or not marker.is_file() or marker.read_bytes() != b"1\n":
             raise JournalError("journal marker is corrupt")
         entries: list[JournalEntry] = []
         for name in SLOTS:
@@ -424,11 +443,11 @@ class TransactionJournal:
         try:
             metadata = path.lstat()
             if (
-                path.is_symlink()
+                path_is_link_like(path)
                 or not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.geteuid()
+                or not _owned_by_current_user(metadata)
                 or metadata.st_nlink != 1
-                or metadata.st_mode & 0o777 != 0o600
+                or (sys.platform != "win32" and metadata.st_mode & 0o777 != 0o600)
             ):
                 return None
             envelope = json.loads(path.read_text(encoding="utf-8"))
@@ -539,6 +558,12 @@ class TransactionJournal:
             if payload["state"] != "PREPARED" or payload["decision"] != "pending":
                 raise JournalError("journal transaction must start prepared")
             return
+        if payload["state"] == "ACTIVATED" and not any(
+            item.payload["state"] in {"COMMITTED", "ACTIVATED"}
+            and item.payload["decision"] in {"committed", "activated"}
+            for item in entries
+        ):
+            raise JournalError("ACTIVATED requires a durable COMMITTED decision")
         latest = max(entries, key=lambda item: item.generation).payload
         if latest["transaction_id"] != payload["transaction_id"]:
             if not (
@@ -617,8 +642,26 @@ class TransactionJournal:
 
 
 def _fsync_directory(path: Path) -> None:
+    if sys.platform == "win32":
+        from windows_publication import NativeWindowsPublicationApi
+
+        api = NativeWindowsPublicationApi()
+        handles = api.open_parent_chain(PureWindowsPath(str(path)))
+        if not handles:
+            raise JournalError("journal directory handle is unavailable")
+        try:
+            api.flush_directory(handles[-1])
+        finally:
+            for handle in reversed(handles):
+                api.close_handle(handle)
+        return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _owned_by_current_user(metadata: os.stat_result) -> bool:
+    getuid = getattr(os, "geteuid", None)
+    return getuid is None or metadata.st_uid == getuid()

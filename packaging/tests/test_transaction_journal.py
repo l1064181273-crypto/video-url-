@@ -210,6 +210,38 @@ def test_canonical_json_is_stable_and_compact() -> None:
     assert canonical_json({"b": 2, "a": 1}) == b'{"a":1,"b":2}'
 
 
+def test_activated_requires_durable_committed_barrier(tmp_path: Path) -> None:
+    journal = TransactionJournal(tmp_path / "journal")
+    prepared = journal.write_progress(_payload())
+    activated = {
+        **prepared.payload,
+        "state": "ACTIVATED",
+        "decision": "activated",
+        "substate": {**prepared.payload["substate"], "cleanup": "intent_written"},
+    }
+
+    with pytest.raises(JournalError, match="COMMITTED"):
+        journal.write_critical(activated)
+
+
+def test_windows_current_pointer_file_identity_is_valid(tmp_path: Path) -> None:
+    journal = TransactionJournal(tmp_path / "journal")
+    payload = _payload()
+    payload["paths"]["current"] = {
+        "live": "app/current.json",
+        "next": "app/current.next.json",
+        "previous": "app/current.previous.json",
+    }
+    payload["identities"]["current"]["new"] = {
+        "kind": "file",
+        "sha256": "3" * 64,
+    }
+
+    entry = journal.write_progress(payload)
+
+    assert entry.payload["identities"]["current"]["new"]["kind"] == "file"
+
+
 @pytest.mark.parametrize(
     "boundary",
     [

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ConnectionSettingsStorage,
   DEFAULT_BACKEND_PORT,
+  DownloadPreferenceStorage,
   type TrustedStorageArea,
 } from "../../src/storage/settings";
 
@@ -97,5 +98,24 @@ describe("ConnectionSettingsStorage", () => {
       tokenConfigured: false,
     });
     await expect(storage.getCredentials()).resolves.toBeNull();
+  });
+});
+
+describe("DownloadPreferenceStorage", () => {
+  it("defaults to automatic downloads and persists a request to choose each location", async () => {
+    const area = new FakeStorageArea();
+    const storage = new DownloadPreferenceStorage(area);
+
+    await expect(storage.getMode()).resolves.toBe("automatic");
+    await storage.saveMode("prompt");
+    await expect(storage.getMode()).resolves.toBe("prompt");
+  });
+
+  it("fails closed to automatic downloads for malformed persisted values", async () => {
+    const area = new FakeStorageArea();
+    area.values.lvtDownloadPreference = { mode: "arbitrary-system-path" };
+    const storage = new DownloadPreferenceStorage(area);
+
+    await expect(storage.getMode()).resolves.toBe("automatic");
   });
 });
