@@ -1591,13 +1591,17 @@ def main(argv: list[str] | None = None) -> int:
             arguments.release_root,
             skip_models=arguments.skip_models,
         )
-    except Exception:
-        print("[ERROR] INSTALL_DEPENDENCIES_FAILED：依赖供应未完成", file=sys.stderr)
+    except Exception as exc:
+        detail = " ".join(str(exc).split())[:512]
+        print(
+            f"[ERROR] INSTALL_DEPENDENCIES_FAILED: {type(exc).__name__}: {detail}",
+            file=sys.stderr,
+        )
         return 2
     if not complete:
-        print("[WARN] INSTALL_DEPENDENCIES_INCOMPLETE：模型供应已跳过")
+        print("[WARN] INSTALL_DEPENDENCIES_INCOMPLETE: Model provisioning skipped")
         return 1
-    print("[INFO] INSTALL_DEPENDENCIES_READY：依赖候选版本已验证")
+    print("[INFO] INSTALL_DEPENDENCIES_READY: Dependency candidate verified")
     return 0
 
 

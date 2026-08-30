@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+$env:PYTHONUTF8 = "1"
 
 function Write-LvtStatus {
     param(

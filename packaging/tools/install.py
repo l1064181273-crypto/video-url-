@@ -1107,7 +1107,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    print("[INFO] INSTALL_STAGING_READY：核心候选版本已验证")
+    print("[INFO] INSTALL_STAGING_READY: Core candidate verified")
     return 0
 
 
