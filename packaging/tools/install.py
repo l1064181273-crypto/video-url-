@@ -1086,8 +1086,12 @@ def main(argv: list[str] | None = None) -> int:
         layout = runtime_layout()
         data_root = arguments.data_root or _default_data_root(layout)
         install_staging_core(source_root, data_root, arguments.bootstrap_python_root)
-    except Exception:
-        print("[ERROR] INSTALL_FAILED：核心安装未完成", file=sys.stderr)
+    except Exception as exc:
+        detail = " ".join(str(exc).split())[:512]
+        print(
+            f"[ERROR] INSTALL_FAILED: {type(exc).__name__}: {detail}",
+            file=sys.stderr,
+        )
         return 2
     print("[INFO] INSTALL_STAGING_READY：核心候选版本已验证")
     return 0
