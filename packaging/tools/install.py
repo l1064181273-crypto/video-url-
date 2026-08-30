@@ -913,9 +913,13 @@ def _validation_report(
     layout: RuntimeLayout | None = None,
 ) -> dict[str, Any]:
     selected = runtime_layout() if layout is None else layout
+    validator_python = str(_layout_path(release, selected.venv_python))
+    test_runtime_python = _test_injection("LVT_TEST_RUNTIME_PYTHON")
+    if selected.system == "win32" and test_runtime_python is not None:
+        validator_python = test_runtime_python
     completed = subprocess.run(
         [
-            str(_layout_path(release, selected.venv_python)),
+            validator_python,
             str(release / "packaging/tools/verify_install.py"),
             "--phase",
             "staging-core",

@@ -158,7 +158,7 @@ class NativeWindowsPublicationApi:
                 handle = self._open_path(
                     current,
                     access=GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
-                    share=FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    share=FILE_SHARE_READ | FILE_SHARE_WRITE,
                 )
                 information = self._information(handle)
                 if not information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
@@ -217,12 +217,13 @@ class NativeWindowsPublicationApi:
             destination_parent, _NativePathHandle
         ):
             raise WindowsPublicationError("publication handle is invalid")
-        encoded_name = destination_name.encode("utf-16-le")
+        destination = destination_parent.path / destination_name
+        encoded_name = str(destination).encode("utf-16-le")
         size = ctypes.sizeof(_FileRenameInformation) + len(encoded_name)
         buffer = ctypes.create_string_buffer(size)
         information = _FileRenameInformation.from_buffer(buffer)
         information.Flags = FILE_RENAME_POSIX_SEMANTICS
-        information.RootDirectory = destination_parent.value
+        information.RootDirectory = None
         information.FileNameLength = len(encoded_name)
         ctypes.memmove(
             ctypes.addressof(buffer) + _FileRenameInformation.FileName.offset,
