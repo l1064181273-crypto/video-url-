@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,10 @@ def _discover_installed(app_root: Path, ffmpeg_dir: Path, install_state: Path) -
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="asserts POSIX executable mode bits and binary names",
+)
 def test_installed_ffmpeg_accepts_app_owned_digest_matched_binaries(tmp_path: Path) -> None:
     app_root, ffmpeg_dir, install_state = _installed_ffmpeg(tmp_path)
 

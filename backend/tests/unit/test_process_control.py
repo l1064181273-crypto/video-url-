@@ -1,3 +1,4 @@
+import ctypes
 import os
 import signal
 import sys
@@ -39,6 +40,24 @@ def _wait_until(predicate: object, *, timeout: float = 2.0) -> None:
 
 
 def _process_exists(pid: int) -> bool:
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        open_process.restype = ctypes.c_void_p
+        handle = open_process(0x00100000, 0, pid)
+        if not handle:
+            return False
+        try:
+            wait = kernel32.WaitForSingleObject
+            wait.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            wait.restype = ctypes.c_uint32
+            return int(wait(handle, 0)) == 258
+        finally:
+            close = kernel32.CloseHandle
+            close.argtypes = [ctypes.c_void_p]
+            close.restype = ctypes.c_int
+            close(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
