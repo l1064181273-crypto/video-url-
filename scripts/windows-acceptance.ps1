@@ -150,7 +150,8 @@ finally {
         try {
             $InstalledState = Get-Content -LiteralPath $InstalledStatePath -Raw -Encoding UTF8 |
                 ConvertFrom-Json
-            $ShouldStop = $InstalledState.core.activated -eq $true
+            $Activated = $InstalledState.core.PSObject.Properties["activated"]
+            $ShouldStop = $null -ne $Activated -and $Activated.Value -eq $true
         }
         catch {
             $Failed = $true
@@ -169,7 +170,7 @@ finally {
     $Listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalPort -in @(8765, 11435) } |
         Select-Object LocalAddress, LocalPort, OwningProcess
-    $Listeners | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (
+    ConvertTo-Json -InputObject @($Listeners) -Depth 3 | Set-Content -LiteralPath (
         Join-Path $Evidence "final-listeners.json"
     )
     Remove-Item -LiteralPath $ExtractRoot -Recurse -Force -ErrorAction SilentlyContinue
