@@ -1,6 +1,9 @@
 name: Windows x64 validation
 
 on:
+  push:
+    branches:
+      - windows-x64-validation
   workflow_dispatch:
     inputs:
       full_model_install:
@@ -11,6 +14,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: windows-x64-validation
+  cancel-in-progress: false
 
 jobs:
   windows-x64:
@@ -49,7 +56,10 @@ jobs:
       - name: Run Windows acceptance
         shell: pwsh
         env:
-          LVT_FULL_MODEL_INSTALL: ${{ inputs.full_model_install }}
+          LVT_FULL_MODEL_INSTALL: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.full_model_install
+                || contains(github.event.head_commit.message, '[full-windows-validation]') }}
         run: ./scripts/windows-acceptance.ps1
 
       - name: Upload evidence and package
