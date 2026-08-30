@@ -945,7 +945,18 @@ def _validation_report(
     except json.JSONDecodeError as exc:
         raise InstallError("staging validator did not return JSON") from exc
     if not isinstance(report, dict) or completed.returncode != 0 or report.get("exit_code") != 0:
-        raise InstallError("staging validation failed")
+        checks = report.get("checks") if isinstance(report, dict) else None
+        failed_codes = (
+            [
+                str(check.get("code"))
+                for check in checks
+                if isinstance(check, dict) and check.get("status") != "ok"
+            ]
+            if isinstance(checks, list)
+            else []
+        )
+        suffix = f": {','.join(failed_codes)}" if failed_codes else ""
+        raise InstallError(f"staging validation failed{suffix}")
     return report
 
 

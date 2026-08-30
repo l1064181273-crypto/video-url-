@@ -181,7 +181,9 @@ def _validate_staging_core(
         "backend_metadata": "backend/pyproject.toml",
         "backend_package": "backend/src/lvt",
         "dependencies_manifest": "packaging/dependencies.json",
-        "doctor_command": "scripts/doctor.command",
+        "doctor_command": (
+            "scripts/doctor.ps1" if selected.system == "win32" else "scripts/doctor.command"
+        ),
     }
     for identifier, relative in required_files.items():
         checks.append(_required_path(release_root, relative, identifier))
