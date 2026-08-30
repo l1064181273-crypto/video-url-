@@ -26,6 +26,7 @@ FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 FILE_RENAME_INFO_EX = 22
+FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 ERROR_FILE_NOT_FOUND = 2
 ERROR_PATH_NOT_FOUND = 3
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -157,7 +158,7 @@ class NativeWindowsPublicationApi:
                 handle = self._open_path(
                     current,
                     access=GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
-                    share=FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    share=FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 )
                 information = self._information(handle)
                 if not information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
@@ -176,7 +177,7 @@ class NativeWindowsPublicationApi:
         return self._open_path(
             parent.path / name,
             access=DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            share=FILE_SHARE_READ,
+            share=FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         )
 
     def handle_identity(self, handle: object) -> FileIdentity:
@@ -217,10 +218,10 @@ class NativeWindowsPublicationApi:
         ):
             raise WindowsPublicationError("publication handle is invalid")
         encoded_name = destination_name.encode("utf-16-le")
-        size = _FileRenameInformation.FileName.offset + len(encoded_name)
+        size = ctypes.sizeof(_FileRenameInformation) + len(encoded_name)
         buffer = ctypes.create_string_buffer(size)
         information = _FileRenameInformation.from_buffer(buffer)
-        information.Flags = 0
+        information.Flags = FILE_RENAME_POSIX_SEMANTICS
         information.RootDirectory = destination_parent.value
         information.FileNameLength = len(encoded_name)
         ctypes.memmove(

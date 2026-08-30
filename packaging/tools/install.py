@@ -728,6 +728,10 @@ def _sync_venv(
     layout: RuntimeLayout | None = None,
 ) -> None:
     selected = runtime_layout() if layout is None else layout
+    command = [str(uv_path)]
+    test_runtime_python = _test_injection("LVT_TEST_RUNTIME_PYTHON")
+    if test_runtime_python is not None:
+        command = [test_runtime_python, str(uv_path)]
     environment = os.environ.copy()
     environment.update(
         {
@@ -739,7 +743,7 @@ def _sync_venv(
     )
     completed = subprocess.run(
         [
-            str(uv_path),
+            *command,
             "sync",
             "--project",
             str(candidate / "backend"),
