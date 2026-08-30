@@ -53,6 +53,13 @@ WINDOWS_PACKAGING_TOOLS = (
     "windows_supervisor.py",
     "windows_tool_supervisor.py",
 )
+WINDOWS_INSTALL_TOOLS = (
+    "install.py",
+    "lifecycle_lock.py",
+    "runtime_layout.py",
+    "verify_install.py",
+    *WINDOWS_PACKAGING_TOOLS,
+)
 FAILURE_POINTS = {
     "before-uv",
     "after-uv",
@@ -301,11 +308,7 @@ def _copy_release_core(
         _dependency_manifest_path(source_root, layout),
         candidate / "packaging/dependencies.json",
     )
-    tool_names = (
-        (*PACKAGING_TOOLS, *WINDOWS_PACKAGING_TOOLS)
-        if layout.system == "win32"
-        else PACKAGING_TOOLS
-    )
+    tool_names = WINDOWS_INSTALL_TOOLS if layout.system == "win32" else PACKAGING_TOOLS
     for name in tool_names:
         _copy_source_path(
             source_root / "packaging/tools" / name,
