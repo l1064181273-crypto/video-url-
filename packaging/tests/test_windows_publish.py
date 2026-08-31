@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "packaging/tools"))
 
+import windows_publish_install  # noqa: E402
 from windows_lifecycle import LifecycleResult  # noqa: E402
 from windows_publish_install import (  # noqa: E402
     SystemWindowsPublicationServices,
@@ -278,3 +279,46 @@ def test_system_precommit_activation_uses_exact_file_nonce(tmp_path: Path) -> No
 
     assert handle.path.read_text(encoding="ascii") == f"{handle.token}\n"
     assert handle.activated
+
+
+def test_publish_cli_reports_stage_without_exception_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "LVT_TEST_SECRET_" + "x" * 48
+
+    class FailingPublisher:
+        def __init__(self, _data_root: Path, _release_root: Path) -> None:
+            pass
+
+        def publish(self) -> None:
+            raise WindowsPublishError(secret)
+
+        def _diagnostic_stage(self) -> str:
+            return "start_precommit.start_candidate.backend.supervisor_exit_70"
+
+    monkeypatch.setattr(
+        windows_publish_install,
+        "WindowsInstallPublisher",
+        FailingPublisher,
+    )
+
+    result = windows_publish_install.main(
+        [
+            "--data-root",
+            str(tmp_path / "data"),
+            "--release-root",
+            str(tmp_path / "release"),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert result == 2
+    assert secret not in output
+    assert json.loads(output) == {
+        "error_class": "WindowsPublishError",
+        "error_stage": "start_precommit.start_candidate.backend.supervisor_exit_70",
+        "schema_version": 1,
+        "status": "unsafe_or_corrupt",
+    }

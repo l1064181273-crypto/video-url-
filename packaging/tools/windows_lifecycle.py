@@ -178,6 +178,7 @@ class SystemWindowsLifecycleOperations:
         self.api = NativeWindowsServiceApi() if api is None else api
         self.launcher = launcher or _launch_supervisor
         self.backend_environment_overrides = backend_environment_overrides or {}
+        self.diagnostic_stage = "idle"
 
     def _record_path(self, kind: str) -> Path:
         if kind not in SERVICE_PORTS:
@@ -333,6 +334,7 @@ class SystemWindowsLifecycleOperations:
         return maximum + 1
 
     def launch(self, kind: str) -> None:
+        self.diagnostic_stage = f"{kind}.preflight"
         if self.state(kind) != "absent":
             raise WindowsServiceError(f"{kind} service is not safe to launch")
         record_path = self._record_path(kind)
@@ -360,12 +362,14 @@ class SystemWindowsLifecycleOperations:
             "--",
             *service_command,
         ]
+        self.diagnostic_stage = f"{kind}.supervisor_launch"
         process = self.launcher(
             command,
             environment,
             self.release_root,
             self.data_root / "logs" / f"{kind}.log",
         )
+        self.diagnostic_stage = f"{kind}.ownership_wait"
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if verify_owned_service_record(
@@ -374,16 +378,21 @@ class SystemWindowsLifecycleOperations:
                 SERVICE_PORTS[kind],
                 api=self.api,  # type: ignore[arg-type]
             ):
+                self.diagnostic_stage = f"{kind}.owned"
                 return
-            if process.poll() is not None:
+            exit_code = process.poll()
+            if exit_code is not None:
+                self.diagnostic_stage = f"{kind}.supervisor_exit_{exit_code}"
                 break
             time.sleep(0.05)
         if process.poll() is None:
+            self.diagnostic_stage = f"{kind}.ownership_timeout"
             process.terminate()
             process.wait(timeout=5)
         raise WindowsServiceError(f"{kind} supervisor failed to establish ownership")
 
     def backend_healthy(self) -> bool:
+        self.diagnostic_stage = "backend.health_wait"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             connection = http.client.HTTPConnection("127.0.0.1", 8765, timeout=0.5)
@@ -394,12 +403,14 @@ class SystemWindowsLifecycleOperations:
                 if response.status == 200 and len(body) <= 65_536:
                     payload = json.loads(body)
                     if isinstance(payload, dict) and payload.get("status") == "healthy":
+                        self.diagnostic_stage = "backend.healthy"
                         return True
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
             finally:
                 connection.close()
             time.sleep(0.05)
+        self.diagnostic_stage = "backend.health_timeout"
         return False
 
     def stop(self, kind: str) -> None:

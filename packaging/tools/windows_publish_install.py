@@ -65,6 +65,7 @@ class SystemWindowsPublicationServices:
         self.operations = operations or SystemWindowsLifecycleOperations(data_root, release_root)
         self.manager = manager or WindowsLifecycleManager(self.operations)
         self.activation_handle: WindowsActivationHandle | None = None
+        self.diagnostic_stage = "idle"
 
     def _validate(self, phase: str) -> bool:
         python = self.release_root / ".venv" / "Scripts" / "python.exe"
@@ -102,6 +103,7 @@ class SystemWindowsPublicationServices:
         return self._validate(phase)
 
     def start_precommit(self) -> object:
+        self.diagnostic_stage = "stop_existing"
         if self.activation_handle is not None:
             raise WindowsPublishError("candidate activation handle is already active")
         handle = WindowsActivationHandle(
@@ -116,6 +118,7 @@ class SystemWindowsPublicationServices:
         }
         try:
             self.manager.stop(lock_held=True)
+            self.diagnostic_stage = "start_candidate"
             result = self.manager.start(lock_held=True)
             if result.exit_code != 0:
                 raise WindowsPublishError("candidate services failed to start")
@@ -330,6 +333,20 @@ class WindowsInstallPublisher:
         self.journal = TransactionJournal(data_root / "runtime" / "transaction-journal")
         self.services = services or SystemWindowsPublicationServices(data_root, release_root)
         self._failpoint = failpoint or (lambda _name: None)
+        self.diagnostic_stage = "idle"
+
+    def _diagnostic_stage(self) -> str:
+        service_stage = getattr(self.services, "diagnostic_stage", "idle")
+        operation_stage = getattr(
+            getattr(self.services, "operations", None),
+            "diagnostic_stage",
+            "idle",
+        )
+        return ".".join(
+            stage
+            for stage in (self.diagnostic_stage, service_stage, operation_stage)
+            if stage != "idle"
+        )
 
     def _point(self, name: str) -> None:
         self._failpoint(name)
@@ -670,20 +687,30 @@ class WindowsInstallPublisher:
                 return
             finally:
                 lock.close()
+        self.diagnostic_stage = "reconcile"
         self.reconcile(lock_held=True)
+        self.diagnostic_stage = "validate_staging_core"
         if not self.services.validate_candidate("staging-core"):
             raise WindowsPublishError("staging-core validation failed")
+        self.diagnostic_stage = "validate_dependencies"
         if not self.services.validate_candidate("dependencies"):
             raise WindowsPublishError("dependencies validation failed")
+        self.diagnostic_stage = "prepare"
         payload = self.prepare_payload()
         self.journal.write_progress(payload)
         handle: object | None = None
         try:
+            self.diagnostic_stage = "stage"
             self._stage(payload)
+            self.diagnostic_stage = "switch_current"
             payload = self._switch("current", payload)
+            self.diagnostic_stage = "switch_extension"
             payload = self._switch("extension", payload)
+            self.diagnostic_stage = "start_precommit"
             handle = self.services.start_precommit()
+            self.diagnostic_stage = "record_precommit"
             payload = self._progress(payload, state="SERVICE_PRECOMMIT_READY")
+            self.diagnostic_stage = "runtime_full"
             if not self.services.runtime_full():
                 raise WindowsPublishError("runtime-full validation failed")
             committed = {
@@ -691,10 +718,13 @@ class WindowsInstallPublisher:
                 "state": "COMMITTED",
                 "decision": "committed",
             }
+            self.diagnostic_stage = "commit"
             self.journal.write_critical(committed)
             payload = committed
             self._point("activation:before_install_state")
+            self.diagnostic_stage = "activate"
             self.services.activate(handle)
+            self.diagnostic_stage = "health"
             if not self.services.healthy():
                 raise WindowsPublishError("activated service health failed")
             activated = {
@@ -703,8 +733,10 @@ class WindowsInstallPublisher:
                 "decision": "activated",
                 "substate": {**payload["substate"], "cleanup": "intent_written"},
             }
+            self.diagnostic_stage = "record_activated"
             self.journal.write_critical(activated)
             self._write_install_state_for_current(activated=True)
+            self.diagnostic_stage = "finalize_activated"
             self._finalize_activated(activated)
         except Exception as publish_error:
             recovery_errors: list[Exception] = []
@@ -785,12 +817,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-root", required=True, type=Path)
     parser.add_argument("--release-root", required=True, type=Path)
     arguments = parser.parse_args(argv)
+    publisher = WindowsInstallPublisher(arguments.data_root, arguments.release_root)
     try:
-        WindowsInstallPublisher(arguments.data_root, arguments.release_root).publish()
-    except Exception:
+        publisher.publish()
+    except Exception as exc:
         print(
             json.dumps(
-                {"schema_version": 1, "status": "unsafe_or_corrupt"},
+                {
+                    "error_class": type(exc).__name__,
+                    "error_stage": publisher._diagnostic_stage(),
+                    "schema_version": 1,
+                    "status": "unsafe_or_corrupt",
+                },
                 sort_keys=True,
             )
         )
