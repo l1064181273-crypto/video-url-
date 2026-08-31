@@ -198,3 +198,36 @@ def test_windows_service_commands_use_app_owned_executables_and_sanitized_enviro
     for environment in (ollama_environment, backend_environment):
         assert "LVT_TOKEN" not in environment
         assert "OPENAI_API_KEY" not in environment
+
+
+@pytest.mark.parametrize(
+    ("record_exists", "listeners", "expected"),
+    [
+        (False, set(), "backend.record_missing"),
+        (True, set(), "backend.listener_absent"),
+        (True, {1, 2}, "backend.listener_count_mismatch"),
+        (True, {1}, "backend.identity_verification_failed"),
+    ],
+)
+def test_ownership_timeout_diagnostics_do_not_expose_process_ids(
+    tmp_path: Path,
+    record_exists: bool,
+    listeners: set[int],
+    expected: str,
+) -> None:
+    class Api:
+        @staticmethod
+        def listener_pids(_port: int) -> set[int]:
+            return listeners
+
+    record = tmp_path / "runtime/backend.pid"
+    if record_exists:
+        record.parent.mkdir()
+        record.write_text("{}\n", encoding="ascii")
+    operations = SystemWindowsLifecycleOperations(
+        tmp_path,
+        tmp_path,
+        api=Api(),
+    )
+
+    assert operations._ownership_failure_stage("backend", record) == expected

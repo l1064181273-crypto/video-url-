@@ -38,6 +38,28 @@ function Invoke-EvidenceCommand {
     }
 }
 
+function Export-RedactedServiceLogs {
+    $Token = $null
+    $TokenPath = Join-Path $DataRoot "config/api-token"
+    if (Test-Path -LiteralPath $TokenPath -PathType Leaf) {
+        $Token = (Get-Content -LiteralPath $TokenPath -Raw -Encoding UTF8).Trim()
+    }
+    foreach ($Name in @("backend", "ollama")) {
+        $LogPath = Join-Path $DataRoot ("logs/" + $Name + ".log")
+        if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+            continue
+        }
+        $Content = (Get-Content -LiteralPath $LogPath -Tail 500 -Encoding UTF8) -join "`n"
+        if (-not [string]::IsNullOrEmpty($Token)) {
+            $Content = $Content.Replace($Token, "[REDACTED_API_TOKEN]")
+        }
+        $Content = $Content -replace "LVT_TEST_SECRET_[A-Za-z0-9_-]+", "[REDACTED_TEST_SECRET]"
+        Set-Content -LiteralPath (Join-Path $Evidence ($Name + "-service-log.txt")) `
+            -Value $Content `
+            -Encoding UTF8
+    }
+}
+
 try {
     if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne "X64") {
         throw "Windows x64 runner is required"
@@ -164,6 +186,16 @@ catch {
     )
 }
 finally {
+    if ($Failed) {
+        try {
+            Export-RedactedServiceLogs
+        }
+        catch {
+            $_.Exception.GetType().Name | Set-Content -LiteralPath (
+                Join-Path $Evidence "service-log-collection-error.txt"
+            )
+        }
+    }
     $InstalledStatePath = Join-Path $DataRoot "runtime/install-state.json"
     $ShouldStop = $false
     if ($null -ne $PackageRoot -and (Test-Path -LiteralPath $InstalledStatePath)) {

@@ -110,5 +110,8 @@ def test_windows_native_acceptance_workflow_is_manual_and_archives_evidence() ->
     assert "chrome-e2e" in acceptance
     assert "Get-NetTCPConnection" in acceptance
     assert "Get-CimInstance Win32_Process" in acceptance
+    assert "Export-RedactedServiceLogs" in acceptance
+    assert "[REDACTED_API_TOKEN]" in acceptance
+    assert "Get-Content -LiteralPath $LogPath -Tail 500" in acceptance
     assert "taskkill" not in acceptance
     assert "Stop-Process" not in acceptance

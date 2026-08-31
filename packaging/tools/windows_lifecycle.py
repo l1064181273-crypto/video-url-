@@ -333,6 +333,19 @@ class SystemWindowsLifecycleOperations:
                 maximum = max(maximum, record.generation)
         return maximum + 1
 
+    def _ownership_failure_stage(self, kind: str, record_path: Path) -> str:
+        if not record_path.is_file():
+            return f"{kind}.record_missing"
+        try:
+            listeners = self.api.listener_pids(SERVICE_PORTS[kind])  # type: ignore[union-attr]
+        except OSError:
+            return f"{kind}.listener_query_failed"
+        if not listeners:
+            return f"{kind}.listener_absent"
+        if len(listeners) != 1:
+            return f"{kind}.listener_count_mismatch"
+        return f"{kind}.identity_verification_failed"
+
     def launch(self, kind: str) -> None:
         self.diagnostic_stage = f"{kind}.preflight"
         if self.state(kind) != "absent":
@@ -386,7 +399,7 @@ class SystemWindowsLifecycleOperations:
                 break
             time.sleep(0.05)
         if process.poll() is None:
-            self.diagnostic_stage = f"{kind}.ownership_timeout"
+            self.diagnostic_stage = self._ownership_failure_stage(kind, record_path)
             process.terminate()
             process.wait(timeout=5)
         raise WindowsServiceError(f"{kind} supervisor failed to establish ownership")
