@@ -31,6 +31,7 @@ class FakeSupervisorApi:
         self.identities = {
             700: _identity(700, "supervisor"),
             731: _identity(731, "python"),
+            732: _identity(732, "python-runtime"),
         }
         self.calls: list[tuple[object, ...]] = []
         self.wait_count = 0
@@ -101,10 +102,14 @@ class FakeSupervisorApi:
         return 0
 
     def listener_pids(self, port: int) -> set[int]:
-        return {731}
+        return {732}
 
     def open_job(self, name: str) -> object:
         return ("job", name)
+
+    def process_in_job(self, process: object, job: object) -> bool:
+        self.calls.append(("process_in_job", process, job))
+        return process == ("process", 732) and job == "job"
 
 
 def test_supervisor_holds_job_until_service_exit_and_retires_record(tmp_path: Path) -> None:
@@ -129,7 +134,8 @@ def test_supervisor_holds_job_until_service_exit_and_retires_record(tmp_path: Pa
     retained = tmp_path / "history" / f"backend-8-{'d' * 32}.json"
     payload = json.loads(retained.read_text(encoding="utf-8"))
     assert payload["supervisor"] == _identity(700, "supervisor").as_dict()
-    assert payload["service"] == _identity(731, "python").as_dict()
+    assert payload["service"] == _identity(732, "python-runtime").as_dict()
+    assert ("process_in_job", ("process", 732), "job") in api.calls
     assign = next(index for index, call in enumerate(api.calls) if call[0] == "assign")
     resume = next(index for index, call in enumerate(api.calls) if call[0] == "resume")
     wait = next(index for index, call in enumerate(api.calls) if call[0] == "wait")
@@ -159,4 +165,29 @@ def test_supervisor_publication_failure_terminates_job_and_preserves_foreign_rec
         )
 
     assert record_path.read_bytes() == b"foreign"
+    assert ("terminate_job", "job", 125) in api.calls
+
+
+def test_supervisor_listener_timeout_terminates_job_without_publishing_record(
+    tmp_path: Path,
+) -> None:
+    api = FakeSupervisorApi()
+    record_path = tmp_path / "backend.pid"
+
+    with pytest.raises(Exception, match="listener did not become owned"):
+        supervise_service(
+            record_path=record_path,
+            kind="backend",
+            port=8765,
+            nonce="f" * 32,
+            generation=10,
+            command=[r"C:\LVT\python.exe", "-m", "lvt.main"],
+            environment={"LVT_DATA_ROOT": r"C:\LVT\data"},
+            cwd=r"C:\LVT",
+            api=api,
+            current_pid=700,
+            readiness_timeout=0,
+        )
+
+    assert not record_path.exists()
     assert ("terminate_job", "job", 125) in api.calls

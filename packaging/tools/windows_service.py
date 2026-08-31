@@ -43,6 +43,8 @@ class WindowsServiceError(RuntimeError):
 class WindowsServiceApi(WindowsProcessApi, Protocol):
     def open_job(self, name: str) -> object: ...
 
+    def process_in_job(self, process: object, job: object) -> bool: ...
+
     def terminate_job(self, job: object, exit_code: int) -> None: ...
 
 
@@ -350,6 +352,11 @@ def owned_service_record_status(
             job_handle = selected.open_job(record.job_name)
         except Exception:
             return "job_unavailable"
+        try:
+            if not selected.process_in_job(service.process_handle, job_handle):
+                return "service_not_in_job"
+        except Exception:
+            return "job_membership_query_failed"
         if not require_listener:
             return "owned"
         try:
@@ -387,6 +394,8 @@ def stop_verified_service(
         if listeners != {record.service.pid}:
             raise WindowsServiceError("service listener ownership changed")
         job_handle = api.open_job(record.job_name)
+        if not api.process_in_job(service.process_handle, job_handle):
+            raise WindowsServiceError("service process is not bound to its Job Object")
         api.terminate_job(job_handle, 143)
         if not api.wait_process(service.process_handle, service_timeout_ms):
             raise WindowsServiceError("service Job Object did not stop")

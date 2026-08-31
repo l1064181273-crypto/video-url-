@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -34,6 +35,8 @@ def supervise_service(
     cwd: str,
     api: WindowsSupervisorApi | None = None,
     current_pid: int | None = None,
+    readiness_timeout: float = 15.0,
+    poll_interval: float = 0.05,
 ) -> int:
     if kind not in SERVICE_PORTS or port != SERVICE_PORTS[kind]:
         raise WindowsServiceError("service supervisor configuration is invalid")
@@ -63,11 +66,26 @@ def supervise_service(
             )
         finally:
             selected.close_handle(supervisor_handle)
-        service_identity = capture_process_identity(
-            launched.pid,
-            launched.process_handle,
-            selected,
-        )
+        service_identity = None
+        deadline = time.monotonic() + readiness_timeout
+        while time.monotonic() < deadline:
+            listeners = selected.listener_pids(port)
+            if len(listeners) == 1:
+                listener_pid = next(iter(listeners))
+                listener_handle = selected.open_process(listener_pid, terminate=False)
+                try:
+                    if selected.process_in_job(listener_handle, launched.job_handle):
+                        service_identity = capture_process_identity(
+                            listener_pid,
+                            listener_handle,
+                            selected,
+                        )
+                        break
+                finally:
+                    selected.close_handle(listener_handle)
+            time.sleep(poll_interval)
+        if service_identity is None:
+            raise WindowsServiceError("service listener did not become owned")
         record = WindowsServiceRecord(
             kind=kind,
             port=port,

@@ -54,6 +54,7 @@ class FakeServiceApi:
         creation_overrides: dict[int, int] | None = None,
         listeners: set[int] | None = None,
         supervisor_exits: bool = True,
+        service_in_job: bool = True,
     ) -> None:
         self.identities = {
             301: _identity(301, "supervisor"),
@@ -62,6 +63,7 @@ class FakeServiceApi:
         self.creation_overrides = creation_overrides or {}
         self.listeners = {302} if listeners is None else listeners
         self.supervisor_exits = supervisor_exits
+        self.service_in_job = service_in_job
         self.calls: list[tuple[object, ...]] = []
         self.terminated_pids: set[int] = set()
 
@@ -116,6 +118,10 @@ class FakeServiceApi:
         self.calls.append(("open_job", name))
         return ("job", name)
 
+    def process_in_job(self, process: object, job: object) -> bool:
+        self.calls.append(("process_in_job", process, job))
+        return self.service_in_job
+
     def terminate_job(self, job: object, exit_code: int) -> None:
         self.calls.append(("terminate_job", job, exit_code))
 
@@ -157,6 +163,9 @@ def test_stop_verifies_both_identities_and_listener_before_terminating_job() -> 
     assert ("listeners", 8765) in api.calls[:terminate_index]
     assert ("open_process", 301, True) in api.calls[:terminate_index]
     assert ("open_process", 302, False) in api.calls[:terminate_index]
+    assert ("process_in_job", ("process", 302, False), ("job", _record().job_name)) in api.calls[
+        :terminate_index
+    ]
     assert not any(call[0] == "terminate_process" for call in api.calls)
 
 
@@ -177,6 +186,15 @@ def test_stop_fails_closed_on_foreign_listener() -> None:
         stop_verified_service(_record(), api)
 
     assert not any(call[0] == "open_job" for call in api.calls)
+    assert not any(call[0].startswith("terminate") for call in api.calls)
+
+
+def test_stop_fails_closed_when_listener_process_is_outside_job() -> None:
+    api = FakeServiceApi(service_in_job=False)
+
+    with pytest.raises(WindowsServiceError, match="not bound"):
+        stop_verified_service(_record(), api)
+
     assert not any(call[0].startswith("terminate") for call in api.calls)
 
 

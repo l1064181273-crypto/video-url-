@@ -46,6 +46,10 @@ class FakeWindowsJobApi:
     def terminate_job(self, job: object, exit_code: int) -> None:
         self.calls.append(("terminate_job", job, exit_code))
 
+    def process_in_job(self, process: object, job: object) -> bool:
+        self.calls.append(("process_in_job", process, job))
+        return True
+
     def close_handle(self, handle: object) -> None:
         self.calls.append(("close", handle))
 

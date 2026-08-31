@@ -22,6 +22,7 @@ WAIT_TIMEOUT = 258
 STILL_ACTIVE = 259
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JOB_OBJECT_QUERY = 0x0004
 JOB_OBJECT_TERMINATE = 0x0008
 ERROR_ALREADY_EXISTS = 183
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -49,6 +50,8 @@ class WindowsJobApi(Protocol):
     def terminate_process(self, process: object, exit_code: int) -> None: ...
 
     def terminate_job(self, job: object, exit_code: int) -> None: ...
+
+    def process_in_job(self, process: object, job: object) -> bool: ...
 
     def close_handle(self, handle: object) -> None: ...
 
@@ -268,7 +271,7 @@ class NativeWindowsJobApi:
         function = self.kernel32.OpenJobObjectW
         function.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p]
         function.restype = ctypes.c_void_p
-        job = function(JOB_OBJECT_TERMINATE, 0, name)
+        job = function(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE, 0, name)
         if not job:
             self._raise_last_error("OpenJobObjectW failed")
         return int(job)
@@ -448,6 +451,23 @@ class NativeWindowsJobApi:
         function.restype = ctypes.c_int
         if not function(self._handle(job), exit_code):
             self._raise_last_error("TerminateJobObject failed")
+
+    def process_in_job(self, process: object, job: object) -> bool:
+        result = ctypes.c_int()
+        function = self.kernel32.IsProcessInJob
+        function.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        function.restype = ctypes.c_int
+        if not function(
+            self._handle(process),
+            self._handle(job),
+            ctypes.byref(result),
+        ):
+            self._raise_last_error("IsProcessInJob failed")
+        return bool(result.value)
 
     def wait_process(self, process: object, timeout_ms: int) -> bool:
         function = self.kernel32.WaitForSingleObject
