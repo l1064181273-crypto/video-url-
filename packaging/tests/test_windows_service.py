@@ -13,6 +13,7 @@ from windows_process import ExecutableIdentity, ProcessIdentity  # noqa: E402
 from windows_service import (  # noqa: E402
     WindowsServiceError,
     WindowsServiceRecord,
+    owned_service_record_status,
     publish_service_record,
     retire_service_record,
     service_record_from_dict,
@@ -212,6 +213,15 @@ def test_owned_service_record_requires_job_processes_and_exact_listener(
         8765,
         api=FakeServiceApi(listeners={999}),
     )
+    assert (
+        owned_service_record_status(
+            record_path,
+            "backend",
+            8765,
+            api=FakeServiceApi(listeners={999}),
+        )
+        == "listener_pid_mismatch"
+    )
 
 
 def test_owned_service_record_rejects_malformed_file(tmp_path: Path) -> None:
@@ -223,6 +233,15 @@ def test_owned_service_record_rejects_malformed_file(tmp_path: Path) -> None:
         "backend",
         8765,
         api=FakeServiceApi(),
+    )
+    assert (
+        owned_service_record_status(
+            record_path,
+            "backend",
+            8765,
+            api=FakeServiceApi(),
+        )
+        == "record_invalid"
     )
 
 

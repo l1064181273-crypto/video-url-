@@ -307,20 +307,56 @@ def verify_owned_service_record(
     *,
     api: WindowsServiceApi | None = None,
 ) -> bool:
+    return (
+        owned_service_record_status(
+            path,
+            kind,
+            port,
+            require_listener=require_listener,
+            api=api,
+        )
+        == "owned"
+    )
+
+
+def owned_service_record_status(
+    path: Path,
+    kind: str,
+    port: int,
+    require_listener: bool = True,
+    *,
+    api: WindowsServiceApi | None = None,
+) -> str:
     selected = NativeWindowsServiceApi() if api is None else api
     supervisor = None
     service = None
     job_handle: object | None = None
     try:
-        record = _read_service_record(path)
+        try:
+            record = _read_service_record(path)
+        except Exception:
+            return "record_invalid"
         if record.kind != kind or record.port != port:
-            return False
-        supervisor = open_verified_process(record.supervisor, selected)
-        service = open_verified_process(record.service, selected)
-        job_handle = selected.open_job(record.job_name)
-        return not require_listener or selected.listener_pids(port) == {record.service.pid}
-    except Exception:
-        return False
+            return "record_mismatch"
+        try:
+            supervisor = open_verified_process(record.supervisor, selected)
+        except Exception:
+            return "supervisor_identity_invalid"
+        try:
+            service = open_verified_process(record.service, selected)
+        except Exception:
+            return "service_identity_invalid"
+        try:
+            job_handle = selected.open_job(record.job_name)
+        except Exception:
+            return "job_unavailable"
+        if not require_listener:
+            return "owned"
+        try:
+            listeners = selected.listener_pids(port)
+        except OSError:
+            return "listener_query_failed"
+        return "owned" if listeners == {record.service.pid} else "listener_pid_mismatch"
     finally:
         if job_handle is not None:
             selected.close_handle(job_handle)

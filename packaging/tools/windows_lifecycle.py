@@ -21,6 +21,7 @@ from windows_service import (
     WindowsServiceApi,
     WindowsServiceError,
     _read_service_record,
+    owned_service_record_status,
     retire_service_record,
     stop_verified_service,
     verify_owned_service_record,
@@ -336,15 +337,13 @@ class SystemWindowsLifecycleOperations:
     def _ownership_failure_stage(self, kind: str, record_path: Path) -> str:
         if not record_path.is_file():
             return f"{kind}.record_missing"
-        try:
-            listeners = self.api.listener_pids(SERVICE_PORTS[kind])  # type: ignore[union-attr]
-        except OSError:
-            return f"{kind}.listener_query_failed"
-        if not listeners:
-            return f"{kind}.listener_absent"
-        if len(listeners) != 1:
-            return f"{kind}.listener_count_mismatch"
-        return f"{kind}.identity_verification_failed"
+        status = owned_service_record_status(
+            record_path,
+            kind,
+            SERVICE_PORTS[kind],
+            api=self.api,  # type: ignore[arg-type]
+        )
+        return f"{kind}.{status}"
 
     def launch(self, kind: str) -> None:
         self.diagnostic_stage = f"{kind}.preflight"

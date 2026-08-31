@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "packaging/tools"))
 
+import windows_lifecycle  # noqa: E402
 from windows_lifecycle import (  # noqa: E402
     LifecycleResult,
     SystemWindowsLifecycleOperations,
@@ -201,33 +202,34 @@ def test_windows_service_commands_use_app_owned_executables_and_sanitized_enviro
 
 
 @pytest.mark.parametrize(
-    ("record_exists", "listeners", "expected"),
+    ("record_exists", "status", "expected"),
     [
-        (False, set(), "backend.record_missing"),
-        (True, set(), "backend.listener_absent"),
-        (True, {1, 2}, "backend.listener_count_mismatch"),
-        (True, {1}, "backend.identity_verification_failed"),
+        (False, "owned", "backend.record_missing"),
+        (True, "listener_pid_mismatch", "backend.listener_pid_mismatch"),
+        (True, "service_identity_invalid", "backend.service_identity_invalid"),
+        (True, "job_unavailable", "backend.job_unavailable"),
     ],
 )
 def test_ownership_timeout_diagnostics_do_not_expose_process_ids(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     record_exists: bool,
-    listeners: set[int],
+    status: str,
     expected: str,
 ) -> None:
-    class Api:
-        @staticmethod
-        def listener_pids(_port: int) -> set[int]:
-            return listeners
-
     record = tmp_path / "runtime/backend.pid"
     if record_exists:
         record.parent.mkdir()
         record.write_text("{}\n", encoding="ascii")
+    monkeypatch.setattr(
+        windows_lifecycle,
+        "owned_service_record_status",
+        lambda *_args, **_kwargs: status,
+    )
     operations = SystemWindowsLifecycleOperations(
         tmp_path,
         tmp_path,
-        api=Api(),
+        api=object(),
     )
 
     assert operations._ownership_failure_stage("backend", record) == expected
