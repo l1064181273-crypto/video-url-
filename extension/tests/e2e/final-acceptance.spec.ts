@@ -260,6 +260,7 @@ async function stopExtensionWorker(
       versions.set(version.scriptURL, version.versionId);
     }
   };
+  await workerCdp.send("ServiceWorker.disable");
   workerCdp.on("ServiceWorker.workerVersionUpdated", onVersions);
   await workerCdp.send("ServiceWorker.enable");
   await expect
