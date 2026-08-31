@@ -7,7 +7,7 @@ const DIST = resolve(import.meta.dirname, "../../dist");
 
 test("built extension contains no remote or executable inline code", async () => {
   const files = await listFiles(DIST);
-  const relativeFiles = files.map((file) => relative(DIST, file)).sort();
+  const relativeFiles = files.map((file) => relative(DIST, file).replaceAll("\\", "/")).sort();
   expect(files).toContain(resolve(DIST, "manifest.json"));
   expect(files).toContain(resolve(DIST, "background.js"));
   expect(files).toContain(resolve(DIST, "sidepanel.html"));

@@ -71,3 +71,4 @@ jobs:
           path: |
             windows-evidence/**
             dist-windows/**
+            extension/test-results/**/*.png

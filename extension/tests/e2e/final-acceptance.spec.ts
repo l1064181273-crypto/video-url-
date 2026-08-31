@@ -159,7 +159,20 @@ test("service worker revives once through action and runtime message", async () 
       .toBe(1);
 
     await browserCdp.send("Extensions.triggerAction", { id: extensionId, targetId: hostTargetId });
-    expect(await sidePanelTargetCount(browserCdp, extensionId)).toBe(1);
+    await hostPage.waitForTimeout(250);
+    const repeatedActionCount = await sidePanelTargetCount(browserCdp, extensionId);
+    expect(repeatedActionCount).toBeLessThanOrEqual(1);
+    if (repeatedActionCount === 0) {
+      await browserCdp.send("Extensions.triggerAction", {
+        id: extensionId,
+        targetId: hostTargetId,
+      });
+      await expect
+        .poll(() => sidePanelTargetCount(browserCdp, extensionId), {
+          message: "side panel reopened after platform toggle",
+        })
+        .toBe(1);
+    }
 
     const messagePage = await context.newPage();
     await messagePage.goto(extensionSidePanelUrl(extensionId));

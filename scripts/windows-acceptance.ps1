@@ -113,6 +113,10 @@ try {
         Invoke-EvidenceCommand "extension-build" {
             npm --prefix extension run build
         }
+        Invoke-EvidenceCommand "chrome-e2e" {
+            $env:LVT_E2E_PYTHON = $Python
+            npm --prefix extension run test:e2e
+        }
 
         $First = Join-Path $env:RUNNER_TEMP "lvt-package-first"
         $Second = Join-Path $env:RUNNER_TEMP "lvt-package-second"
@@ -169,10 +173,6 @@ try {
                     -Phase runtime-full `
                     -Json
             }
-            Invoke-EvidenceCommand "chrome-e2e" {
-                $env:LVT_E2E_PYTHON = $Python
-                npm --prefix extension run test:e2e
-            }
         }
     }
     finally {
@@ -186,16 +186,6 @@ catch {
     )
 }
 finally {
-    if ($Failed) {
-        try {
-            Export-RedactedServiceLogs
-        }
-        catch {
-            $_.Exception.GetType().Name | Set-Content -LiteralPath (
-                Join-Path $Evidence "service-log-collection-error.txt"
-            )
-        }
-    }
     $InstalledStatePath = Join-Path $DataRoot "runtime/install-state.json"
     $ShouldStop = $false
     if ($null -ne $PackageRoot -and (Test-Path -LiteralPath $InstalledStatePath)) {
@@ -210,13 +200,24 @@ finally {
         }
     }
     if ($ShouldStop) {
-        & (Join-Path $PackageRoot "scripts/stop.ps1") -DataRoot $DataRoot *>&1 |
-            Set-Content -LiteralPath (Join-Path $Evidence "final-stop.txt")
+        $StopOutput = & (Join-Path $PackageRoot "scripts/stop.ps1") -DataRoot $DataRoot *>&1
+        $StopExitCode = $LASTEXITCODE
+        $StopOutput | Set-Content -LiteralPath (Join-Path $Evidence "final-stop.txt")
         Set-Content -LiteralPath (Join-Path $Evidence "final-stop.exit-code") `
-            -Value $LASTEXITCODE `
+            -Value $StopExitCode `
             -Encoding ASCII
-        if ($LASTEXITCODE -ne 0) {
+        if ($StopExitCode -ne 0) {
             $Failed = $true
+        }
+    }
+    if ($Failed) {
+        try {
+            Export-RedactedServiceLogs
+        }
+        catch {
+            $_.Exception.GetType().Name | Set-Content -LiteralPath (
+                Join-Path $Evidence "service-log-collection-error.txt"
+            )
         }
     }
     Start-Sleep -Seconds 1

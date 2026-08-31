@@ -37,6 +37,8 @@ const PYTHON =
 const EXTENSION_PATH = resolve(PROJECT_ROOT, "extension/dist");
 const TOKEN = "CheckpointOneRuntimeToken-0123456789abcdef";
 const PACKAGED_EXTENSION_ID = "hbcpdfclnpdpiamdelgbpkpiaemmbljg";
+const EXPECTED_ASR_MODEL =
+  process.platform === "win32" ? "Systran/faster-whisper-small" : "mlx-community/whisper-small-mlx";
 const execFileAsync = promisify(execFile);
 
 let backend: ChildProcessWithoutNullStreams | undefined;
@@ -82,6 +84,13 @@ test("unpacked extension reads frozen local API contracts without leaking its to
     });
     const worker = await extensionWorker(context);
     const extensionId = new URL(worker.url()).host;
+    await worker.evaluate(
+      async (port) =>
+        chrome.storage.local.set({
+          lvtConnection: { port },
+        }),
+      Number(new URL(baseUrl).port),
+    );
     const requests: { headers: Record<string, string>; url: string }[] = [];
     const consoleMessages: string[] = [];
     context.on("request", (request) => {
@@ -826,7 +835,7 @@ test("job controls, confirmed delete, and paginated events use the real backend"
     );
     await expect(page.locator("body")).not.toContainText("RawBackendTraceSecret");
     await expect(page.locator("body")).not.toContainText("/Users/private");
-    await expect(page.locator("#detail-asr-model")).toHaveText("mlx-community/whisper-small-mlx");
+    await expect(page.locator("#detail-asr-model")).toHaveText(EXPECTED_ASR_MODEL);
     await expect(page.locator("#event-count")).toHaveText("50 / 55 条");
     await page.getByRole("button", { name: "加载更多" }).click();
     await expect(page.locator("#event-count")).toHaveText("55 / 55 条");
