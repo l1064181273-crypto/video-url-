@@ -23,6 +23,7 @@ RECONCILE_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "reconcile_processes.
 SUPERVISOR_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "tool_supervisor.py"
 PROCESS_STATE_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "process_state.py"
 RUNTIME_LAYOUT_TOOL = REPOSITORY_ROOT / "packaging" / "tools" / "runtime_layout.py"
+MODELFILE = REPOSITORY_ROOT / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km"
 COMMON_LIBRARY = REPOSITORY_ROOT / "scripts" / "lib" / "common.zsh"
 DATA_DIRECTORIES = ("config", "db", "runtime", "work", "exports", "logs", "models")
 FAILURE_POINTS = (
@@ -71,6 +72,7 @@ def _build_release(tmp_path: Path, name: str = "Release 源 naïve") -> Path:
     _copy_file(SUPERVISOR_TOOL, release / "packaging/tools/tool_supervisor.py", executable=True)
     _copy_file(PROCESS_STATE_TOOL, release / "packaging/tools/process_state.py", executable=True)
     _copy_file(RUNTIME_LAYOUT_TOOL, release / "packaging/tools/runtime_layout.py")
+    _copy_file(MODELFILE, release / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km")
     (release / "scripts/doctor.command").chmod(0o755)
     (release / "test-tools/uv").chmod(0o755)
     (release / "test-tools/python/bin/python3").chmod(0o755)

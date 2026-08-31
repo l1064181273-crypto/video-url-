@@ -70,6 +70,11 @@ def _release_tree(root: Path) -> Path:
     dependencies = release / "packaging" / "dependencies.json"
     dependencies.parent.mkdir(parents=True)
     dependencies.write_bytes((ROOT / "packaging" / "dependencies.json").read_bytes())
+    modelfile = release / "packaging" / "ollama" / "Modelfile.hy-mt2-1.8b-q4km"
+    modelfile.parent.mkdir()
+    modelfile.write_bytes(
+        (ROOT / "packaging" / "ollama" / "Modelfile.hy-mt2-1.8b-q4km").read_bytes()
+    )
     return release
 
 

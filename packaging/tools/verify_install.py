@@ -181,6 +181,7 @@ def _validate_staging_core(
         "backend_metadata": "backend/pyproject.toml",
         "backend_package": "backend/src/lvt",
         "dependencies_manifest": "packaging/dependencies.json",
+        "hy_mt2_modelfile": "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km",
         "doctor_command": (
             "scripts/doctor.ps1" if selected.system == "win32" else "scripts/doctor.command"
         ),

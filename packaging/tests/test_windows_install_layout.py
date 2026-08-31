@@ -157,6 +157,9 @@ def test_windows_release_core_canonicalizes_selected_manifest(tmp_path: Path) ->
     assert canonical["target"] == "windows-x64"
     assert not (candidate / "packaging/dependencies.windows-x64.json").exists()
     assert (candidate / "packaging/tools/runtime_layout.py").is_file()
+    assert (
+        candidate / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km"
+    ).read_bytes() == (ROOT / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km").read_bytes()
 
 
 def test_provision_rejects_manifest_for_another_platform(tmp_path: Path) -> None:
@@ -327,6 +330,9 @@ def test_windows_staging_core_uses_native_tool_and_venv_paths(
         ROOT / "packaging/dependencies.windows-x64.json",
         source / "packaging/dependencies.windows-x64.json",
     )
+    modelfile = source / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km"
+    modelfile.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km", modelfile)
     for name in (*install.PACKAGING_TOOLS, *install.WINDOWS_PACKAGING_TOOLS):
         destination = source / "packaging/tools" / name
         destination.parent.mkdir(parents=True, exist_ok=True)

@@ -29,6 +29,7 @@ COPY_PATHS = (
     "backend/pyproject.toml",
     "backend/uv.lock",
     "backend/src",
+    "packaging/ollama/Modelfile.hy-mt2-1.8b-q4km",
     "scripts",
 )
 PACKAGING_TOOLS = (
