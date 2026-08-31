@@ -634,6 +634,8 @@ def test_windows_lifecycle_scripts_require_activated_release_and_no_raw_pid_stop
     assert "verify_install.py" in doctor
     assert "--target" in doctor
     assert "windows-x64" in doctor
+    assert "Write-Host $Line" in common
+    assert "$Output | Write-Output" not in common
     for forbidden in ("taskkill", "Stop-Process", "Invoke-Expression"):
         assert forbidden not in combined
 

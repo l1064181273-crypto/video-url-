@@ -160,7 +160,9 @@ function Invoke-LvtLifecycle {
         --release-root $Context.ReleaseRoot
     $ExitCode = $LASTEXITCODE
     if ($null -ne $Output) {
-        $Output | Write-Output
+        foreach ($Line in @($Output)) {
+            Write-Host $Line
+        }
     }
     return $ExitCode
 }
