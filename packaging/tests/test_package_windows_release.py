@@ -87,6 +87,7 @@ def test_windows_zip_is_reproducible_and_contains_only_windows_runtime(
 
     digest = hashlib.sha256(first.read_bytes()).hexdigest()
     checksum = first.with_suffix(first.suffix + ".sha256")
+    assert b"\r\n" not in checksum.read_bytes()
     assert checksum.read_text(encoding="ascii") == f"{digest}  {first.name}\n"
 
 

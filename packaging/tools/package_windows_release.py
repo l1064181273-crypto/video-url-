@@ -181,7 +181,7 @@ def package_windows_release(output_dir: Path) -> Path:
             archive.writestr(info, _content(source), compress_type=zipfile.ZIP_DEFLATED)
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     checksum = archive_path.with_suffix(archive_path.suffix + ".sha256")
-    checksum.write_text(f"{digest}  {archive_path.name}\n", encoding="ascii")
+    checksum.write_bytes(f"{digest}  {archive_path.name}\n".encode("ascii"))
     return archive_path
 
 
