@@ -45,7 +45,22 @@ try {
     Push-Location $Root
     try {
         Invoke-EvidenceCommand "ruff-packaging" {
-            & $Python -m ruff check --config backend/pyproject.toml packaging/tools packaging/tests
+            & $Python -m ruff check --config backend/pyproject.toml `
+                packaging/tools `
+                packaging/tests `
+                scripts/windows-asr-smoke.py
+        }
+        Invoke-EvidenceCommand "ruff-backend" {
+            Push-Location (Join-Path $Root "backend")
+            try {
+                & $Python -m ruff check src tests ../scripts
+            }
+            finally {
+                Pop-Location
+            }
+        }
+        Invoke-EvidenceCommand "mypy-backend" {
+            & $Python -m mypy --config-file backend/pyproject.toml backend/src
         }
         Invoke-EvidenceCommand "pytest-windows" {
             $env:PYTHONPATH = "backend/src"

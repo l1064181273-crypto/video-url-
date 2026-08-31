@@ -872,7 +872,7 @@ def _write_install_state(data_root: Path, version: str) -> None:
         os.close(descriptor)
     published = False
     try:
-        partial.rename(state_path)
+        partial.replace(state_path)
         published = True
         _fsync_directory(state_path.parent)
     except Exception:

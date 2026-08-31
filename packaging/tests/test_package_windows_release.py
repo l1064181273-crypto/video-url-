@@ -99,6 +99,8 @@ def test_windows_native_acceptance_workflow_is_manual_and_archives_evidence() ->
     assert "full_model_install" in workflow
     assert "./scripts/windows-acceptance.ps1" in workflow
     assert "actions/upload-artifact@v4" in workflow
+    assert "ruff-backend" in acceptance
+    assert "mypy-backend" in acceptance
     assert "native-staging-core" in acceptance
     assert "native-dependencies" in acceptance
     assert "native-asr-cpu" in acceptance
