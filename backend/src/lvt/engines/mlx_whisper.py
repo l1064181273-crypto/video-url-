@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import wave
 from collections.abc import Callable
-from importlib import metadata
+from importlib import import_module, metadata
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,7 @@ TranscribeFn = Callable[..., dict[str, Any]]
 
 
 def _default_transcribe(audio_path: str, **kwargs: Any) -> dict[str, Any]:
-    import mlx_whisper  # type: ignore[import-untyped]
+    mlx_whisper = import_module("mlx_whisper")
 
     result: dict[str, Any] = mlx_whisper.transcribe(audio_path, **kwargs)
     return result

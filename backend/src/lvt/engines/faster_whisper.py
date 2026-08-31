@@ -4,7 +4,7 @@ import os
 import threading
 import wave
 from collections.abc import Callable, Iterable
-from importlib import metadata
+from importlib import import_module, metadata
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -36,9 +36,9 @@ ModelFactory = Callable[..., FasterWhisperModel]
 
 
 def _default_model_factory(model_name: str, **kwargs: Any) -> FasterWhisperModel:
-    from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+    whisper_model = import_module("faster_whisper").WhisperModel
 
-    return cast(FasterWhisperModel, WhisperModel(model_name, **kwargs))
+    return cast(FasterWhisperModel, whisper_model(model_name, **kwargs))
 
 
 class FasterWhisperASREngine:

@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 
 class CancellationToken:
@@ -470,8 +470,8 @@ class SubprocessExecutor:
         self._wait_for_group_exit(pgid, term_deadline)
 
         if self._group_exists(pgid):
-            stopped_by = signal.SIGKILL
-            self._signal_group(pgid, signal.SIGKILL)
+            stopped_by = self._force_signal()
+            self._signal_group(pgid, stopped_by)
             kill_deadline = time.monotonic() + self.kill_wait
             if captured is None:
                 try:
@@ -511,7 +511,7 @@ class SubprocessExecutor:
         try:
             stdout, stderr = process.communicate(timeout=self.terminate_grace)
         except subprocess.TimeoutExpired:
-            stopped_by = signal.SIGKILL
+            stopped_by = self._force_signal()
             process.kill()
             try:
                 stdout, stderr = process.communicate(timeout=self.kill_wait)
@@ -533,8 +533,11 @@ class SubprocessExecutor:
 
     @staticmethod
     def _group_exists(pgid: int) -> bool:
+        kill_group = getattr(os, "killpg", None)
+        if kill_group is None:
+            return False
         try:
-            os.killpg(pgid, 0)
+            kill_group(pgid, 0)
         except ProcessLookupError:
             return False
         except PermissionError:
@@ -543,8 +546,15 @@ class SubprocessExecutor:
 
     @staticmethod
     def _signal_group(pgid: int, requested_signal: signal.Signals) -> None:
+        kill_group = getattr(os, "killpg", None)
+        if kill_group is None:
+            return
         with suppress(ProcessLookupError):
-            os.killpg(pgid, requested_signal)
+            kill_group(pgid, requested_signal)
+
+    @staticmethod
+    def _force_signal() -> signal.Signals:
+        return cast(signal.Signals, getattr(signal, "SIGKILL", signal.SIGTERM))
 
     @staticmethod
     def _decode(value: bytes) -> str:

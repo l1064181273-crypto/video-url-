@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -66,6 +67,14 @@ class JobFileStore:
             or artifact_parts[-1] != kind
         ):
             raise UnsafeJobPathError("artifact is outside the completed export stage")
+        if sys.platform == "win32":
+            return self._open_artifact_windows(
+                job_id=job_id,
+                kind=kind,
+                relative_path=relative_path,
+                manifest_parts=manifest_parts,
+                artifact_parts=artifact_parts,
+            )
 
         root_fd = self._open_root_fd()
         stage_fd = -1
@@ -122,6 +131,66 @@ class JobFileStore:
             if stage_fd >= 0:
                 os.close(stage_fd)
             os.close(root_fd)
+
+    def _open_artifact_windows(
+        self,
+        *,
+        job_id: str,
+        kind: str,
+        relative_path: str,
+        manifest_parts: tuple[str, ...],
+        artifact_parts: tuple[str, ...],
+    ) -> BinaryIO:
+        stage_parts = manifest_parts[:-1]
+        artifact_subparts = artifact_parts[len(stage_parts) :]
+        stage = self.work_root.joinpath(*stage_parts)
+        artifact_parent = stage.joinpath(*artifact_subparts[:-1])
+        root_identity = self._windows_directory_identity(self.work_root)
+        self._windows_validate_chain(self.work_root, stage_parts, directories_only=True)
+        stage_identity = self._windows_directory_identity(stage)
+        self._windows_require_regular(stage / ".published")
+        manifest = self._windows_read_json(stage / "manifest.json")
+        if self._windows_directory_identity(self.work_root) != root_identity:
+            raise UnsafeJobPathError("work root directory was replaced")
+        if self._windows_directory_identity(stage) != stage_identity:
+            raise UnsafeJobPathError("export stage directory was replaced")
+        manifest_output = self._manifest_output(manifest, kind, relative_path)
+        if (
+            manifest.get("job_id") != job_id
+            or manifest.get("run_id") != manifest_parts[2]
+            or manifest.get("stage") != "export_manifest"
+            or manifest_output is None
+        ):
+            raise UnsafeJobPathError("artifact does not match export manifest")
+        self._windows_validate_chain(
+            stage,
+            artifact_subparts[:-1],
+            directories_only=True,
+        )
+        parent_identity = self._windows_directory_identity(artifact_parent)
+        if self.artifact_open_hook is not None:
+            self.artifact_open_hook()
+        if self._windows_directory_identity(self.work_root) != root_identity:
+            raise UnsafeJobPathError("work root directory was replaced")
+        if self._windows_directory_identity(stage) != stage_identity:
+            raise UnsafeJobPathError("export stage directory was replaced")
+        if self._windows_directory_identity(artifact_parent) != parent_identity:
+            raise UnsafeJobPathError("artifact parent directory was replaced")
+        stream = self._windows_open_verified_file(
+            artifact_parent / artifact_subparts[-1],
+            manifest_output,
+        )
+        try:
+            if self._windows_directory_identity(self.work_root) != root_identity:
+                raise UnsafeJobPathError("work root directory was replaced")
+            if self._windows_directory_identity(stage) != stage_identity:
+                raise UnsafeJobPathError("export stage directory was replaced")
+            if self._windows_directory_identity(artifact_parent) != parent_identity:
+                raise UnsafeJobPathError("artifact parent directory was replaced")
+        except BaseException:
+            stream.close()
+            raise
+        return stream
 
     def prepare_delete(
         self,
@@ -196,10 +265,124 @@ class JobFileStore:
                 raise UnsafeJobPathError("stored path contains a symlink")
         return current
 
+    @staticmethod
+    def _windows_identity(path: Path, *, directory: bool) -> tuple[int, int, int, int]:
+        metadata = path.lstat()
+        attributes = int(getattr(metadata, "st_file_attributes", 0))
+        if (
+            path.is_symlink()
+            or attributes & 0x400
+            or (directory and not stat.S_ISDIR(metadata.st_mode))
+            or (not directory and not stat.S_ISREG(metadata.st_mode))
+        ):
+            raise UnsafeJobPathError("artifact path contains an unsafe entry")
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        )
+
+    @classmethod
+    def _windows_directory_identity(cls, path: Path) -> tuple[int, int]:
+        identity = cls._windows_identity(path, directory=True)
+        return identity[0], identity[1]
+
+    @classmethod
+    def _windows_validate_chain(
+        cls,
+        root: Path,
+        parts: tuple[str, ...],
+        *,
+        directories_only: bool,
+    ) -> None:
+        cls._windows_identity(root, directory=True)
+        current = root
+        for index, part in enumerate(parts):
+            current /= part
+            cls._windows_identity(
+                current,
+                directory=directories_only or index < len(parts) - 1,
+            )
+
+    @classmethod
+    def _windows_require_regular(cls, path: Path) -> None:
+        cls._windows_identity(path, directory=False)
+
+    @classmethod
+    def _windows_read_json(cls, path: Path) -> dict[str, Any]:
+        identity = cls._windows_identity(path, directory=False)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        try:
+            if cls._descriptor_identity(descriptor) != identity:
+                raise UnsafeJobPathError("manifest changed during open")
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = -1
+                value = json.load(handle)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if not isinstance(value, dict):
+            raise UnsafeJobPathError("manifest must be an object")
+        return value
+
+    @classmethod
+    def _windows_open_verified_file(
+        cls,
+        path: Path,
+        manifest_output: dict[str, Any],
+    ) -> BinaryIO:
+        named_before = cls._windows_identity(path, directory=False)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = cls._descriptor_identity(descriptor)
+            named_after = cls._windows_identity(path, directory=False)
+            if opened != named_before or named_after != named_before:
+                raise UnsafeJobPathError("artifact changed during open")
+            expected_size = manifest_output.get("byte_size")
+            expected_sha256 = manifest_output.get("sha256")
+            if (
+                type(expected_size) is not int
+                or expected_size < 0
+                or not isinstance(expected_sha256, str)
+                or len(expected_sha256) != 64
+                or opened[2] != expected_size
+            ):
+                raise UnsafeJobPathError("artifact manifest integrity fields are invalid")
+            stream = os.fdopen(descriptor, "rb")
+            descriptor = -1
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                stream.close()
+                raise UnsafeJobPathError("artifact hash does not match export manifest")
+            stream.seek(0)
+            return stream
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    @staticmethod
+    def _descriptor_identity(descriptor: int) -> tuple[int, int, int, int]:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise UnsafeJobPathError("artifact is not a regular file")
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        )
+
     def _open_root_fd(self) -> int:
         return os.open(
             self.work_root,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
 
     @staticmethod
@@ -209,7 +392,9 @@ class JobFileStore:
             for part in parts:
                 next_fd = os.open(
                     part,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
                     dir_fd=current_fd,
                 )
                 os.close(current_fd)
@@ -227,7 +412,7 @@ class JobFileStore:
     ) -> BinaryIO:
         file_fd = os.open(
             name,
-            os.O_RDONLY | os.O_NOFOLLOW,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=directory_fd,
         )
         try:
@@ -268,7 +453,7 @@ class JobFileStore:
     def _require_regular_at(directory_fd: int, name: str) -> None:
         descriptor = os.open(
             name,
-            os.O_RDONLY | os.O_NOFOLLOW,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=directory_fd,
         )
         try:
@@ -281,7 +466,7 @@ class JobFileStore:
     def _read_json_at(directory_fd: int, name: str) -> dict[str, Any]:
         descriptor = os.open(
             name,
-            os.O_RDONLY | os.O_NOFOLLOW,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=directory_fd,
         )
         with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
