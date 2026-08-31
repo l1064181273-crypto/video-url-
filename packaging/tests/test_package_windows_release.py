@@ -67,9 +67,27 @@ def test_windows_zip_is_reproducible_and_contains_only_windows_runtime(
             assert b"\r\n" in content
             assert b"\n" not in content.replace(b"\r\n", b"")
         guide = archive.read(f"{root}/新手使用说明.txt").decode("utf-8")
-        assert "chrome://extensions" in guide
-        assert "启动 Local Video Transcriber.cmd" in guide
-        assert "%LOCALAPPDATA%" in guide
+        for required_instruction in (
+            "必须先解压 ZIP",
+            "至少预留 10 GB",
+            "大约要下载 4.3 GB",
+            "WINDOWS_READY",
+            "chrome://extensions",
+            "加载已解压的扩展程序",
+            "%LOCALAPPDATA%\\LocalVideoTranscriber\\extension",
+            "hbcpdfclnpdpiamdelgbpkpiaemmbljg",
+            "已自动配对，无需手动输入 Token",
+            "提交视频网址",
+            "点击“提交任务”",
+            "下载结果",
+            "启动 Local Video Transcriber.cmd",
+            "STOP_COMPLETE",
+            "升级到新版本",
+            "彻底卸载",
+            "不要使用 taskkill",
+        ):
+            assert required_instruction in guide
+        assert "选择电脑里的本地视频文件" in guide
         lowered = "\n".join(names).lower()
         for forbidden in (
             ".git/",
