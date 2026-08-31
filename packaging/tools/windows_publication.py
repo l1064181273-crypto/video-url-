@@ -152,12 +152,17 @@ class NativeWindowsPublicationApi:
         _validate_path(path / "_")
         handles: list[object] = []
         current = PureWindowsPath(path.anchor)
+        parts = path.parts[1:]
         try:
-            for part in path.parts[1:]:
+            for index, part in enumerate(parts):
                 current /= part
                 handle = self._open_path(
                     current,
-                    access=GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+                    access=(
+                        GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE
+                        if index == len(parts) - 1
+                        else FILE_READ_ATTRIBUTES | SYNCHRONIZE
+                    ),
                     share=FILE_SHARE_READ | FILE_SHARE_WRITE,
                 )
                 information = self._information(handle)

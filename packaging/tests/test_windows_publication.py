@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,7 +10,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "packaging/tools"))
 
 from windows_publication import (  # noqa: E402
+    FILE_ATTRIBUTE_DIRECTORY,
+    FILE_READ_ATTRIBUTES,
+    GENERIC_READ,
+    GENERIC_WRITE,
+    SYNCHRONIZE,
     FileIdentity,
+    NativeWindowsPublicationApi,
     WindowsPublicationError,
     flush_directory,
     rename_exclusive,
@@ -70,6 +77,41 @@ class FakePublicationApi:
 
 SOURCE = PureWindowsPath(r"C:\LVT\app\candidate")
 DESTINATION = PureWindowsPath(r"C:\LVT\app\current")
+
+
+def test_native_parent_chain_only_requests_write_access_for_leaf_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = object.__new__(NativeWindowsPublicationApi)
+    opened: list[tuple[PureWindowsPath, int]] = []
+
+    def open_path(
+        path: PureWindowsPath,
+        *,
+        access: int,
+        share: int,
+    ) -> object:
+        del share
+        opened.append((path, access))
+        return ("directory", path)
+
+    monkeypatch.setattr(api, "_open_path", open_path)
+    monkeypatch.setattr(
+        api,
+        "_information",
+        lambda _handle: SimpleNamespace(dwFileAttributes=FILE_ATTRIBUTE_DIRECTORY),
+    )
+    monkeypatch.setattr(api, "close_handle", lambda _handle: None)
+
+    handles = api.open_parent_chain(
+        PureWindowsPath(r"C:\Users\standard\AppData\Local\LocalVideoTranscriber")
+    )
+
+    assert len(handles) == 5
+    assert [access for _, access in opened[:-1]] == [
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE
+    ] * 4
+    assert opened[-1][1] == GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE
 
 
 def test_directory_flush_uses_bound_handle_and_closes_chain() -> None:
