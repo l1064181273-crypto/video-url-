@@ -116,6 +116,11 @@ try {
                     -Phase dependencies `
                     -DataRoot $DataRoot
             }
+            Invoke-EvidenceCommand "native-asr-cpu" {
+                & (Join-Path $DataRoot "app/releases/0.1.1/.venv/Scripts/python.exe") `
+                    (Join-Path $Root "scripts/windows-asr-smoke.py") `
+                    --model-directory (Join-Path $DataRoot "models/asr/faster-whisper-small")
+            }
             Invoke-EvidenceCommand "native-publish" {
                 & (Join-Path $PackageRoot "scripts/install.ps1") `
                     -Phase publish `
@@ -167,14 +172,41 @@ finally {
             $Failed = $true
         }
     }
+    Start-Sleep -Seconds 1
     $Listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalPort -in @(8765, 11435) } |
         Select-Object LocalAddress, LocalPort, OwningProcess
     ConvertTo-Json -InputObject @($Listeners) -Depth 3 | Set-Content -LiteralPath (
         Join-Path $Evidence "final-listeners.json"
     )
+    if ($Listeners) {
+        $Failed = $true
+    }
+    $Processes = @()
+    try {
+        $DataRootPattern = [Regex]::Escape($DataRoot)
+        $Processes = @(
+            Get-CimInstance Win32_Process -ErrorAction Stop |
+                Where-Object {
+                    $null -ne $_.CommandLine -and $_.CommandLine -match $DataRootPattern
+                } |
+                Select-Object ProcessId, Name
+        )
+    }
+    catch {
+        $Failed = $true
+        $_ | Out-String | Set-Content -LiteralPath (
+            Join-Path $Evidence "final-process-audit-error.txt"
+        )
+    }
+    ConvertTo-Json -InputObject @($Processes) -Depth 3 | Set-Content -LiteralPath (
+        Join-Path $Evidence "final-processes.json"
+    )
+    if ($Processes) {
+        $Failed = $true
+    }
     Remove-Item -LiteralPath $ExtractRoot -Recurse -Force -ErrorAction SilentlyContinue
-    if (-not $Listeners) {
+    if (-not $Listeners -and -not $Processes) {
         Remove-Item -LiteralPath $DataRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

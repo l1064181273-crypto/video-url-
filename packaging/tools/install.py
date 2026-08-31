@@ -80,6 +80,9 @@ class InstallError(RuntimeError):
 
 def _fsync_directory(path: Path) -> None:
     if sys.platform == "win32":
+        from windows_publication import NativeWindowsPublicationApi, flush_directory
+
+        flush_directory(PureWindowsPath(str(path)), NativeWindowsPublicationApi())
         return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:

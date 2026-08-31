@@ -101,9 +101,12 @@ def test_windows_native_acceptance_workflow_is_manual_and_archives_evidence() ->
     assert "actions/upload-artifact@v4" in workflow
     assert "native-staging-core" in acceptance
     assert "native-dependencies" in acceptance
+    assert "native-asr-cpu" in acceptance
+    assert "windows-asr-smoke.py" in acceptance
     assert "native-publish" in acceptance
     assert "native-runtime-doctor" in acceptance
     assert "chrome-e2e" in acceptance
     assert "Get-NetTCPConnection" in acceptance
+    assert "Get-CimInstance Win32_Process" in acceptance
     assert "taskkill" not in acceptance
     assert "Stop-Process" not in acceptance

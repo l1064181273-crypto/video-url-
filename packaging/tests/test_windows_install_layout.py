@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import struct
 import sys
@@ -389,6 +390,20 @@ def test_staging_validator_import_does_not_require_process_backend(
     assert callable(module.validate_install)
 
 
+def test_windows_token_metadata_does_not_require_posix_uid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = tmp_path / "config" / "api-token"
+    token.parent.mkdir()
+    token.write_bytes(b"a" * 64 + b"\n")
+    monkeypatch.delattr(os, "getuid", raising=False)
+
+    check = verify_install._validate_token_metadata(tmp_path, runtime_layout("win32"))
+
+    assert check.status is verify_install.CheckStatus.OK
+
+
 def test_lifecycle_lock_import_does_not_require_fcntl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -581,8 +596,9 @@ def test_windows_staging_launcher_is_pinned_and_non_elevating() -> None:
     assert str(python["size"]) in installer
     assert "Get-FileHash" in installer
     assert "WindowsIdentity" in installer
-    assert "icacls.exe" in installer
-    assert "/inheritance:r" in installer
+    assert "SetAccessRuleProtection($true, $false)" in installer
+    assert "S-1-5-18" in installer
+    assert "Get-ChildItem -LiteralPath $LiteralPath -Force -Recurse" in installer
     assert "Everyone" not in installer
     assert "packaging/tools/install.py" in installer
     assert 'string]$Phase = "all"' in installer
@@ -605,6 +621,7 @@ def test_windows_lifecycle_scripts_require_activated_release_and_no_raw_pid_stop
     combined = "\n".join((common, start, stop, doctor))
 
     assert "core.activated" in common
+    assert "Assert-LvtPrivateAcl" in common
     assert "windows_lifecycle.py" in common
     assert "Invoke-LvtLifecycle" in start
     assert "Invoke-LvtLifecycle" in stop

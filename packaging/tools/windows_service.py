@@ -20,7 +20,11 @@ from windows_process import (
     open_verified_process,
     process_identity_from_dict,
 )
-from windows_publication import NativeWindowsPublicationApi, rename_exclusive
+from windows_publication import (
+    NativeWindowsPublicationApi,
+    flush_directory,
+    rename_exclusive,
+)
 
 SERVICE_PORTS = {
     "backend": 8765,
@@ -161,6 +165,7 @@ def _read_service_record(path: Path) -> WindowsServiceRecord:
 
 def _fsync_directory(path: Path) -> None:
     if sys.platform == "win32":
+        flush_directory(PureWindowsPath(str(path)), NativeWindowsPublicationApi())
         return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:

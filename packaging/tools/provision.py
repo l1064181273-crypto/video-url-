@@ -40,6 +40,9 @@ class ProvisionError(RuntimeError):
 
 def _fsync_directory(path: Path) -> None:
     if sys.platform == "win32":
+        from windows_publication import NativeWindowsPublicationApi, flush_directory
+
+        flush_directory(PureWindowsPath(str(path)), NativeWindowsPublicationApi())
         return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -112,7 +115,13 @@ def _prepare_roots(data_root: Path, release_root: Path) -> None:
         )
     except (OSError, ValueError) as exc:
         raise ProvisionError("release candidate is outside the application root") from exc
-    for relative in ("app/downloads", "app/tools", "models", "models/quarantine", "runtime"):
+    for relative in (
+        "app/downloads",
+        "app/tools",
+        "models",
+        "models/quarantine",
+        "runtime",
+    ):
         path = _safe_join(data_root, relative)
         if path.exists() or path_is_link_like(path):
             if path_is_link_like(path) or not path.is_dir():
@@ -503,7 +512,10 @@ def _quarantine(data_root: Path, path: Path, label: str) -> None:
         return
     models_root = _safe_join(data_root, "models")
     resolved_parent = path.parent.resolve(strict=True)
-    allowed_roots = (models_root.resolve(strict=True), (data_root / "app").resolve(strict=True))
+    allowed_roots = (
+        models_root.resolve(strict=True),
+        (data_root / "app").resolve(strict=True),
+    )
     if not any(_is_relative_to(resolved_parent, root) for root in allowed_roots):
         raise ProvisionError("quarantine source is outside controlled roots")
     destination_root = _safe_join(

@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "packaging/tools"))
 from windows_publication import (  # noqa: E402
     FileIdentity,
     WindowsPublicationError,
+    flush_directory,
     rename_exclusive,
 )
 
@@ -69,6 +70,17 @@ class FakePublicationApi:
 
 SOURCE = PureWindowsPath(r"C:\LVT\app\candidate")
 DESTINATION = PureWindowsPath(r"C:\LVT\app\current")
+
+
+def test_directory_flush_uses_bound_handle_and_closes_chain() -> None:
+    api = FakePublicationApi()
+
+    flush_directory(SOURCE.parent, api)
+
+    flush_index = next(index for index, call in enumerate(api.calls) if call[0] == "flush")
+    close_indices = [index for index, call in enumerate(api.calls) if call[0] == "close"]
+    assert close_indices
+    assert flush_index < min(close_indices)
 
 
 def test_handle_bound_rename_is_exclusive_and_flushed_before_close() -> None:

@@ -10,10 +10,13 @@ from typing import Protocol
 CREATE_SUSPENDED = 0x00000004
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
 CREATE_NO_WINDOW = 0x08000000
+EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 STARTF_USESTDHANDLES = 0x00000100
 STD_INPUT_HANDLE = -10
 STD_OUTPUT_HANDLE = -11
 STD_ERROR_HANDLE = -12
+PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
+DUPLICATE_SAME_ACCESS = 0x00000002
 WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 258
 STILL_ACTIVE = 259
@@ -21,6 +24,7 @@ JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_TERMINATE = 0x0008
 ERROR_ALREADY_EXISTS = 183
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 JOB_NAME = re.compile(r"LocalVideoTranscriber-[a-z]+-[0-9a-f]{32}")
 
 
@@ -161,6 +165,13 @@ class _StartupInfoW(ctypes.Structure):
     ]
 
 
+class _StartupInfoExW(ctypes.Structure):
+    _fields_ = [
+        ("StartupInfo", _StartupInfoW),
+        ("lpAttributeList", ctypes.c_void_p),
+    ]
+
+
 class _ProcessInformation(ctypes.Structure):
     _fields_ = [
         ("hProcess", ctypes.c_void_p),
@@ -268,50 +279,147 @@ class NativeWindowsJobApi:
         environment: dict[str, str],
         cwd: str,
     ) -> tuple[object, object, int]:
-        startup = _StartupInfoW()
-        startup.cb = ctypes.sizeof(startup)
+        startup = _StartupInfoExW()
+        startup.StartupInfo.cb = ctypes.sizeof(startup)
         get_standard_handle = self.kernel32.GetStdHandle
         get_standard_handle.argtypes = [ctypes.c_int32]
         get_standard_handle.restype = ctypes.c_void_p
-        startup.dwFlags = STARTF_USESTDHANDLES
-        startup.hStdInput = get_standard_handle(STD_INPUT_HANDLE)
-        startup.hStdOutput = get_standard_handle(STD_OUTPUT_HANDLE)
-        startup.hStdError = get_standard_handle(STD_ERROR_HANDLE)
-        process = _ProcessInformation()
-        command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
-        environment_block = "\0".join(
-            f"{key}={value}"
-            for key, value in sorted(environment.items(), key=lambda item: item[0].upper())
-        )
-        environment_buffer = ctypes.create_unicode_buffer(environment_block + "\0\0")
-        create = self.kernel32.CreateProcessW
-        create.argtypes = [
-            ctypes.c_wchar_p,
-            ctypes.c_wchar_p,
+        get_current_process = self.kernel32.GetCurrentProcess
+        get_current_process.argtypes = []
+        get_current_process.restype = ctypes.c_void_p
+        duplicate_handle = self.kernel32.DuplicateHandle
+        duplicate_handle.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint32,
             ctypes.c_int,
             ctypes.c_uint32,
-            ctypes.c_void_p,
-            ctypes.c_wchar_p,
-            ctypes.POINTER(_StartupInfoW),
-            ctypes.POINTER(_ProcessInformation),
         ]
-        create.restype = ctypes.c_int
-        if not create(
-            command[0],
-            command_line,
-            None,
-            None,
-            1,
-            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-            environment_buffer,
-            cwd,
-            ctypes.byref(startup),
-            ctypes.byref(process),
-        ):
-            self._raise_last_error("CreateProcessW failed")
-        return int(process.hProcess), int(process.hThread), int(process.dwProcessId)
+        duplicate_handle.restype = ctypes.c_int
+        current_process = get_current_process()
+        inherited_handles: list[int] = []
+        attribute_buffer: ctypes.Array[ctypes.c_char] | None = None
+        attribute_initialized = False
+        process = _ProcessInformation()
+        try:
+            for identifier in (STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE):
+                source = get_standard_handle(identifier)
+                if not source or int(source) == INVALID_HANDLE_VALUE:
+                    raise WindowsJobError("standard process handle is unavailable")
+                duplicate = ctypes.c_void_p()
+                if not duplicate_handle(
+                    current_process,
+                    ctypes.c_void_p(source),
+                    current_process,
+                    ctypes.byref(duplicate),
+                    0,
+                    1,
+                    DUPLICATE_SAME_ACCESS,
+                ):
+                    self._raise_last_error("DuplicateHandle failed")
+                if duplicate.value is None:
+                    raise WindowsJobError("duplicated process handle is unavailable")
+                inherited_handles.append(int(duplicate.value))
+
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES
+            startup.StartupInfo.hStdInput = inherited_handles[0]
+            startup.StartupInfo.hStdOutput = inherited_handles[1]
+            startup.StartupInfo.hStdError = inherited_handles[2]
+            handle_list = (ctypes.c_void_p * len(inherited_handles))(*inherited_handles)
+
+            initialize_attributes = self.kernel32.InitializeProcThreadAttributeList
+            initialize_attributes.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_size_t),
+            ]
+            initialize_attributes.restype = ctypes.c_int
+            attribute_size = ctypes.c_size_t()
+            initialize_attributes(None, 1, 0, ctypes.byref(attribute_size))
+            if attribute_size.value == 0:
+                self._raise_last_error("InitializeProcThreadAttributeList sizing failed")
+            attribute_buffer = ctypes.create_string_buffer(attribute_size.value)
+            attribute_pointer = ctypes.cast(attribute_buffer, ctypes.c_void_p)
+            if not initialize_attributes(
+                attribute_pointer,
+                1,
+                0,
+                ctypes.byref(attribute_size),
+            ):
+                self._raise_last_error("InitializeProcThreadAttributeList failed")
+            attribute_initialized = True
+            startup.lpAttributeList = attribute_pointer.value
+
+            update_attribute = self.kernel32.UpdateProcThreadAttribute
+            update_attribute.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.c_size_t,
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            update_attribute.restype = ctypes.c_int
+            if not update_attribute(
+                attribute_pointer,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                ctypes.cast(handle_list, ctypes.c_void_p),
+                ctypes.sizeof(handle_list),
+                None,
+                None,
+            ):
+                self._raise_last_error("UpdateProcThreadAttribute failed")
+
+            command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
+            environment_block = "\0".join(
+                f"{key}={value}"
+                for key, value in sorted(environment.items(), key=lambda item: item[0].upper())
+            )
+            environment_buffer = ctypes.create_unicode_buffer(environment_block + "\0\0")
+            create = self.kernel32.CreateProcessW
+            create.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(_ProcessInformation),
+            ]
+            create.restype = ctypes.c_int
+            if not create(
+                command[0],
+                command_line,
+                None,
+                None,
+                1,
+                CREATE_SUSPENDED
+                | CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW
+                | EXTENDED_STARTUPINFO_PRESENT,
+                environment_buffer,
+                cwd,
+                ctypes.byref(startup),
+                ctypes.byref(process),
+            ):
+                self._raise_last_error("CreateProcessW failed")
+            return int(process.hProcess), int(process.hThread), int(process.dwProcessId)
+        finally:
+            if attribute_initialized and startup.lpAttributeList:
+                delete_attributes = self.kernel32.DeleteProcThreadAttributeList
+                delete_attributes.argtypes = [ctypes.c_void_p]
+                delete_attributes.restype = None
+                delete_attributes(ctypes.c_void_p(startup.lpAttributeList))
+            for handle in reversed(inherited_handles):
+                self.close_handle(handle)
 
     def assign_process_to_job(self, job: object, process: object) -> None:
         function = self.kernel32.AssignProcessToJobObject

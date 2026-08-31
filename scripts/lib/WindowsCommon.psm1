@@ -43,17 +43,49 @@ function Assert-LvtPathWithoutReparsePoint {
     return $FullPath
 }
 
+function Assert-LvtPrivateAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [switch]$RequireProtected
+    )
+    $Acl = Get-Acl -LiteralPath $LiteralPath
+    if ($RequireProtected -and -not $Acl.AreAccessRulesProtected) {
+        throw "Data root ACL inheritance is enabled"
+    }
+    $CurrentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $AllowedSids = @($CurrentSid, "S-1-5-18")
+    foreach ($Rule in $Acl.Access) {
+        $Sid = $Rule.IdentityReference.Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+        if (
+            $Sid -notin $AllowedSids -or
+            $Rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            ($Rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                [Security.AccessControl.FileSystemRights]::FullControl
+        ) {
+            throw "Data root ACL contains an untrusted access rule"
+        }
+    }
+}
+
 function Get-LvtDataRoot {
     param([string]$Configured = "")
     if (-not [string]::IsNullOrWhiteSpace($Configured)) {
-        return Assert-LvtPathWithoutReparsePoint -LiteralPath $Configured
+        $FullPath = Assert-LvtPathWithoutReparsePoint -LiteralPath $Configured
     }
-    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        throw "LOCALAPPDATA is unavailable"
+    else {
+        if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            throw "LOCALAPPDATA is unavailable"
+        }
+        $FullPath = Assert-LvtPathWithoutReparsePoint -LiteralPath (
+            Join-Path $env:LOCALAPPDATA "LocalVideoTranscriber"
+        )
     }
-    return Assert-LvtPathWithoutReparsePoint -LiteralPath (
-        Join-Path $env:LOCALAPPDATA "LocalVideoTranscriber"
-    )
+    if (Test-Path -LiteralPath $FullPath) {
+        Assert-LvtPrivateAcl -LiteralPath $FullPath -RequireProtected
+    }
+    return $FullPath
 }
 
 function Get-LvtInstalledContext {
@@ -74,6 +106,14 @@ function Get-LvtInstalledContext {
     ) {
         throw "Installed release is not durably activated"
     }
+    $TokenPath = Join-Path $DataRoot "config/api-token"
+    if (
+        -not (Test-Path -LiteralPath $TokenPath -PathType Leaf) -or
+        (Test-LvtReparsePoint -LiteralPath $TokenPath)
+    ) {
+        throw "API token is unavailable"
+    }
+    Assert-LvtPrivateAcl -LiteralPath $TokenPath
     $RelativeRelease = $State.core.release.Replace("/", [IO.Path]::DirectorySeparatorChar)
     $ReleaseRoot = Assert-LvtPathWithoutReparsePoint -LiteralPath (
         Join-Path $DataRoot $RelativeRelease
@@ -126,6 +166,7 @@ function Invoke-LvtLifecycle {
 }
 
 Export-ModuleMember -Function `
+    Assert-LvtPrivateAcl, `
     Assert-LvtPathWithoutReparsePoint, `
     Get-LvtDataRoot, `
     Get-LvtInstalledContext, `

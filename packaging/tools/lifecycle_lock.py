@@ -10,7 +10,7 @@ import stat
 import subprocess
 import sys
 import uuid
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Protocol, TypedDict, cast
 
 try:
@@ -321,6 +321,9 @@ class LifecycleLock:
 
 def _fsync_directory(path: Path) -> None:
     if sys.platform == "win32":
+        from windows_publication import NativeWindowsPublicationApi, flush_directory
+
+        flush_directory(PureWindowsPath(str(path)), NativeWindowsPublicationApi())
         return
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:

@@ -260,7 +260,7 @@ def _validate_installed_prerequisites(
         return checks
     checks.extend(_validate_dependencies(data_root, current_root, selected))
     checks.append(_validate_stable_extension(data_root, current_root))
-    checks.append(_validate_token_metadata(data_root))
+    checks.append(_validate_token_metadata(data_root, selected))
     for relative in ("db", "exports", "logs", "work", "runtime"):
         checks.append(_writable_directory(data_root, relative))
     port_state = probes.ollama_port_state()
@@ -747,16 +747,20 @@ def _resolve_current_release(
     return resolved, [ok("current_release", "CURRENT_RELEASE_VALID", "当前发布版本有效")]
 
 
-def _validate_token_metadata(data_root: Path) -> Check:
+def _validate_token_metadata(
+    data_root: Path,
+    layout: RuntimeLayout | None = None,
+) -> Check:
+    selected = runtime_layout() if layout is None else layout
     token = _safe_join(data_root, "config/api-token")
     try:
         metadata = token.lstat()
         if path_is_link_like(token) or not stat.S_ISREG(metadata.st_mode):
             raise ValueError
-        if (
-            metadata.st_uid != os.getuid()
-            or metadata.st_mode & 0o777 != 0o600
-            or not 32 <= metadata.st_size <= 4096
+        if not 32 <= metadata.st_size <= 4096:
+            raise ValueError
+        if selected.system != "win32" and (
+            metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o600
         ):
             raise ValueError
     except FileNotFoundError:

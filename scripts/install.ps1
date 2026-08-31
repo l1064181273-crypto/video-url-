@@ -50,13 +50,49 @@ function Protect-LvtDataRoot {
     ) {
         throw "Data root is unsafe"
     }
-    $UserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $Icacls = Join-Path $env:SystemRoot "System32/icacls.exe"
-    $UserGrant = "*${UserSid}:(OI)(CI)F"
-    $SystemGrant = "*S-1-5-18:(OI)(CI)F"
-    & $Icacls $LiteralPath "/inheritance:r" "/grant:r" $UserGrant $SystemGrant | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Data root ACL could not be secured"
+    $UserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $SystemSid = [Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    $FullControl = [Security.AccessControl.FileSystemRights]::FullControl
+    $ContainerInheritance = (
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    )
+    $NoInheritance = [Security.AccessControl.InheritanceFlags]::None
+    $NoPropagation = [Security.AccessControl.PropagationFlags]::None
+
+    $ApplyPrivateAcl = {
+        param([Parameter(Mandatory = $true)]$Item)
+        if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Data root contains a reparse point"
+        }
+        if ($Item.PSIsContainer) {
+            $Acl = [Security.AccessControl.DirectorySecurity]::new()
+            $Inheritance = $ContainerInheritance
+        }
+        else {
+            $Acl = [Security.AccessControl.FileSecurity]::new()
+            $Inheritance = $NoInheritance
+        }
+        $Acl.SetAccessRuleProtection($true, $false)
+        $Acl.SetOwner($UserSid)
+        foreach ($Sid in @($UserSid, $SystemSid)) {
+            $Rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                $Sid,
+                $FullControl,
+                $Inheritance,
+                $NoPropagation,
+                $Allow
+            )
+            [void]$Acl.AddAccessRule($Rule)
+        }
+        Set-Acl -LiteralPath $Item.FullName -AclObject $Acl
+    }
+
+    $RootItem = Get-Item -LiteralPath $LiteralPath -Force
+    & $ApplyPrivateAcl $RootItem
+    foreach ($Item in Get-ChildItem -LiteralPath $LiteralPath -Force -Recurse) {
+        & $ApplyPrivateAcl $Item
     }
 }
 

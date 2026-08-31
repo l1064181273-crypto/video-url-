@@ -276,6 +276,39 @@ def _validate_path(path: PureWindowsPath) -> None:
         raise WindowsPublicationError("publication path is unsafe")
 
 
+def flush_directory(
+    path: PureWindowsPath,
+    api: WindowsPublicationApi,
+) -> None:
+    _validate_path(path / "_")
+    handles: list[object] = []
+    operation_error: Exception | None = None
+    try:
+        handles = api.open_parent_chain(path)
+        if not handles:
+            raise WindowsPublicationError("publication directory handle is unavailable")
+        api.flush_directory(handles[-1])
+    except Exception as exc:
+        operation_error = exc
+    cleanup_errors: list[Exception] = []
+    for handle in reversed(handles):
+        try:
+            api.close_handle(handle)
+        except Exception as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+    if operation_error is not None:
+        if cleanup_errors:
+            raise ExceptionGroup(
+                "directory flush and handle cleanup failed",
+                [operation_error, *cleanup_errors],
+            ) from operation_error
+        raise operation_error
+    if len(cleanup_errors) == 1:
+        raise cleanup_errors[0]
+    if cleanup_errors:
+        raise ExceptionGroup("directory flush handle cleanup failed", cleanup_errors)
+
+
 def rename_exclusive(
     source: PureWindowsPath,
     destination: PureWindowsPath,
