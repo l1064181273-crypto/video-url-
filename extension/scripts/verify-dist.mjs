@@ -15,7 +15,7 @@ const TEST_TOKENS = [
 export async function verifyDist(distPath = DEFAULT_DIST) {
   const files = await listFiles(distPath);
   for (const file of files) {
-    const relativePath = relative(distPath, file);
+    const relativePath = relative(distPath, file).replaceAll("\\", "/");
     if (!isAllowedBuildFile(relativePath)) {
       throw new Error(`Unexpected file in extension dist: ${relativePath}`);
     }
@@ -33,7 +33,7 @@ export async function verifyDist(distPath = DEFAULT_DIST) {
       }
     }
   }
-  return files.map((file) => relative(distPath, file)).sort();
+  return files.map((file) => relative(distPath, file).replaceAll("\\", "/")).sort();
 }
 
 function isAllowedBuildFile(relativePath) {
